@@ -1,0 +1,44 @@
+{
+  "object": "page",
+  "entry": [
+    {
+      "id": "111111111111111",
+      "time": 1762300000000,
+      "messaging": [
+        {
+          "sender": {
+            "id": "2222222222222222"
+          },
+          "recipient": {
+            "id": "111111111111111"
+          },
+          "timestamp": 1762300000000,
+          "message": {
+            "mid": "m_images_001",
+            "text": "Mẫu này còn không ạ?",
+            "attachments": [
+              {
+                "type": "image",
+                "payload": {
+                  "url": "https://scontent.xx.fbcdn.net/v/t1.15752-9/501_1001_n.jpg?_nc_cat=1&oh=00_abc&oe=6A000000"
+                }
+              },
+              {
+                "type": "image",
+                "payload": {
+                  "url": "https://scontent.xx.fbcdn.net/v/t1.15752-9/502_1002_n.png?_nc_cat=1&oh=00_def&oe=6A000000"
+                }
+              },
+              {
+                "type": "image",
+                "payload": {
+                  "url": "https://scontent.xx.fbcdn.net/v/t1.15752-9/503_1003_n.jpg?_nc_cat=1&oh=00_ghi&oe=6A000000"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

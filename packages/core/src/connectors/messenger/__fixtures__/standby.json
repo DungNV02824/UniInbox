@@ -1,0 +1,51 @@
+{
+  "object": "page",
+  "entry": [
+    {
+      "id": "111111111111111",
+      "time": 1762300000000,
+      "standby": [
+        {
+          "sender": {
+            "id": "2222222222222222"
+          },
+          "recipient": {
+            "id": "111111111111111"
+          },
+          "timestamp": 1762300000000,
+          "message": {
+            "mid": "m_standby_001",
+            "text": "Tin khi Business Suite đang giữ thread"
+          }
+        },
+        {
+          "sender": {
+            "id": "111111111111111"
+          },
+          "recipient": {
+            "id": "2222222222222222"
+          },
+          "timestamp": 1762300000500,
+          "message": {
+            "is_echo": true,
+            "app_id": "263902037430900",
+            "mid": "m_standby_echo_001",
+            "text": "Trả lời từ Hộp thư Page"
+          }
+        },
+        {
+          "sender": {
+            "id": "2222222222222222"
+          },
+          "recipient": {
+            "id": "111111111111111"
+          },
+          "timestamp": 1762300000600,
+          "read": {
+            "watermark": 1762300000400
+          }
+        }
+      ]
+    }
+  ]
+}

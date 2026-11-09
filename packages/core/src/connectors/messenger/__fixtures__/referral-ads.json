@@ -1,0 +1,35 @@
+{
+  "object": "page",
+  "entry": [
+    {
+      "id": "111111111111111",
+      "time": 1762300000000,
+      "messaging": [
+        {
+          "sender": {
+            "id": "2222222222222222"
+          },
+          "recipient": {
+            "id": "111111111111111"
+          },
+          "timestamp": 1762300000000,
+          "message": {
+            "mid": "m_ads_001",
+            "text": "Tôi quan tâm mẫu tủ bếp trong quảng cáo",
+            "referral": {
+              "ref": "tu-bep-2026",
+              "ad_id": "120200000000000001",
+              "source": "ADS",
+              "type": "OPEN_THREAD",
+              "ads_context_data": {
+                "ad_title": "Tủ bếp gỗ óc chó",
+                "photo_url": "https://scontent.xx.fbcdn.net/v/t1.15752-9/501_1001_n.jpg?_nc_cat=1&oh=00_abc&oe=6A000000",
+                "post_id": "111111111111111_222"
+              }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

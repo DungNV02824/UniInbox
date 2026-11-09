@@ -1,0 +1,9 @@
+{
+  "identities": [
+    {
+      "name": "dezon-dev",
+      "credentials": [{ "accessKey": "dezon", "secretKey": "dezon-s3-secret" }],
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+    }
+  ]
+}

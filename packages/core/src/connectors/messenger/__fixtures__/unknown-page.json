@@ -1,0 +1,24 @@
+{
+  "object": "page",
+  "entry": [
+    {
+      "id": "999000999000999",
+      "time": 1762300000000,
+      "messaging": [
+        {
+          "sender": {
+            "id": "2222222222222222"
+          },
+          "recipient": {
+            "id": "999000999000999"
+          },
+          "timestamp": 1762300000000,
+          "message": {
+            "mid": "m_unknown_001",
+            "text": "Page lạ"
+          }
+        }
+      ]
+    }
+  ]
+}

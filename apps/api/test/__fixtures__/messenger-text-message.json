@@ -1,0 +1,20 @@
+{
+  "object": "page",
+  "entry": [
+    {
+      "id": "111222333444555",
+      "time": 1762300000000,
+      "messaging": [
+        {
+          "sender": { "id": "24000000000000001" },
+          "recipient": { "id": "111222333444555" },
+          "timestamp": 1762300000000,
+          "message": {
+            "mid": "m_test_text_0001",
+            "text": "Chào shop, mẫu sofa góc L còn hàng không ạ?"
+          }
+        }
+      ]
+    }
+  ]
+}

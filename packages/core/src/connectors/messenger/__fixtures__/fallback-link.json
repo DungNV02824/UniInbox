@@ -1,0 +1,35 @@
+{
+  "object": "page",
+  "entry": [
+    {
+      "id": "111111111111111",
+      "time": 1762300000000,
+      "messaging": [
+        {
+          "sender": {
+            "id": "2222222222222222"
+          },
+          "recipient": {
+            "id": "111111111111111"
+          },
+          "timestamp": 1762300000000,
+          "message": {
+            "mid": "m_fallback_001",
+            "attachments": [
+              {
+                "type": "fallback",
+                "payload": {
+                  "url": "https://dezon.vn/mau-phong-khach",
+                  "title": "Mẫu phòng khách hiện đại"
+                }
+              },
+              {
+                "type": "fallback"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

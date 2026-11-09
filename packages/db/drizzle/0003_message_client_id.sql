@@ -1,0 +1,2 @@
+ALTER TABLE "messages" ADD COLUMN "client_id" varchar(100);--> statement-breakpoint
+CREATE INDEX "messages_conversation_client_id_idx" ON "messages" USING btree ("conversation_id","client_id") WHERE "messages"."client_id" IS NOT NULL;

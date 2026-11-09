@@ -1,0 +1,596 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="index, follow" />
+    <title>Hướng dẫn xóa dữ liệu | Data Deletion Instructions – Dezon Inbox</title>
+    <meta
+      name="description"
+      content="Hướng dẫn xóa dữ liệu của Dezon Inbox. Dezon Inbox Data Deletion Instructions."
+    />
+    <style>
+      html {
+        background: #f4f6f8;
+      }
+      body {
+        margin: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- DEZON-POLICY:START -->
+    <style>
+      .dzp {
+        --dzp-accent: #0b6e69;
+        --dzp-accent-soft: #e6f3f2;
+        --dzp-ink: #1d2329;
+        --dzp-muted: #5b6670;
+        --dzp-line: #e3e7eb;
+        --dzp-card: #ffffff;
+        color: var(--dzp-ink);
+        font-family:
+          -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans',
+          sans-serif;
+        font-size: 16px;
+        line-height: 1.65;
+        max-width: 48rem;
+        margin: 0 auto;
+        padding: 1.25rem 1rem 3rem;
+        box-sizing: border-box;
+        -webkit-text-size-adjust: 100%;
+      }
+      .dzp *,
+      .dzp *::before,
+      .dzp *::after {
+        box-sizing: inherit;
+      }
+      .dzp a {
+        color: var(--dzp-accent);
+        text-decoration: underline;
+        text-underline-offset: 2px;
+        word-break: break-word;
+      }
+      .dzp a:hover {
+        text-decoration-thickness: 2px;
+      }
+      .dzp a:focus-visible {
+        outline: 2px solid var(--dzp-accent);
+        outline-offset: 2px;
+        border-radius: 3px;
+      }
+      .dzp .dzp-lang {
+        display: flex;
+        gap: 0.5rem;
+        justify-content: flex-end;
+        margin: 0 0 1rem;
+      }
+      .dzp .dzp-lang a {
+        display: inline-block;
+        padding: 0.35rem 0.9rem;
+        border: 1px solid var(--dzp-line);
+        border-radius: 999px;
+        font-size: 0.875rem;
+        text-decoration: none;
+        color: var(--dzp-ink);
+        background: var(--dzp-card);
+      }
+      .dzp .dzp-lang a:hover {
+        border-color: var(--dzp-accent);
+        color: var(--dzp-accent);
+      }
+      .dzp .dzp-hero {
+        background: linear-gradient(135deg, var(--dzp-accent) 0%, #13504d 100%);
+        color: #fff;
+        border-radius: 16px;
+        padding: 1.75rem 1.5rem;
+        margin: 0 0 1.25rem;
+      }
+      .dzp .dzp-eyebrow {
+        margin: 0 0 0.35rem;
+        font-size: 0.8rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        opacity: 0.85;
+        font-weight: 600;
+      }
+      .dzp .dzp-hero h1 {
+        margin: 0;
+        font-size: 1.75rem;
+        line-height: 1.25;
+        font-weight: 700;
+        color: #fff;
+      }
+      .dzp .dzp-date {
+        margin: 0.6rem 0 0;
+        font-size: 0.9rem;
+        opacity: 0.9;
+      }
+      .dzp .dzp-lead {
+        margin: 1rem 0 0;
+        font-size: 1rem;
+        opacity: 0.95;
+      }
+      .dzp .dzp-hero a {
+        color: #fff;
+      }
+      .dzp .dzp-toc {
+        background: var(--dzp-card);
+        border: 1px solid var(--dzp-line);
+        border-radius: 12px;
+        padding: 1rem 1.25rem;
+        margin: 0 0 1.25rem;
+      }
+      .dzp .dzp-toc p {
+        margin: 0 0 0.4rem;
+        font-weight: 600;
+        font-size: 0.95rem;
+      }
+      .dzp .dzp-toc ol {
+        margin: 0;
+        padding-left: 1.25rem;
+        columns: 2 16rem;
+        column-gap: 2rem;
+      }
+      .dzp .dzp-toc li {
+        margin: 0.15rem 0;
+        break-inside: avoid;
+      }
+      .dzp .dzp-toc a {
+        text-decoration: none;
+      }
+      .dzp .dzp-toc a:hover {
+        text-decoration: underline;
+      }
+      .dzp .dzp-sec {
+        background: var(--dzp-card);
+        border: 1px solid var(--dzp-line);
+        border-radius: 12px;
+        padding: 1.1rem 1.25rem;
+        margin: 0 0 1rem;
+        scroll-margin-top: 1rem;
+      }
+      .dzp h2 {
+        margin: 0 0 0.6rem;
+        font-size: 1.2rem;
+        line-height: 1.35;
+        color: var(--dzp-accent);
+      }
+      .dzp h3 {
+        margin: 1.1rem 0 0.4rem;
+        font-size: 1.02rem;
+        line-height: 1.4;
+      }
+      .dzp p {
+        margin: 0.55rem 0;
+      }
+      .dzp ul,
+      .dzp ol {
+        margin: 0.5rem 0;
+        padding-left: 1.35rem;
+      }
+      .dzp li {
+        margin: 0.3rem 0;
+      }
+      .dzp li > ul {
+        margin: 0.25rem 0;
+      }
+      .dzp strong {
+        font-weight: 650;
+      }
+      .dzp code {
+        font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+        font-size: 0.9em;
+        background: var(--dzp-accent-soft);
+        padding: 0.05em 0.3em;
+        border-radius: 4px;
+      }
+      .dzp .dzp-langblock + .dzp-langblock {
+        margin-top: 2.5rem;
+        padding-top: 2rem;
+        border-top: 2px dashed var(--dzp-line);
+      }
+      .dzp .dzp-foot {
+        margin-top: 2rem;
+        text-align: center;
+        font-size: 0.85rem;
+        color: var(--dzp-muted);
+      }
+      @media (max-width: 480px) {
+        .dzp {
+          padding: 1rem 0.75rem 2.5rem;
+        }
+        .dzp .dzp-hero {
+          padding: 1.35rem 1.1rem;
+          border-radius: 12px;
+        }
+        .dzp .dzp-hero h1 {
+          font-size: 1.4rem;
+        }
+        .dzp .dzp-sec {
+          padding: 1rem;
+        }
+        .dzp .dzp-toc {
+          padding: 0.9rem 1rem;
+        }
+      }
+      @media print {
+        .dzp .dzp-lang,
+        .dzp .dzp-toc {
+          display: none;
+        }
+        .dzp .dzp-hero {
+          background: none;
+          color: #000;
+          padding: 0;
+        }
+        .dzp .dzp-hero h1,
+        .dzp .dzp-hero a {
+          color: #000;
+        }
+        .dzp .dzp-sec {
+          border: 0;
+          padding: 0;
+        }
+      }
+    </style>
+    <div class="dzp">
+      <nav class="dzp-lang" aria-label="Ngôn ngữ / Language">
+        <a href="#vi" hreflang="vi" lang="vi">Tiếng Việt</a><a href="#en" hreflang="en" lang="en">English</a>
+      </nav>
+      <div class="dzp-langblock" id="vi" lang="vi">
+        <header class="dzp-hero">
+          <p class="dzp-eyebrow">Dezon Inbox</p>
+          <h1>Hướng dẫn xóa dữ liệu của Dezon Inbox</h1>
+          <p class="dzp-date"><time datetime="2026-11-05">Cập nhật lần cuối: 05/11/2026</time></p>
+          <p class="dzp-lead">
+            Dezon Inbox là phần mềm hộp thư nội bộ. Nhân viên của [ĐIỀN: tên pháp lý công ty]
+            (&quot;Dezon&quot;) dùng nó để trả lời tin nhắn gửi tới các Trang Facebook của Dezon. Trang này
+            hướng dẫn cách yêu cầu Dezon xóa dữ liệu của bạn khỏi Dezon Inbox. Thông tin đầy đủ về cách chúng
+            tôi xử lý dữ liệu có trong
+            <a href="https://dezon.vn/chinh-sach-quyen-rieng-tu">Chính sách quyền riêng tư</a>.
+          </p>
+        </header>
+        <nav class="dzp-toc" aria-label="Mục lục">
+          <p>Mục lục</p>
+          <ol>
+            <li><a href="#vi-1">Ai có thể yêu cầu xóa</a></li>
+            <li><a href="#vi-2">Dezon Inbox lưu gì về bạn</a></li>
+            <li><a href="#vi-3">Cách gửi yêu cầu</a></li>
+            <li><a href="#vi-4">Chúng tôi xử lý thế nào</a></li>
+            <li><a href="#vi-5">Những gì sẽ bị xóa</a></li>
+            <li><a href="#vi-6">Những gì có thể được giữ lại</a></li>
+            <li><a href="#vi-7">Dữ liệu do Meta lưu</a></li>
+            <li><a href="#vi-8">Gỡ quyền truy cập của Dezon Inbox trong Facebook</a></li>
+            <li><a href="#vi-9">Liên hệ</a></li>
+          </ol>
+        </nav>
+        <section class="dzp-sec" id="vi-1">
+          <h2>1. Ai có thể yêu cầu xóa</h2>
+          <ul>
+            <li>Bất kỳ ai đã nhắn tin cho một Trang Facebook của Dezon.</li>
+            <li>
+              Nhân viên hoặc quản trị viên Trang đã đăng nhập Facebook để kết nối Trang với Dezon Inbox.
+            </li>
+          </ul>
+          <p>Yêu cầu xóa hoàn toàn <strong>miễn phí</strong>.</p>
+        </section>
+        <section class="dzp-sec" id="vi-2">
+          <h2>2. Dezon Inbox lưu gì về bạn</h2>
+          <ul>
+            <li>Tên hiển thị và ảnh đại diện Facebook của bạn.</li>
+            <li>Mã định danh theo Trang (PSID) mà Meta cấp.</li>
+            <li>Tin nhắn qua lại với Trang của Dezon và tệp đính kèm (ảnh, video, tệp...).</li>
+            <li>Thông tin bạn cung cấp trong trò chuyện, như số điện thoại hay email.</li>
+            <li>Ghi chú và nhãn nhân viên Dezon gắn cho cuộc trò chuyện.</li>
+            <li>
+              Với người đã kết nối Trang: ID người dùng theo ứng dụng và tên Facebook. Token đăng nhập
+              Facebook của bạn không được lưu.
+            </li>
+          </ul>
+        </section>
+        <section class="dzp-sec" id="vi-3">
+          <h2>3. Cách gửi yêu cầu</h2>
+          <p>
+            <strong>Cách 1: Nhắn tin cho Trang (nhanh nhất).</strong> Vào đúng Trang Facebook của Dezon mà bạn
+            đã nhắn, gửi tin: <strong>XÓA DỮ LIỆU</strong>. Chúng tôi nhận ra tài khoản của bạn ngay, nên bạn
+            không cần cung cấp thêm gì.
+          </p>
+          <p>
+            <strong>Cách 2: Gửi email</strong> tới <a href="mailto:support@dezon.vn">support@dezon.vn</a>,
+            tiêu đề <strong>&quot;Yêu cầu xóa dữ liệu&quot;</strong>, kèm:
+          </p>
+          <ul>
+            <li>tên Facebook của bạn;</li>
+            <li>tên Trang Dezon bạn đã nhắn;</li>
+            <li>khoảng thời gian bạn đã nhắn (gần đúng là được);</li>
+            <li>
+              tùy chọn: ảnh chụp màn hình cuộc trò chuyện hoặc đường dẫn tới trang cá nhân Facebook của bạn;
+            </li>
+            <li>email hoặc kênh bạn muốn nhận xác nhận.</li>
+          </ul>
+          <p><strong>Cách 3: Biểu mẫu:</strong> [ĐIỀN: đường dẫn biểu mẫu, xóa dòng này nếu không có]</p>
+          <p>
+            Vui lòng <strong>không</strong> gửi ảnh căn cước hay giấy tờ tùy thân. Chúng tôi không cần những
+            thứ đó.
+          </p>
+        </section>
+        <section class="dzp-sec" id="vi-4">
+          <h2>4. Chúng tôi xử lý thế nào</h2>
+          <ol>
+            <li>
+              Chúng tôi xác nhận đã nhận yêu cầu. Nếu bạn gửi bằng email, chúng tôi có thể nhờ bạn nhắn một mã
+              ngắn từ chính tài khoản Messenger đó, để chắc chắn bạn là chủ tài khoản.
+            </li>
+            <li>Chúng tôi xóa dữ liệu <strong>trong vòng 72 giờ</strong> kể từ khi xác minh xong.</li>
+            <li>
+              Chúng tôi gửi xác nhận đã xóa kèm <strong>mã xác nhận</strong>, qua email hoặc Messenger. Sau đó
+              chúng tôi cũng xóa khỏi Dezon Inbox tin yêu cầu và tin xác nhận này, chỉ giữ bản ghi tối thiểu
+              nêu ở mục 6.
+            </li>
+            <li>
+              Muốn hỏi tình trạng yêu cầu, bạn trả lời email hoặc nhắn cho Trang kèm mã xác nhận. Nếu chúng
+              tôi không thể xóa một phần dữ liệu, chúng tôi sẽ nêu rõ lý do.
+            </li>
+          </ol>
+        </section>
+        <section class="dzp-sec" id="vi-5">
+          <h2>5. Những gì sẽ bị xóa</h2>
+          <ul>
+            <li>
+              Hồ sơ khách: tên, ảnh đại diện (cả bản sao trong kho lưu tệp), số điện thoại và email đã lưu.
+            </li>
+            <li>Mọi mã định danh (PSID) của bạn trên các Trang của Dezon.</li>
+            <li>Toàn bộ tin nhắn hai chiều.</li>
+            <li>Mọi tệp đính kèm trong kho lưu tệp.</li>
+            <li>Ghi chú, nhãn, thông tin phân công và lịch sử chuyển cho nhân viên.</li>
+            <li>Bản nháp và bản tóm tắt nhu cầu do AI tạo, nếu đã bật AI.</li>
+            <li>Bản gốc sự kiện kỹ thuật (webhook) liên quan tới bạn.</li>
+            <li>
+              Với người đã kết nối Trang: ID và tên Facebook đã lưu. Mã truy cập của Trang (thuộc về Trang của
+              Dezon) bị xóa khi Trang được ngắt kết nối.
+            </li>
+          </ul>
+        </section>
+        <section class="dzp-sec" id="vi-6">
+          <h2>6. Những gì có thể được giữ lại</h2>
+          <ul>
+            <li>
+              Một bản ghi tối thiểu về chính yêu cầu xóa (ngày, mã xác nhận, tên Trang), không chứa nội dung
+              tin nhắn. Bản ghi này dùng để chứng minh chúng tôi đã thực hiện yêu cầu.
+            </li>
+            <li>
+              Dữ liệu pháp luật buộc phải lưu, ví dụ hóa đơn và hợp đồng nếu bạn đã mua dịch vụ. Những dữ liệu
+              này được lưu ngoài Dezon Inbox.
+            </li>
+            <li>
+              Bản sao lưu: tự động ghi đè trong vòng [ĐIỀN: số] ngày. Dữ liệu đã xóa không được khôi phục từ
+              bản sao lưu để dùng lại.
+            </li>
+            <li>Bản tạm của sự kiện kỹ thuật trong hàng đợi xử lý của hệ thống: tự xóa sau tối đa 7 ngày.</li>
+          </ul>
+          <p>Nếu sau khi xóa bạn nhắn tin lại cho Trang, hệ thống sẽ tạo một cuộc trò chuyện mới.</p>
+        </section>
+        <section class="dzp-sec" id="vi-7">
+          <h2>7. Dữ liệu do Meta lưu</h2>
+          <p>
+            Dezon chỉ xóa được dữ liệu trong Dezon Inbox. Tin nhắn vẫn còn trong Messenger của bạn và trong
+            hộp thư Trang trên hệ thống của Meta. Dezon không xóa được dữ liệu do Meta lưu. Bạn có thể xóa
+            cuộc trò chuyện ở phía mình trong Messenger, và quản lý dữ liệu Meta lưu theo
+            <a href="https://www.facebook.com/privacy/policy" rel="noopener" target="_blank"
+              >Chính sách quyền riêng tư của Meta</a
+            >.
+          </p>
+        </section>
+        <section class="dzp-sec" id="vi-8">
+          <h2>8. Gỡ quyền truy cập của Dezon Inbox trong Facebook</h2>
+          <p>Phần này dành cho người đã đăng nhập Facebook để kết nối Trang với Dezon Inbox:</p>
+          <ol>
+            <li>
+              Mở Facebook, bấm ảnh đại diện, chọn <strong>Cài đặt và quyền riêng tư</strong>, rồi chọn
+              <strong>Cài đặt</strong>.
+            </li>
+            <li>
+              Chọn <strong>Ứng dụng và trang web</strong>. Nếu bạn kết nối qua Facebook Login for Business,
+              chọn <strong>Tích hợp doanh nghiệp</strong>.
+            </li>
+            <li>Tìm <strong>Dezon Inbox</strong> và bấm <strong>Gỡ</strong>.</li>
+          </ol>
+          <p>
+            Tên mục có thể hơi khác tùy phiên bản Facebook. Gỡ ứng dụng sẽ chặn Dezon Inbox truy cập thêm vào
+            tài khoản và Trang của bạn. Để xóa dữ liệu đã lưu, hãy gửi yêu cầu theo mục 3.
+          </p>
+          <p>
+            Nếu bạn chỉ nhắn tin cho Trang của Dezon, Dezon Inbox sẽ không xuất hiện trong cài đặt Facebook
+            của bạn. Hãy dùng các cách ở mục 3. Nếu không muốn nhận tin từ Trang nữa, bạn có thể chặn tin nhắn
+            của Trang ngay trong Messenger.
+          </p>
+        </section>
+        <section class="dzp-sec" id="vi-9">
+          <h2>9. Liên hệ</h2>
+          <p>
+            [ĐIỀN: tên pháp lý công ty]. Địa chỉ: [ĐIỀN: địa chỉ trụ sở]. Email:
+            <a href="mailto:support@dezon.vn">support@dezon.vn</a>. Điện thoại: [ĐIỀN: số điện thoại].
+          </p>
+        </section>
+      </div>
+      <div class="dzp-langblock" id="en" lang="en">
+        <header class="dzp-hero">
+          <p class="dzp-eyebrow">Dezon Inbox</p>
+          <h1>Dezon Inbox Data Deletion Instructions</h1>
+          <p class="dzp-date"><time datetime="2026-11-05">Last updated: 5 November 2026</time></p>
+          <p class="dzp-lead">
+            Dezon Inbox is internal inbox software. Staff of [ĐIỀN: company legal name] (&quot;Dezon&quot;)
+            use it to reply to messages sent to Dezon&#x27;s Facebook Pages. This page explains how to ask
+            Dezon to delete your data from Dezon Inbox. Full details of how we handle data are in our
+            <a href="https://dezon.vn/chinh-sach-quyen-rieng-tu">Privacy Policy</a>.
+          </p>
+        </header>
+        <nav class="dzp-toc" aria-label="Contents">
+          <p>Contents</p>
+          <ol>
+            <li><a href="#en-1">Who can ask for deletion</a></li>
+            <li><a href="#en-2">What Dezon Inbox stores about you</a></li>
+            <li><a href="#en-3">How to make a request</a></li>
+            <li><a href="#en-4">What happens next</a></li>
+            <li><a href="#en-5">What is deleted</a></li>
+            <li><a href="#en-6">What may be kept</a></li>
+            <li><a href="#en-7">Data kept by Meta</a></li>
+            <li><a href="#en-8">Removing Dezon Inbox&#x27;s access in Facebook</a></li>
+            <li><a href="#en-9">Contact</a></li>
+          </ol>
+        </nav>
+        <section class="dzp-sec" id="en-1">
+          <h2>1. Who can ask for deletion</h2>
+          <ul>
+            <li>Anyone who has messaged a Dezon Facebook Page.</li>
+            <li>
+              Staff members or Page admins who logged in with Facebook to connect a Page to Dezon Inbox.
+            </li>
+          </ul>
+          <p>Deletion requests are <strong>free of charge</strong>.</p>
+        </section>
+        <section class="dzp-sec" id="en-2">
+          <h2>2. What Dezon Inbox stores about you</h2>
+          <ul>
+            <li>Your Facebook display name and profile picture.</li>
+            <li>The Page-scoped ID (PSID) assigned by Meta.</li>
+            <li>Messages exchanged with Dezon&#x27;s Page, and attachments (photos, videos, files...).</li>
+            <li>Information you gave in the chat, such as a phone number or email.</li>
+            <li>Notes and tags that Dezon staff added to the conversation.</li>
+            <li>
+              For people who connected a Page: app-scoped user ID and Facebook name. Your Facebook login token
+              is not stored.
+            </li>
+          </ul>
+        </section>
+        <section class="dzp-sec" id="en-3">
+          <h2>3. How to make a request</h2>
+          <p>
+            <strong>Option 1: Message the Page (fastest).</strong> Open the Dezon Facebook Page you messaged
+            before and send: <strong>XÓA DỮ LIỆU</strong> (or &quot;DELETE MY DATA&quot;). We can identify
+            your account immediately, so you do not need to provide anything else.
+          </p>
+          <p>
+            <strong>Option 2: Email</strong> <a href="mailto:support@dezon.vn">support@dezon.vn</a> with the
+            subject <strong>&quot;Data deletion request&quot;</strong> and include:
+          </p>
+          <ul>
+            <li>your Facebook name;</li>
+            <li>the name of the Dezon Page you messaged;</li>
+            <li>roughly when you messaged it;</li>
+            <li>optional: a screenshot of the conversation or a link to your Facebook profile;</li>
+            <li>the email or channel where you want to receive confirmation.</li>
+          </ul>
+          <p><strong>Option 3: Web form:</strong> [ĐIỀN: form link, remove this line if there is none]</p>
+          <p>Please do <strong>not</strong> send ID cards or identity documents. We do not need them.</p>
+        </section>
+        <section class="dzp-sec" id="en-4">
+          <h2>4. What happens next</h2>
+          <ol>
+            <li>
+              We confirm that we received your request. If you used email, we may ask you to send a short code
+              from that same Messenger account, to make sure you own it.
+            </li>
+            <li>We delete your data <strong>within 72 hours</strong> of verification.</li>
+            <li>
+              We send a deletion confirmation with a <strong>confirmation code</strong>, by email or
+              Messenger. We then also delete your request and that confirmation message from Dezon Inbox,
+              keeping only the minimal record described in section 6.
+            </li>
+            <li>
+              To check the status, reply to the email or message the Page with your confirmation code. If we
+              cannot delete part of the data, we will explain why.
+            </li>
+          </ol>
+        </section>
+        <section class="dzp-sec" id="en-5">
+          <h2>5. What is deleted</h2>
+          <ul>
+            <li>
+              Your contact record: name, profile picture (including the copy in our file storage), and any
+              saved phone number and email.
+            </li>
+            <li>All your Page-scoped IDs (PSIDs) on Dezon&#x27;s Pages.</li>
+            <li>All messages in both directions.</li>
+            <li>All attachments in our file storage.</li>
+            <li>Notes, tags, assignment details and handover history.</li>
+            <li>AI drafts and AI summaries of your needs, if AI has been enabled.</li>
+            <li>Original technical event payloads (webhooks) about you.</li>
+            <li>
+              For people who connected a Page: the stored Facebook ID and name. The Page access token (which
+              belongs to Dezon&#x27;s Page) is deleted when the Page is disconnected.
+            </li>
+          </ul>
+        </section>
+        <section class="dzp-sec" id="en-6">
+          <h2>6. What may be kept</h2>
+          <ul>
+            <li>
+              A minimal record of the deletion request itself (date, confirmation code, Page name), with no
+              message content. It lets us show that we carried out the request.
+            </li>
+            <li>
+              Data the law requires us to keep, such as invoices and contracts if you bought a service. These
+              are kept outside Dezon Inbox.
+            </li>
+            <li>
+              Backups: overwritten automatically within [ĐIỀN: number] days. Deleted data is never restored
+              from backups for reuse.
+            </li>
+            <li>
+              Temporary copies of technical events in our processing queue: removed automatically within 7
+              days.
+            </li>
+          </ul>
+          <p>If you message the Page again after deletion, the system will start a new conversation.</p>
+        </section>
+        <section class="dzp-sec" id="en-7">
+          <h2>7. Data kept by Meta</h2>
+          <p>
+            Dezon can only delete data in Dezon Inbox. Messages remain in your Messenger and in the Page inbox
+            on Meta&#x27;s systems, and Dezon cannot delete data stored by Meta. You can delete the
+            conversation on your side in Messenger, and manage the data Meta keeps under the
+            <a href="https://www.facebook.com/privacy/policy" rel="noopener" target="_blank"
+              >Meta Privacy Policy</a
+            >.
+          </p>
+        </section>
+        <section class="dzp-sec" id="en-8">
+          <h2>8. Removing Dezon Inbox&#x27;s access in Facebook</h2>
+          <p>This section is for people who logged in with Facebook to connect a Page to Dezon Inbox:</p>
+          <ol>
+            <li>
+              Open Facebook, tap your profile picture, choose <strong>Settings &amp; privacy</strong>, then
+              <strong>Settings</strong>.
+            </li>
+            <li>
+              Choose <strong>Apps and websites</strong>. If you connected through Facebook Login for Business,
+              choose <strong>Business integrations</strong>.
+            </li>
+            <li>Find <strong>Dezon Inbox</strong> and tap <strong>Remove</strong>.</li>
+          </ol>
+          <p>
+            Menu names may differ slightly between Facebook versions. Removing the app stops Dezon Inbox from
+            accessing your account and Pages from then on. To delete data already stored, make a request as
+            described in section 3.
+          </p>
+          <p>
+            If you only messaged a Dezon Page, Dezon Inbox will not appear in your Facebook settings. Use the
+            options in section 3. If you no longer want messages from the Page, you can block the Page&#x27;s
+            messages in Messenger.
+          </p>
+        </section>
+        <section class="dzp-sec" id="en-9">
+          <h2>9. Contact</h2>
+          <p>
+            [ĐIỀN: company legal name]. Address: [ĐIỀN: registered address]. Email:
+            <a href="mailto:support@dezon.vn">support@dezon.vn</a>. Phone: [ĐIỀN: phone number].
+          </p>
+        </section>
+      </div>
+      <p class="dzp-foot">© 2026 Dezon · <a href="https://dezon.vn">dezon.vn</a></p>
+    </div>
+    <!-- DEZON-POLICY:END -->
+  </body>
+</html>

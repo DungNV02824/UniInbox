@@ -1,0 +1,32 @@
+{
+  "name": "@dezon/worker",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "tsx watch --clear-screen=false src/main.ts",
+    "start": "node dist/main.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "enqueue:echo": "tsx src/scripts/enqueue-echo.ts"
+  },
+  "dependencies": {
+    "@dezon/core": "workspace:^",
+    "@dezon/db": "workspace:*",
+    "@dezon/shared": "workspace:*",
+    "@socket.io/redis-emitter": "^5.1.0",
+    "bullmq": "^5.81.5",
+    "ioredis": "^5.11.1",
+    "pino": "^9.14.0"
+  },
+  "devDependencies": {
+    "@testcontainers/redis": "^11.14.0",
+    "@types/node": "^22.20.5",
+    "pino-pretty": "^13.2.0",
+    "testcontainers": "^11.14.0",
+    "tsx": "^4.23.15",
+    "typescript": "~5.9.3",
+    "vitest": "^3.2.7"
+  }
+}

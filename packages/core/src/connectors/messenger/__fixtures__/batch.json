@@ -1,0 +1,143 @@
+{
+  "object": "page",
+  "entry": [
+    {
+      "id": "111111111111111",
+      "time": 1762300000000,
+      "messaging": [
+        {
+          "sender": {
+            "id": "2222222222222222"
+          },
+          "recipient": {
+            "id": "111111111111111"
+          },
+          "timestamp": 1762300002000,
+          "message": {
+            "mid": "m_batch_002",
+            "text": "Tin thứ hai"
+          }
+        },
+        {
+          "sender": {
+            "id": "2222222222222222"
+          },
+          "recipient": {
+            "id": "111111111111111"
+          },
+          "timestamp": 1762300001000,
+          "message": {
+            "mid": "m_batch_001",
+            "text": "Tin thứ nhất"
+          }
+        },
+        {
+          "sender": {
+            "id": "2222222222222222"
+          },
+          "recipient": {
+            "id": "111111111111111"
+          },
+          "timestamp": 1762300002500,
+          "reaction": {
+            "mid": "m_batch_001",
+            "action": "react",
+            "reaction": "love",
+            "emoji": "❤"
+          }
+        },
+        {
+          "sender": {
+            "id": "2222222222222222"
+          },
+          "recipient": {
+            "id": "111111111111111"
+          },
+          "timestamp": 1762300002600,
+          "referral": {
+            "ref": "m-me-link",
+            "source": "SHORTLINK",
+            "type": "OPEN_THREAD"
+          }
+        },
+        {
+          "sender": {
+            "id": "2222222222222222"
+          },
+          "recipient": {
+            "id": "111111111111111"
+          },
+          "timestamp": 1762300002700,
+          "message": {
+            "mid": "m_batch_deleted",
+            "is_deleted": true
+          }
+        },
+        {
+          "sender": {
+            "id": "2222222222222222"
+          },
+          "timestamp": 1762300002800,
+          "message": {
+            "mid": "m_bad_event",
+            "text": "thiếu recipient"
+          }
+        }
+      ]
+    },
+    {
+      "id": "999000999000999",
+      "time": 1762300000000,
+      "messaging": [
+        {
+          "sender": {
+            "id": "2222222222222222"
+          },
+          "recipient": {
+            "id": "999000999000999"
+          },
+          "timestamp": 1762300000000,
+          "message": {
+            "mid": "m_batch_unknown",
+            "text": "bỏ qua"
+          }
+        }
+      ]
+    },
+    {
+      "time": 1762300000000,
+      "messaging": "entry sai cấu trúc"
+    },
+    {
+      "id": "333333333333333",
+      "time": 1762300000000,
+      "messaging": [
+        {
+          "sender": {
+            "id": "4444444444444444"
+          },
+          "recipient": {
+            "id": "333333333333333"
+          },
+          "timestamp": 1762300001500,
+          "message": {
+            "mid": "m_batch_p2_001",
+            "text": "Khách page 2"
+          }
+        },
+        {
+          "sender": {
+            "id": "4444444444444444"
+          },
+          "recipient": {
+            "id": "333333333333333"
+          },
+          "timestamp": 1762300003000,
+          "read": {
+            "watermark": 1762300001400
+          }
+        }
+      ]
+    }
+  ]
+}
