@@ -71,6 +71,9 @@ function toDto(row: ChatbotRow, conversationCount: number): ChatbotDto {
     maxRepliesPerHour: row.maxRepliesPerHour,
     escalateWhenUnsure: row.escalateWhenUnsure,
     responseSpeed: row.responseSpeed,
+    handoffAckLabel: row.handoffAckLabel,
+    handoffResolveLabel: row.handoffResolveLabel,
+    handoffActionLark: row.handoffActionLark,
     conversationCount,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -111,6 +114,10 @@ function toSet(input: Partial<CreateChatbotRequest>): ChatbotSet {
   if (input.maxRepliesPerHour !== undefined) set.maxRepliesPerHour = input.maxRepliesPerHour;
   if (input.escalateWhenUnsure !== undefined) set.escalateWhenUnsure = input.escalateWhenUnsure;
   if (input.responseSpeed !== undefined) set.responseSpeed = input.responseSpeed;
+  if (input.handoffAckLabel !== undefined) set.handoffAckLabel = nullIfBlank(input.handoffAckLabel);
+  if (input.handoffResolveLabel !== undefined)
+    set.handoffResolveLabel = nullIfBlank(input.handoffResolveLabel);
+  if (input.handoffActionLark !== undefined) set.handoffActionLark = input.handoffActionLark;
   return set;
 }
 
@@ -139,6 +146,8 @@ export async function listChatbots(db: Db, viewer: Viewer): Promise<ChatbotSumma
     description: r.bot.description,
     isActive: r.bot.isActive,
     conversationCount: Number(r.n ?? 0),
+    handoffAckLabel: r.bot.handoffAckLabel,
+    handoffResolveLabel: r.bot.handoffResolveLabel,
   }));
 }
 
@@ -409,13 +418,19 @@ export async function resumeConversationAi(
  * acknowledged_by = viewer, acknowledged_at = now (đã ack thì giữ nguyên). Hội thoại chưa phân công ⇒
  * phân công cho viewer. Không có handoff mở ⇒ InboxValidationError. Audit 'handoff.ack'.
  */
+export interface AckHandoffResult extends UpdateConversationResult {
+  /** Handoff vừa được ack ở lần bấm này; null = đã có người nhận từ trước (bấm lại không báo Lark lần nữa). */
+  ackedHandoffId: string | null;
+}
+
 export async function ackHandoff(
   db: Db,
   viewer: Viewer,
   conversationId: string,
   ctx: InboxContext,
-): Promise<UpdateConversationResult> {
-  return withConversation(db, viewer, conversationId, ctx, async (tx, conv) => {
+): Promise<AckHandoffResult> {
+  let ackedHandoffId: string | null = null;
+  const result = await withConversation(db, viewer, conversationId, ctx, async (tx, conv) => {
     const now = ctx.now();
     const [open] = await tx
       .select({ id: handoffs.id, acknowledgedBy: handoffs.acknowledgedBy })
@@ -429,6 +444,7 @@ export async function ackHandoff(
         .update(handoffs)
         .set({ acknowledgedBy: viewer.id, acknowledgedAt: now, updatedAt: now })
         .where(eq(handoffs.id, open.id));
+      ackedHandoffId = open.id;
     }
     const assign = conv.assignedUserId === null;
     if (assign) {
@@ -441,6 +457,7 @@ export async function ackHandoff(
       .insert(auditLogs)
       .values(audit(viewer, 'handoff.ack', conv.id, { handoffId: open.id, assigned: assign }));
   });
+  return { ...result, ackedHandoffId };
 }
 
 /**
@@ -449,15 +466,22 @@ export async function ackHandoff(
  * ai_paused_until null, handoff_reason null, handoff_at null. Audit 'handoff.resolve'.
  * Không có handoff mở và hội thoại không ở pending_human ⇒ không làm gì (bấm hai lần không lỗi).
  */
+export interface ResolveHandoffResult extends UpdateConversationResult {
+  /** Các handoff vừa đóng ở lần bấm này ([] = bấm lại / không có gì để đóng). */
+  resolvedHandoffIds: string[];
+}
+
 export async function resolveHandoff(
   db: Db,
   viewer: Viewer,
   conversationId: string,
   ctx: InboxContext,
-): Promise<UpdateConversationResult> {
-  return withConversation(db, viewer, conversationId, ctx, async (tx, conv) => {
+): Promise<ResolveHandoffResult> {
+  let resolvedHandoffIds: string[] = [];
+  const result = await withConversation(db, viewer, conversationId, ctx, async (tx, conv) => {
     const now = ctx.now();
     const resolved = await resolveOpenHandoffs(tx, conv.id, viewer.id, now);
+    resolvedHandoffIds = resolved;
     if (resolved.length === 0 && conv.status !== 'pending_human') return;
     await tx
       .update(conversations)
@@ -477,6 +501,7 @@ export async function resolveHandoff(
       }),
     );
   });
+  return { ...result, resolvedHandoffIds };
 }
 
 /** GET /conversations/:id/ai-runs (admin): `limit` lần chạy mới nhất (createdAt desc), kèm tên bot. */

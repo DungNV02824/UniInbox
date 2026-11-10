@@ -920,12 +920,82 @@ describe('chatbot trên hội thoại', () => {
       chatbot: { id: bot.id },
     });
     expect(updates()).toHaveLength(2);
+    // Bot không bật "Gửi Lark khi bấm nút" ⇒ không gửi Lark.
+    expect(larkCalls).toHaveLength(0);
 
     // Trả lại trạng thái ban đầu cho các test khác.
     await db
       .update(conversations)
       .set({ chatbotId: null, aiMode: 'off', assignedUserId: null })
       .where(eq(conversations.id, conversationId));
+  });
+
+  it('nút tùy chỉnh "Nghiệm thu" / "Đã chuyển tiền" + Lark: mỗi lần bấm đổi trạng thái gửi đúng một thẻ', async () => {
+    const bot = await createBot({
+      name: 'Bot nghiệm thu',
+      handoffAckLabel: '  Nghiệm thu ',
+      handoffResolveLabel: 'Đã chuyển tiền',
+      handoffActionLark: true,
+    });
+    expect(bot).toMatchObject({
+      handoffAckLabel: 'Nghiệm thu',
+      handoffResolveLabel: 'Đã chuyển tiền',
+      handoffActionLark: true,
+    });
+    const listed = (await asAgent('GET', '/chatbots')).json<ChatbotSummary[]>().find((b) => b.id === bot.id);
+    expect(listed).toMatchObject({ handoffAckLabel: 'Nghiệm thu', handoffResolveLabel: 'Đã chuyển tiền' });
+
+    const conversationId = seed.unassignedConversationId;
+    await makePendingHuman(conversationId, bot.id);
+    await db.insert(handoffs).values({
+      conversationId,
+      reasonCode: 'other',
+      summary: 'Công trình 33 Trần Quang Diệu: 7 ảnh hợp lệ. Thù lao 35.000đ',
+      createdBy: 'ai',
+    });
+    larkCalls.length = 0;
+
+    const ackRes = await asAgent('POST', `/conversations/${conversationId}/handoff/ack`);
+    expect(ackRes.statusCode).toBe(200);
+    // Tên nút đi kèm hội thoại (banner không phụ thuộc danh sách bot).
+    expect(ackRes.json<ConversationSummary>().chatbot).toEqual({
+      id: bot.id,
+      name: 'Bot nghiệm thu',
+      handoffAckLabel: 'Nghiệm thu',
+      handoffResolveLabel: 'Đã chuyển tiền',
+    });
+    expect(larkCalls).toHaveLength(1);
+    expect(larkCalls[0]!.url).toBe(ENV_LARK_URL);
+    const ackCard = JSON.stringify(larkCalls[0]!.body);
+    expect(ackCard).toContain('✅ Nghiệm thu');
+    expect(ackCard).toContain('Công trình 33 Trần Quang Diệu');
+    expect(ackCard).toContain(`/inbox/${conversationId}`);
+
+    // Bấm lại "Nghiệm thu" (đã nhận rồi) ⇒ không gửi trùng.
+    expect((await asAgent('POST', `/conversations/${conversationId}/handoff/ack`)).statusCode).toBe(200);
+    expect(larkCalls).toHaveLength(1);
+
+    expect((await asAgent('POST', `/conversations/${conversationId}/handoff/resolve`)).statusCode).toBe(200);
+    expect(larkCalls).toHaveLength(2);
+    expect(JSON.stringify(larkCalls[1]!.body)).toContain('☑️ Đã chuyển tiền');
+
+    // Bấm lại "Đã chuyển tiền" ⇒ không có gì để đóng, không gửi.
+    expect((await asAgent('POST', `/conversations/${conversationId}/handoff/resolve`)).statusCode).toBe(200);
+    expect(larkCalls).toHaveLength(2);
+
+    // Lark lỗi ⇒ nút vẫn chạy (chỉ log).
+    await makePendingHuman(conversationId, bot.id);
+    await db
+      .insert(handoffs)
+      .values({ conversationId, reasonCode: 'other', summary: 'Công trình khác', createdBy: 'ai' });
+    larkReply = { status: 500, body: { code: 1, msg: 'lỗi' } };
+    expect((await asAgent('POST', `/conversations/${conversationId}/handoff/ack`)).statusCode).toBe(200);
+    expect((await asAgent('POST', `/conversations/${conversationId}/handoff/resolve`)).statusCode).toBe(200);
+    larkReply = { status: 200, body: { code: 0, msg: 'success' } };
+
+    await aiReply.obliterate({ force: true });
+    await resetConversation(conversationId);
+    await db.update(conversations).set({ assignedUserId: null }).where(eq(conversations.id, conversationId));
   });
 
   it('nhật ký AI (admin) trả các lần chạy mới nhất', async () => {

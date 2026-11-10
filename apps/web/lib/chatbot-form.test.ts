@@ -36,6 +36,9 @@ const dto: ChatbotDto = {
   handoffMessage: null,
   escalateWhenUnsure: false,
   responseSpeed: 'fast',
+  handoffAckLabel: null,
+  handoffResolveLabel: null,
+  handoffActionLark: false,
   model: null,
   temperature: 0.4,
   replyDelaySec: 10,
@@ -66,6 +69,9 @@ describe('chatbotToForm / formToRequest', () => {
       handoffKeywords: ['giảm giá'],
       handoffMessage: null,
       escalateWhenUnsure: false,
+      handoffAckLabel: null,
+      handoffResolveLabel: null,
+      handoffActionLark: false,
       responseSpeed: 'fast',
       model: null,
       temperature: 0.4,
@@ -114,6 +120,51 @@ describe('chatbotToForm / formToRequest', () => {
     expect(chatbotToForm({ ...dto, escalateWhenUnsure: true }).escalateWhenUnsure).toBe(true);
     const res = validateChatbotForm(form({ escalateWhenUnsure: true }));
     expect(res.ok && res.data.escalateWhenUnsure).toBe(true);
+  });
+
+  it('tên nút Cần người + Lark: rỗng ⇔ null (mặc định), trim, đi qua form ↔ body', () => {
+    const empty = emptyChatbotForm();
+    expect(empty.handoffAckLabel).toBe('');
+    expect(empty.handoffResolveLabel).toBe('');
+    expect(empty.handoffActionLark).toBe(false);
+    expect(formToRequest(empty)).toMatchObject({
+      handoffAckLabel: null,
+      handoffResolveLabel: null,
+      handoffActionLark: false,
+    });
+
+    const custom = {
+      ...dto,
+      handoffAckLabel: 'Nghiệm thu',
+      handoffResolveLabel: 'Đã chuyển tiền',
+      handoffActionLark: true,
+    };
+    const f = chatbotToForm(custom);
+    expect(f.handoffAckLabel).toBe('Nghiệm thu');
+    expect(f.handoffResolveLabel).toBe('Đã chuyển tiền');
+    expect(f.handoffActionLark).toBe(true);
+    expect(
+      formToRequest({ ...f, handoffAckLabel: '  Nghiệm thu ', handoffResolveLabel: '   ' }),
+    ).toMatchObject({
+      handoffAckLabel: 'Nghiệm thu',
+      handoffResolveLabel: null,
+      handoffActionLark: true,
+    });
+    expect(duplicateRequest(custom, [])).toMatchObject({
+      handoffAckLabel: 'Nghiệm thu',
+      handoffResolveLabel: 'Đã chuyển tiền',
+      handoffActionLark: true,
+    });
+    expect(isFormDirty({ ...f, handoffActionLark: false }, chatbotToForm(custom))).toBe(true);
+  });
+
+  it('tên nút Cần người quá 40 ký tự ⇒ lỗi đúng ô, đánh dấu tab Chuyển người', () => {
+    const res = validateChatbotForm(form({ handoffAckLabel: 'x'.repeat(41) }));
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.errors.handoffAckLabel).toBe('Tên nút tối đa 40 ký tự');
+    expect(tabsWithErrors(res.errors).has('handoff')).toBe(true);
+    expect(validateChatbotForm(form({ handoffResolveLabel: 'x'.repeat(40) })).ok).toBe(true);
   });
 
   it('responseSpeed: mặc định Nhanh nhất, đi qua form ↔ body (gồm bản nháp chat thử)', () => {

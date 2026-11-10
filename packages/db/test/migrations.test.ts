@@ -121,6 +121,7 @@ describe('migrations', () => {
   it('migration ngược xóa sạch, sau đó chạy xuôi lại được', async () => {
     const files = await rollbackMigrations(url);
     expect(files).toEqual([
+      '0008_handoff_buttons.sql',
       '0007_contact_tags.sql',
       '0006_response_speed.sql',
       '0005_escalate_when_unsure.sql',
@@ -142,8 +143,25 @@ describe('migrations', () => {
     expect(await vectorInstalled()).toBe(true);
   });
 
+  it('0008: rollback gỡ 3 cột nút Cần người, giữ bot; chạy lại ⇒ mặc định null/false', async () => {
+    const cols = `select column_name from information_schema.columns where table_name = 'chatbots'
+       and column_name in ('handoff_ack_label', 'handoff_resolve_label', 'handoff_action_lark') order by column_name`;
+    await query("insert into chatbots (name, handoff_ack_label) values ('Bot nút', 'Nghiệm thu')");
+    expect(await query(cols)).toHaveLength(3);
+    expect(await rollbackMigrations(url, 1)).toEqual(['0008_handoff_buttons.sql']);
+    expect(await query(cols)).toEqual([]);
+    expect(await query("select name from chatbots where name = 'Bot nút'")).toHaveLength(1);
+    await runMigrations(url);
+    expect(
+      await query(
+        "select handoff_ack_label, handoff_resolve_label, handoff_action_lark from chatbots where name = 'Bot nút'",
+      ),
+    ).toEqual([{ handoff_ack_label: null, handoff_resolve_label: null, handoff_action_lark: false }]);
+    await query("delete from chatbots where name = 'Bot nút'");
+  });
+
   it('0007: rollback gỡ contact_tags, giữ contacts.tags; chạy lại seed nhãn sẵn có (bỏ trùng hoa thường)', async () => {
-    expect(await rollbackMigrations(url, 1)).toEqual(['0007_contact_tags.sql']);
+    expect(await rollbackMigrations(url, 2)).toEqual(['0008_handoff_buttons.sql', '0007_contact_tags.sql']);
     expect(await publicTables()).toEqual(EXPECTED_TABLES.filter((t) => t !== 'contact_tags'));
     await query(
       `insert into contacts (display_name, tags, created_at) values
@@ -179,7 +197,11 @@ describe('migrations', () => {
     await query("insert into chatbots (name) values ('Bot tốc độ')");
     expect((await query<{ n: number }>(col))[0]?.n).toBe(1);
     expect((await query<{ n: number }>(chk))[0]?.n).toBe(1);
-    expect(await rollbackMigrations(url, 2)).toEqual(['0007_contact_tags.sql', '0006_response_speed.sql']);
+    expect(await rollbackMigrations(url, 3)).toEqual([
+      '0008_handoff_buttons.sql',
+      '0007_contact_tags.sql',
+      '0006_response_speed.sql',
+    ]);
     expect((await query<{ n: number }>(col))[0]?.n).toBe(0);
     expect((await query<{ n: number }>(chk))[0]?.n).toBe(0);
     expect(await query("select name from chatbots where name = 'Bot tốc độ'")).toHaveLength(1);
@@ -196,7 +218,8 @@ describe('migrations', () => {
       "select count(*)::int as n from information_schema.columns where table_name = 'chatbots' and column_name = 'escalate_when_unsure'";
     await query("insert into chatbots (name) values ('Bot giữ lại')");
     expect((await query<{ n: number }>(col))[0]?.n).toBe(1);
-    expect(await rollbackMigrations(url, 3)).toEqual([
+    expect(await rollbackMigrations(url, 4)).toEqual([
+      '0008_handoff_buttons.sql',
       '0007_contact_tags.sql',
       '0006_response_speed.sql',
       '0005_escalate_when_unsure.sql',
@@ -235,7 +258,8 @@ describe('migrations', () => {
       { conname: 'conversations_chatbot_id_chatbots_id_fk', confdeltype: 'n' },
     ]);
 
-    expect(await rollbackMigrations(url, 4)).toEqual([
+    expect(await rollbackMigrations(url, 5)).toEqual([
+      '0008_handoff_buttons.sql',
       '0007_contact_tags.sql',
       '0006_response_speed.sql',
       '0005_escalate_when_unsure.sql',
@@ -287,7 +311,8 @@ describe('migrations', () => {
     const col =
       "select count(*)::int as n from information_schema.columns where table_name = 'messages' and column_name = 'client_id'";
     expect((await query<{ n: number }>(col))[0]?.n).toBe(1);
-    expect(await rollbackMigrations(url, 5)).toEqual([
+    expect(await rollbackMigrations(url, 6)).toEqual([
+      '0008_handoff_buttons.sql',
       '0007_contact_tags.sql',
       '0006_response_speed.sql',
       '0005_escalate_when_unsure.sql',
@@ -304,7 +329,8 @@ describe('migrations', () => {
     const fk =
       "select count(*)::int as n from pg_constraint where conname = 'messages_conversation_channel_account_fk'";
     expect((await query<{ n: number }>(fk))[0]?.n).toBe(1);
-    expect(await rollbackMigrations(url, 6)).toEqual([
+    expect(await rollbackMigrations(url, 7)).toEqual([
+      '0008_handoff_buttons.sql',
       '0007_contact_tags.sql',
       '0006_response_speed.sql',
       '0005_escalate_when_unsure.sql',
@@ -318,8 +344,8 @@ describe('migrations', () => {
     expect(await publicTables()).toEqual(EXPECTED_TABLES);
   });
 
-  it('rollback bảy bước giữ extension và cho phép chạy lại 0001', async () => {
-    await rollbackMigrations(url, 7);
+  it('rollback tám bước giữ extension và cho phép chạy lại 0001', async () => {
+    await rollbackMigrations(url, 8);
     expect(await publicTables()).toEqual([]);
     expect(await vectorInstalled()).toBe(true);
     await runMigrations(url);

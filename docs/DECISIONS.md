@@ -318,3 +318,17 @@ Yêu cầu của chủ dự án: "gom tất cả tin nhắn về". Webhook khôn
 - **Chat thử** nhận tối đa 10 ảnh (JPEG/PNG/WebP; GIF bị từ chối), lượt cũ chỉ gửi `imageCount`.
 - **escalate.messages_to_customer** (0–3 tin): gửi cho khách thay `handoffMessage` khi chuyển người (vd. báo thù lao). Escalate vì độ tự tin thấp không gửi câu trả lời.
 - **Bộ chặn "đã chuyển" giả:** reply tự nói đã chuyển cho nhân viên/bộ phận ⇒ gọi lại model 1 lần; vẫn nói ⇒ hệ thống tự đổi thành escalate `other` với các tin đó (ghi `handoff_claim_guard` trong ai_runs.tool_calls). Cần vì ở tốc độ 'fast' (thinking minimal) model hay nói đã chuyển mà không gọi escalate.
+
+## 2026-11-10 — Tên nút trên banner "Cần người" theo từng bot + báo Lark khi bấm
+
+- **Yêu cầu chủ sản phẩm:** bot nhận ảnh thi công CTV cần hai nút "Nghiệm thu" và "Đã chuyển tiền"; bấm mỗi nút gửi một thông báo Lark (công trình đã nghiệm thu / đã chuyển tiền).
+- **Làm theo từng bot, không đổi chung** — migration `0008_handoff_buttons` (có down): `chatbots.handoff_ack_label` / `handoff_resolve_label` (text null = "Nhận xử lý" / "Đã xong, trả lại cho AI"), `handoff_action_lark boolean NOT NULL DEFAULT false`. Bot khác giữ nguyên nút và không gửi Lark thêm.
+- **Ý nghĩa không đổi:** nút "nhận" vẫn là ack (gán người nhận, phân công nếu chưa có), nút "xong" vẫn là resolve (mở lại hội thoại, bật lại bot, đánh thức bot nếu khách đang chờ).
+- **Lark:** API gửi sau khi thao tác đã lưu, chỉ khi lần bấm này thật sự đổi trạng thái (ack mới / có handoff vừa đóng) ⇒ bấm lại không gửi trùng; bật bot lại hay "Xong" không gửi. Thẻ: "✅ <tên nút>" (ack, xanh lá) / "☑️ <tên nút>" (resolve, xanh dương), Khách, Kênh, Bot, Người bấm, Lúc (giờ VN), Nội dung = tóm tắt các yêu cầu chuyển người (đánh số nếu nhiều), nút "Mở hội thoại". Lỗi/timeout Lark (5 s) chỉ log, nút vẫn chạy. Cấu hình Lark theo cùng quy tắc env-dự-phòng như worker.
+- **Hộp thư:** banner lấy tên nút từ `GET /chatbots` (`ChatbotSummary.handoffAckLabel/handoffResolveLabel`); bot không còn trong danh sách ⇒ tên mặc định.
+
+## 2026-11-10 — Triển khai production: 1 VPS, API sau tiền tố `/api`, SeaweedFS tự host
+
+- **Đặc tả:** prod dùng Cloudflare R2/S3. **Quyết định:** giai đoạn đầu chạy SeaweedFS ngay trên VPS (container `dezon-inbox-s3`, khóa sinh từ env), media phục vụ qua cùng domain `https://alo.vuathau.com.vn/dezon-inbox/*` (URL ký path-style, Caddy giữ nguyên path + Host). Chuyển sang R2 sau chỉ cần đổi biến `S3_*`.
+- **Một domain:** API ở `https://alo.vuathau.com.vn/api` (Caddy dùng chung bỏ tiền tố). Hệ quả trong code: Socket.IO client nối tới origin với `path = <tiền tố> + /socket.io` (`socketEndpoint`), cookie refresh có `Path = <tiền tố>/auth` (`refreshCookiePath`). Dev (API ở gốc) không đổi.
+- Chi tiết vận hành: `docs/DEPLOY.md`.

@@ -1,0 +1,25 @@
+# CHỈ ĐỂ THỬ TRÊN MÁY DEV (không dùng trên VPS): một Caddy riêng đóng vai Caddy dùng chung, chạy đúng
+# site block deploy/caddy-site.alo.vuathau.com.vn.caddy nhưng cho host `localhost` với chứng chỉ nội bộ.
+# Env thử: APP_URL=https://localhost:8443, API_URL=NEXT_PUBLIC_API_URL=https://localhost:8443/api,
+#          S3_PUBLIC_ENDPOINT=https://localhost:8443, EDGE_NETWORK=dezon-prodtest-edge.
+#
+#   docker network create dezon-prodtest-edge
+#   docker compose -p dezon-prodtest -f docker-compose.prod.yml -f deploy/docker-compose.localproxy.yml \
+#     --env-file <env> up -d
+#   => https://localhost:${LOCALPROXY_PORT:-8443}  (chứng chỉ tự ký: curl -k)
+services:
+  localproxy:
+    image: caddy:2-alpine
+    container_name: dezon-inbox-localproxy
+    entrypoint: ['/bin/sh', '-c']
+    command:
+      - >-
+        printf '{\n\tlocal_certs\n\tskip_install_trust\n}\n' > /tmp/Caddyfile &&
+        sed 's/^alo\.vuathau\.com\.vn {/localhost {/' /site.caddy >> /tmp/Caddyfile &&
+        exec caddy run --config /tmp/Caddyfile --adapter caddyfile
+    volumes:
+      - ./deploy/caddy-site.alo.vuathau.com.vn.caddy:/site.caddy:ro
+    ports:
+      - '127.0.0.1:${LOCALPROXY_PORT:-8443}:443'
+    networks: [edge]
+    depends_on: [api, web, s3]

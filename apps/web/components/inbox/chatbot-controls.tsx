@@ -5,9 +5,11 @@ import type { ConversationSummary } from '@dezon/shared';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/lib/auth';
 import {
-  CHATBOT_LOCKED_HINT,
   chatbotControlState,
+  chatbotLockedHint,
   chatbotSelectOptions,
+  handoffAckedText,
+  handoffButtonLabels,
   handoffReasonLabel,
   isAiPaused,
 } from '@/lib/inbox-ai';
@@ -43,7 +45,7 @@ export function ChatbotSelect({ conversation: c }: { conversation: ConversationS
   const busy = setBot.isPending || bots.isPending;
 
   let title = 'Chưa bật chatbot';
-  if (locked) title = CHATBOT_LOCKED_HINT;
+  if (locked) title = chatbotLockedHint(current);
   else if (on && current) title = `Chatbot "${current.name}" đang trả lời khách trong hội thoại này`;
   else if (botOff)
     title = `Chatbot "${current.name}" đang tắt cho hội thoại này — bấm "Bật lại" để bot trả lời tiếp`;
@@ -148,7 +150,10 @@ function AiPausedNotice({ conversation: c }: { conversation: ConversationSummary
   );
 }
 
-/** Banner đỏ "Cần người: <lý do> — <tóm tắt>" + "Nhận xử lý" / "Đã xong, trả lại cho AI". */
+/**
+ * Banner đỏ "Cần người: <lý do> — <tóm tắt>" + "Nhận xử lý" / "Đã xong, trả lại cho AI" (bot có thể đặt tên
+ * riêng cho hai nút, vd. "Nghiệm thu" / "Đã chuyển tiền").
+ */
 function HandoffBanner({ conversation: c }: { conversation: ConversationSummary }) {
   const { user } = useAuth();
   const ack = useAckHandoff(c.id);
@@ -157,22 +162,23 @@ function HandoffBanner({ conversation: c }: { conversation: ConversationSummary 
   const h = c.handoff ?? null;
   const ackedBy = h?.acknowledgedBy ?? null;
   const busy = ack.isPending || resolve.isPending;
+  const labels = handoffButtonLabels(c.chatbot);
 
   return (
     <div
-      className="flex flex-col gap-2 border-b border-red-200 bg-red-50 px-3 py-2 text-sm text-red-900 sm:flex-row sm:items-center sm:px-4"
+      className="flex flex-col gap-2 border-b border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900 sm:flex-row sm:items-center sm:px-4"
       role="alert"
     >
       <div className="flex min-w-0 flex-1 items-start gap-2">
-        <Siren className="mt-0.5 size-4 shrink-0 text-red-600" aria-hidden />
+        <Siren className="mt-0.5 size-4 shrink-0 text-blue-600" aria-hidden />
         <div className="flex min-w-0 flex-col gap-0.5">
           <p className="font-semibold">
             Cần người: {h ? handoffReasonLabel(h.reasonCode) : 'Hội thoại đang chờ nhân viên xử lý'}
             {h?.summary && <span className="font-normal"> — {h.summary}</span>}
           </p>
           {ackedBy && (
-            <p className="text-xs text-red-800/80">
-              Đã nhận bởi {ackedBy.id === user?.id ? 'bạn' : ackedBy.name}
+            <p className="text-xs text-blue-800/80">
+              {handoffAckedText(labels, ackedBy.id === user?.id ? 'bạn' : ackedBy.name)}
             </p>
           )}
         </div>
@@ -181,18 +187,18 @@ function HandoffBanner({ conversation: c }: { conversation: ConversationSummary 
         {h && !ackedBy && (
           <Button
             size="sm"
-            className="h-8 bg-red-600 text-white hover:bg-red-700"
+            className="h-8 bg-blue-600 text-white hover:bg-blue-700"
             disabled={busy}
             onClick={() => ack.mutate()}
           >
             {ack.isPending ? <Loader2 className="animate-spin" aria-hidden /> : <Hand aria-hidden />}
-            Nhận xử lý
+            {labels.ack}
           </Button>
         )}
         <Button
           variant="outline"
           size="sm"
-          className="h-8 border-red-300 bg-background text-red-800 hover:bg-red-100"
+          className="h-8 border-blue-300 bg-background text-blue-800 hover:bg-blue-100"
           disabled={busy}
           onClick={() => resolve.mutate()}
         >
@@ -201,7 +207,7 @@ function HandoffBanner({ conversation: c }: { conversation: ConversationSummary 
           ) : (
             <CheckCircle2 aria-hidden />
           )}
-          {c.chatbot ? 'Đã xong, trả lại cho AI' : 'Đã xong'}
+          {labels.resolve}
         </Button>
       </div>
     </div>

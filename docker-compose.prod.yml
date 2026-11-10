@@ -1,0 +1,245 @@
+# Production cho 1 VPS dùng chung Caddy (container qspro-web-1, mạng ${EDGE_NETWORK:-qspro_default}).
+# KHÔNG publish cổng host nào: Caddy chung reverse_proxy tới container theo tên
+# (dezon-inbox-api:4000, dezon-inbox-web:3100, dezon-inbox-s3:8333) — xem deploy/caddy-site.alo.vuathau.com.vn.caddy.
+#
+#   docker compose -f docker-compose.prod.yml --env-file .env.production up -d
+#
+# --env-file dùng để nội suy biến trong file này; app đọc biến từ env_file (mặc định cùng file .env.production).
+# Xem docs/DEPLOY.md.
+name: dezon-prod
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: '10m'
+    max-file: '3'
+
+x-app-env-file: &app-env-file
+  - ${ENV_FILE:-.env.production}
+
+# Ghi đè các biến hạ tầng: dùng TÊN CONTAINER (duy nhất trên máy) thay cho tên service để không
+# đụng service trùng tên (postgres, redis...) của project khác trên mạng edge dùng chung.
+x-app-env: &app-env
+  NODE_ENV: production
+  TZ: Asia/Ho_Chi_Minh
+  API_PORT: '4000'
+  DATABASE_URL: postgres://${POSTGRES_USER:-dezon}:${POSTGRES_PASSWORD:?Thiếu POSTGRES_PASSWORD}@dezon-inbox-db:5432/${POSTGRES_DB:-dezon_inbox}
+  REDIS_URL: redis://dezon-inbox-redis:6379
+  S3_ENDPOINT: http://dezon-inbox-s3:8333
+
+x-api-build: &api-build
+  context: .
+  target: api
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: dezon-inbox-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-dezon}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Thiếu POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-dezon_inbox}
+      TZ: Asia/Ho_Chi_Minh
+      PGTZ: Asia/Ho_Chi_Minh
+    command: ['postgres', '-c', 'shared_buffers=128MB', '-c', 'max_connections=60', '-c', 'work_mem=8MB']
+    shm_size: 128mb
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [backend]
+    mem_limit: 512m
+    healthcheck:
+      # Qua TCP: lúc khởi tạo lần đầu, server tạm chỉ nghe unix socket rồi khởi động lại.
+      test: ['CMD-SHELL', 'pg_isready -h 127.0.0.1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging: *logging
+
+  redis:
+    image: redis:7-alpine
+    container_name: dezon-inbox-redis
+    restart: unless-stopped
+    # BullMQ cần noeviction (không được tự xóa key).
+    command:
+      ['redis-server', '--appendonly', 'yes', '--maxmemory', '192mb', '--maxmemory-policy', 'noeviction']
+    environment:
+      TZ: Asia/Ho_Chi_Minh
+    volumes:
+      - redisdata:/data
+    networks: [backend]
+    mem_limit: 256m
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging: *logging
+
+  # S3-compatible (SeaweedFS). Cấu hình khóa sinh từ env lúc khởi động (KHÔNG dùng khóa dev trong infra/).
+  # Có mặt trên mạng edge để Caddy chung phục vụ URL ký /<bucket>/* (giữ nguyên Host => chữ ký SigV4 hợp lệ).
+  # -ip=<tên container>: container ở 2 mạng nên phải quảng bá tên (phân giải được trên cả hai) thay vì 1 IP.
+  s3:
+    image: chrislusf/seaweedfs:4.50
+    container_name: dezon-inbox-s3
+    restart: unless-stopped
+    environment:
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:?Thiếu S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:?Thiếu S3_SECRET_KEY}
+      TZ: Asia/Ho_Chi_Minh
+    entrypoint: ['/bin/sh', '-c']
+    command:
+      - |
+        umask 077
+        printf '{"identities":[{"name":"dezon-prod","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":["Admin","Read","Write","List","Tagging"]}]}' "$$S3_ACCESS_KEY" "$$S3_SECRET_KEY" > /tmp/s3.json
+        exec weed server -ip=dezon-inbox-s3 -ip.bind=0.0.0.0 -dir=/data -s3 -s3.port=8333 -s3.config=/tmp/s3.json -master.volumeSizeLimitMB=1024
+    volumes:
+      - s3data:/data
+    networks: [backend, edge]
+    mem_limit: 512m
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q -O /dev/null http://127.0.0.1:8333/healthz || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    logging: *logging
+
+  # Tạo bucket một lần (chạy lại an toàn: bucket đã có thì bỏ qua).
+  s3-init:
+    image: chrislusf/seaweedfs:4.50
+    container_name: dezon-inbox-s3-init
+    depends_on:
+      s3:
+        condition: service_healthy
+    environment:
+      S3_BUCKET: ${S3_BUCKET:-dezon-inbox}
+    entrypoint: ['/bin/sh', '-c']
+    command:
+      - |
+        for i in $$(seq 1 30); do
+          if echo 's3.bucket.list' | weed shell -master=dezon-inbox-s3:9333 2>/dev/null | grep -qw "$$S3_BUCKET"; then
+            echo "Bucket $$S3_BUCKET da co"; exit 0
+          fi
+          echo "s3.bucket.create -name $$S3_BUCKET" | weed shell -master=dezon-inbox-s3:9333 && exit 0
+          sleep 2
+        done
+        exit 1
+    networks: [backend]
+    restart: 'no'
+    logging: *logging
+
+  # Migration one-shot (dùng image api). api/worker chỉ khởi động khi migrate thoát mã 0.
+  migrate:
+    build: *api-build
+    image: dezon-inbox-api:${IMAGE_TAG:-latest}
+    container_name: dezon-inbox-migrate
+    env_file: *app-env-file
+    environment: *app-env
+    command: ['node', 'node_modules/@dezon/db/dist/scripts/migrate.js']
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [backend]
+    restart: 'no'
+    healthcheck:
+      disable: true
+    logging: *logging
+
+  api:
+    build: *api-build
+    image: dezon-inbox-api:${IMAGE_TAG:-latest}
+    container_name: dezon-inbox-api
+    restart: unless-stopped
+    env_file: *app-env-file
+    environment:
+      <<: *app-env
+      NODE_OPTIONS: --max-old-space-size=448
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      s3-init:
+        condition: service_completed_successfully
+    networks: [backend, edge]
+    mem_limit: 640m
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:4000/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging: *logging
+
+  worker:
+    build:
+      context: .
+      target: worker
+    image: dezon-inbox-worker:${IMAGE_TAG:-latest}
+    container_name: dezon-inbox-worker
+    restart: unless-stopped
+    env_file: *app-env-file
+    environment:
+      <<: *app-env
+      NODE_OPTIONS: --max-old-space-size=448
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      s3-init:
+        condition: service_completed_successfully
+    # Chỉ mạng backend (vẫn ra Internet được: Graph API, Gemini, Lark...).
+    networks: [backend]
+    mem_limit: 640m
+    stop_grace_period: 30s
+    logging: *logging
+
+  web:
+    build:
+      context: .
+      target: web
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:?Thiếu NEXT_PUBLIC_API_URL}
+    image: dezon-inbox-web:${IMAGE_TAG:-latest}
+    container_name: dezon-inbox-web
+    restart: unless-stopped
+    # Web không cần secret: NEXT_PUBLIC_API_URL đã inline lúc build.
+    environment:
+      TZ: Asia/Ho_Chi_Minh
+      NODE_OPTIONS: --max-old-space-size=256
+    networks: [edge]
+    mem_limit: 384m
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3100/login').then(r=>process.exit(r.status<500?0:1),()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    logging: *logging
+
+networks:
+  # Mạng riêng của project (db, redis, s3, worker, api). Không publish cổng nào ra host.
+  backend:
+  # Mạng của Caddy dùng chung (đã có sẵn trên VPS).
+  edge:
+    external: true
+    name: ${EDGE_NETWORK:-qspro_default}
+
+volumes:
+  pgdata:
+  redisdata:
+  s3data:

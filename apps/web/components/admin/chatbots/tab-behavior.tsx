@@ -2,10 +2,12 @@
 
 // Nội dung 2 tab: Chuyển người thật, Nâng cao.
 import { useId, useState, type KeyboardEvent, type ReactNode } from 'react';
-import { Gauge, Plus, Power, ShieldAlert, TriangleAlert, X, Zap } from 'lucide-react';
+import { BellRing, Gauge, Plus, Power, ShieldAlert, TriangleAlert, X, Zap } from 'lucide-react';
 import {
   CHATBOT_DEFAULTS,
   CHATBOT_LIMITS,
+  DEFAULT_HANDOFF_ACK_LABEL,
+  DEFAULT_HANDOFF_RESOLVE_LABEL,
   RESPONSE_SPEED_HINTS,
   RESPONSE_SPEED_LABELS,
   RESPONSE_SPEEDS,
@@ -250,7 +252,83 @@ export function HandoffTab({ form, update, errors }: TabProps) {
           className="resize-y"
         />
       </Field>
+
+      <HandoffButtonsSection form={form} update={update} errors={errors} />
     </div>
+  );
+}
+
+/** "Nút khi cần người": tên riêng cho hai nút trên banner đỏ ở hộp thư + thông báo Lark khi bấm. */
+function HandoffButtonsSection({ form, update, errors }: TabProps) {
+  const id = useId();
+  const ackId = `${id}-ack`;
+  const resolveId = `${id}-resolve`;
+  const max = CHATBOT_LIMITS.handoffButtonLabelMax;
+  return (
+    <section className="flex flex-col gap-4">
+      <div className="flex flex-col gap-1">
+        <h3 className="text-sm font-medium">Nút khi cần người</h3>
+        <p className="text-xs text-muted-foreground">
+          Tên hai nút trên dải đỏ “Cần người” ở hộp thư, cho hội thoại đang gắn bot này. Để trống = dùng tên
+          mặc định.
+        </p>
+      </div>
+      <div className="grid gap-5 sm:grid-cols-2">
+        <Field
+          label="Tên nút nhận xử lý"
+          htmlFor={ackId}
+          error={errors.handoffAckLabel}
+          errorId={`${ackId}-err`}
+          aside={<CharCounter value={form.handoffAckLabel} max={max} />}
+          hint="Ví dụ: Nghiệm thu"
+        >
+          <Input
+            id={ackId}
+            value={form.handoffAckLabel}
+            onChange={(e) => update({ handoffAckLabel: e.target.value })}
+            placeholder={DEFAULT_HANDOFF_ACK_LABEL}
+            maxLength={max}
+            aria-invalid={!!errors.handoffAckLabel}
+            aria-describedby={errors.handoffAckLabel ? `${ackId}-err` : undefined}
+          />
+        </Field>
+        <Field
+          label="Tên nút xong việc (trả lại cho AI)"
+          htmlFor={resolveId}
+          error={errors.handoffResolveLabel}
+          errorId={`${resolveId}-err`}
+          aside={<CharCounter value={form.handoffResolveLabel} max={max} />}
+          hint="Ví dụ: Đã chuyển tiền"
+        >
+          <Input
+            id={resolveId}
+            value={form.handoffResolveLabel}
+            onChange={(e) => update({ handoffResolveLabel: e.target.value })}
+            placeholder={DEFAULT_HANDOFF_RESOLVE_LABEL}
+            maxLength={max}
+            aria-invalid={!!errors.handoffResolveLabel}
+            aria-describedby={errors.handoffResolveLabel ? `${resolveId}-err` : undefined}
+          />
+        </Field>
+      </div>
+      <div className="flex items-start gap-3 rounded-lg border bg-background p-3">
+        <BellRing className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden />
+        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <label htmlFor={`${id}-lark`} className="text-sm font-medium">
+            Gửi thông báo Lark khi bấm hai nút này
+          </label>
+          <p className="text-xs text-muted-foreground">
+            Lark nhận tên khách, người bấm, giờ bấm và tóm tắt yêu cầu (ví dụ: công trình, số ảnh, thù lao).
+            Cần cấu hình Lark ở mục Cài đặt.
+          </p>
+        </div>
+        <Switch
+          id={`${id}-lark`}
+          checked={form.handoffActionLark}
+          onCheckedChange={(handoffActionLark) => update({ handoffActionLark })}
+        />
+      </div>
+    </section>
   );
 }
 

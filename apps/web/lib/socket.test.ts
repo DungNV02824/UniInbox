@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { startRealtime, type InboxSocket, type SocketFactory } from './socket';
+import { socketEndpoint, startRealtime, type InboxSocket, type SocketFactory } from './socket';
 
 /** Socket giả: ghi lại handler, mô phỏng connect/active như socket.io-client. */
 class FakeSocket {
@@ -46,9 +46,12 @@ class FakeSocket {
 function setup(
   token: { value: string | null },
   refresh = vi.fn(async (): Promise<string | null> => 'new-token'),
+  url = 'http://api.test',
 ) {
   let fake!: FakeSocket;
-  const factory: SocketFactory = (_url, opts) => {
+  let created: { url: string; path: unknown } | undefined;
+  const factory: SocketFactory = (u, opts) => {
+    created = { url: u, path: opts.path };
     fake = new FakeSocket(opts as never);
     return fake as unknown as InboxSocket;
   };
@@ -56,7 +59,7 @@ function setup(
   const onResync = vi.fn();
   const onCreated = vi.fn();
   const stop = startRealtime({
-    url: 'http://api.test',
+    url,
     getToken: () => token.value,
     refreshToken: refresh,
     subscribeSession: (l) => {
@@ -67,12 +70,60 @@ function setup(
     onResync,
     createSocket: factory,
   });
-  return { fake, stop, onResync, onCreated, refresh, session: (u: unknown) => sessionListener(u) };
+  return {
+    fake,
+    stop,
+    onResync,
+    onCreated,
+    refresh,
+    created: created!,
+    session: (u: unknown) => sessionListener(u),
+  };
 }
+
+describe('socketEndpoint', () => {
+  it('API ở gốc (dev) => giữ nguyên URL và path /socket.io', () => {
+    expect(socketEndpoint('http://localhost:4000')).toEqual({
+      url: 'http://localhost:4000',
+      path: '/socket.io',
+    });
+    expect(socketEndpoint('http://localhost:4000/')).toEqual({
+      url: 'http://localhost:4000',
+      path: '/socket.io',
+    });
+  });
+
+  it('API sau tiền tố => nối tới origin, path = tiền tố + /socket.io (không thành namespace)', () => {
+    expect(socketEndpoint('https://alo.vuathau.com.vn/api')).toEqual({
+      url: 'https://alo.vuathau.com.vn',
+      path: '/api/socket.io',
+    });
+    expect(socketEndpoint('https://alo.vuathau.com.vn/api/')).toEqual({
+      url: 'https://alo.vuathau.com.vn',
+      path: '/api/socket.io',
+    });
+    expect(socketEndpoint('https://host.test/a/b')).toEqual({
+      url: 'https://host.test',
+      path: '/a/b/socket.io',
+    });
+  });
+
+  it('URL không parse được => dùng nguyên giá trị với path mặc định', () => {
+    expect(socketEndpoint('khong-phai-url')).toEqual({ url: 'khong-phai-url', path: '/socket.io' });
+  });
+});
 
 describe('startRealtime', () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
+
+  it('truyền origin + path đã tách cho socket.io', () => {
+    expect(setup({ value: 't' }).created).toEqual({ url: 'http://api.test', path: '/socket.io' });
+    expect(setup({ value: 't' }, undefined, 'https://alo.vuathau.com.vn/api').created).toEqual({
+      url: 'https://alo.vuathau.com.vn',
+      path: '/api/socket.io',
+    });
+  });
 
   it('kết nối ngay bằng access token hiện tại và chuyển sự kiện tới handler', () => {
     const { fake, onCreated } = setup({ value: 't1' });

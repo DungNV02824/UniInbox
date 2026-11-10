@@ -15,6 +15,8 @@ export const CHATBOT_LIMITS = {
   keywordsMax: 100,
   keywordMax: 50,
   handoffMessageMax: 1000,
+  /** Tên nút trên banner "Cần người" (vd. "Nghiệm thu", "Đã chuyển tiền"). */
+  handoffButtonLabelMax: 40,
   modelMax: 100,
   testMessagesMax: 30,
   testTextMax: 2000,
@@ -32,7 +34,12 @@ export const CHATBOT_DEFAULTS = {
   maxRepliesPerHour: 20,
   escalateWhenUnsure: true,
   responseSpeed: 'fast',
+  handoffActionLark: false,
 } as const;
+
+/** Tên mặc định hai nút trên banner "Cần người" khi bot không đặt tên riêng. */
+export const DEFAULT_HANDOFF_ACK_LABEL = 'Nhận xử lý';
+export const DEFAULT_HANDOFF_RESOLVE_LABEL = 'Đã xong, trả lại cho AI';
 
 // ---------- Tốc độ trả lời ----------
 
@@ -102,6 +109,12 @@ export interface ChatbotDto {
   escalateWhenUnsure: boolean;
   /** "Tốc độ trả lời" (mức suy nghĩ của AI). Mặc định CHATBOT_DEFAULTS.responseSpeed = 'fast'. */
   responseSpeed: ResponseSpeed;
+  /** Tên nút "nhận" trên banner Cần người; null = DEFAULT_HANDOFF_ACK_LABEL. */
+  handoffAckLabel: string | null;
+  /** Tên nút "xong" (trả lại cho AI); null = DEFAULT_HANDOFF_RESOLVE_LABEL. */
+  handoffResolveLabel: string | null;
+  /** true = bấm hai nút trên thì gửi thông báo Lark. */
+  handoffActionLark: boolean;
   /** Số hội thoại đang gắn bot này. */
   conversationCount: number;
   createdAt: string;
@@ -115,12 +128,19 @@ export interface ChatbotSummary {
   description: string | null;
   isActive: boolean;
   conversationCount: number;
+  /** Tên nút banner Cần người (null = mặc định) — hộp thư dùng để hiện đúng tên nút của bot. */
+  handoffAckLabel: string | null;
+  handoffResolveLabel: string | null;
 }
 
 /** Bot rút gọn đi kèm hội thoại. */
 export interface ChatbotRef {
   id: string;
   name: string;
+  /** Tên nút "nhận" riêng của bot trên banner Cần người; không có = DEFAULT_HANDOFF_ACK_LABEL. */
+  handoffAckLabel?: string;
+  /** Tên nút "xong" riêng của bot; không có = DEFAULT_HANDOFF_RESOLVE_LABEL. */
+  handoffResolveLabel?: string;
 }
 
 const exampleSchema = z.object({
@@ -149,6 +169,10 @@ const chatbotFields = {
   escalateWhenUnsure: z.boolean().optional(),
   /** Bỏ trống khi tạo ⇒ DB mặc định 'fast' (CHATBOT_DEFAULTS.responseSpeed). Draft "Chat thử" nhận luôn. */
   responseSpeed: responseSpeedSchema.optional(),
+  /** Chuỗi rỗng / null ⇒ dùng tên mặc định. */
+  handoffAckLabel: z.string().trim().max(CHATBOT_LIMITS.handoffButtonLabelMax).nullable().optional(),
+  handoffResolveLabel: z.string().trim().max(CHATBOT_LIMITS.handoffButtonLabelMax).nullable().optional(),
+  handoffActionLark: z.boolean().optional(),
 };
 
 /** POST /chatbots (admin). Trường bỏ trống dùng mặc định của DB. */

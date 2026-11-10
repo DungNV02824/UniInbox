@@ -12,4 +12,5 @@ export * from './errors';
 export * from './service';
 export * from './settings';
 export * from './lark';
+export * from './handoff-action';
 export * from './runtime';

@@ -57,6 +57,13 @@
       "when": 1794238364602,
       "tag": "0007_contact_tags",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1794296454237,
+      "tag": "0008_handoff_buttons",
+      "breakpoints": true
     }
   ]
 }

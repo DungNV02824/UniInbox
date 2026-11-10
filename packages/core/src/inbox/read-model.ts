@@ -104,6 +104,8 @@ const summaryFields = {
   aiPausedUntil: conversations.aiPausedUntil,
   chatbotId: conversations.chatbotId,
   chatbotName: chatbots.name,
+  chatbotAckLabel: chatbots.handoffAckLabel,
+  chatbotResolveLabel: chatbots.handoffResolveLabel,
   handoff: openHandoffSql,
 };
 
@@ -210,7 +212,16 @@ export async function toSummary(row: SummaryRow, ctx: InboxContext): Promise<Con
       ctx.now(),
       ctx.policy,
     ),
-    chatbot: row.chatbotId && row.chatbotName ? { id: row.chatbotId, name: row.chatbotName } : null,
+    chatbot:
+      row.chatbotId && row.chatbotName
+        ? {
+            id: row.chatbotId,
+            name: row.chatbotName,
+            // Chỉ kèm khi bot đặt tên nút riêng (bot thường giữ nguyên dạng { id, name }).
+            ...(row.chatbotAckLabel ? { handoffAckLabel: row.chatbotAckLabel } : {}),
+            ...(row.chatbotResolveLabel ? { handoffResolveLabel: row.chatbotResolveLabel } : {}),
+          }
+        : null,
     aiPausedUntil:
       row.aiPausedUntil && row.aiPausedUntil > ctx.now() ? row.aiPausedUntil.toISOString() : null,
     handoff: parseHandoff(row.handoff),

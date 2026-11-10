@@ -26,6 +26,22 @@ export interface RealtimeOptions {
 const MAX_AUTH_RETRY_DELAY_MS = 30_000;
 
 /**
+ * Tách API URL thành (origin, path) cho socket.io. Phần path của URL mà đưa thẳng cho `io()` sẽ bị hiểu
+ * là namespace, nên khi API nằm sau tiền tố (vd. https://host/api, proxy bỏ `/api`) phải kết nối tới origin
+ * với path = `<tiền tố>` + SOCKET_PATH. API ở gốc (dev: http://localhost:4000) => path giữ nguyên SOCKET_PATH.
+ */
+export function socketEndpoint(apiUrl: string): { url: string; path: string } {
+  let parsed: URL;
+  try {
+    parsed = new URL(apiUrl);
+  } catch {
+    return { url: apiUrl, path: SOCKET_PATH };
+  }
+  const prefix = parsed.pathname.replace(/\/+$/, '');
+  return { url: parsed.origin, path: `${prefix}${SOCKET_PATH}` };
+}
+
+/**
  * Mở một kết nối socket và trả về hàm đóng.
  * - Token lấy qua callback `auth` nên mọi lần kết nối lại đều dùng token mới nhất; token được refresh
  *   trong lúc đang kết nối thì KHÔNG cắt kết nối (tránh hở tin), lần bắt tay sau tự dùng token mới.
@@ -35,8 +51,9 @@ const MAX_AUTH_RETRY_DELAY_MS = 30_000;
  */
 export function startRealtime(opts: RealtimeOptions): () => void {
   const create: SocketFactory = opts.createSocket ?? ((url, o) => io(url, o) as InboxSocket);
-  const socket = create(opts.url, {
-    path: SOCKET_PATH,
+  const endpoint = socketEndpoint(opts.url);
+  const socket = create(endpoint.url, {
+    path: endpoint.path,
     autoConnect: false,
     reconnectionDelayMax: 10_000,
     auth: (cb: (data: object) => void) => cb({ token: opts.getToken() ?? '' }),

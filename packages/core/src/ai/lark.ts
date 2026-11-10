@@ -92,6 +92,70 @@ export function buildHandoffLarkCard(input: HandoffCardInput): LarkCardMessage {
   };
 }
 
+export interface HandoffActionCardInput {
+  /** 'ack' = nút "nhận" (vd. "Nghiệm thu"); 'resolve' = nút "xong" (vd. "Đã chuyển tiền"). */
+  action: 'ack' | 'resolve';
+  /** Tên nút nhân viên vừa bấm (tên riêng của bot hoặc mặc định). */
+  buttonLabel: string;
+  contactName: string;
+  channelName: string;
+  chatbotName: string;
+  /** Tên nhân viên đã bấm. */
+  actorName: string;
+  /** Giờ bấm, đã định dạng (giờ Việt Nam). */
+  at: string;
+  /** Tóm tắt các yêu cầu chuyển người liên quan (vd. công trình + số ảnh + thù lao). */
+  summaries: string[];
+  conversationUrl: string;
+}
+
+/**
+ * Thẻ Lark khi nhân viên bấm nút trên banner "Cần người" (bot bật handoffActionLark): header xanh lá
+ * "✅ <tên nút>" (ack) / xanh dương "☑️ <tên nút>" (resolve), các dòng Khách, Kênh, Bot, Người bấm, Lúc,
+ * Nội dung (lark_md, đã escape), nút "Mở hội thoại".
+ */
+export function buildHandoffActionLarkCard(input: HandoffActionCardInput): LarkCardMessage {
+  const header =
+    input.action === 'ack'
+      ? { title: `✅ ${input.buttonLabel}`, template: 'green' }
+      : { title: `☑️ ${input.buttonLabel}`, template: 'blue' };
+  const content =
+    input.summaries.length > 1
+      ? input.summaries.map((s, i) => `${i + 1}. ${s.trim()}`).join('\n')
+      : (input.summaries[0] ?? '');
+  return {
+    msg_type: 'interactive',
+    card: {
+      config: { wide_screen_mode: true },
+      header: { title: { tag: 'plain_text', content: header.title }, template: header.template },
+      elements: [
+        {
+          tag: 'div',
+          fields: [
+            mdField('Khách', input.contactName, true),
+            mdField('Kênh', input.channelName, true),
+            mdField('Bot', input.chatbotName, true),
+            mdField('Người bấm', input.actorName, true),
+            mdField('Lúc', input.at, true),
+            mdField('Nội dung', content, false),
+          ],
+        },
+        {
+          tag: 'action',
+          actions: [
+            {
+              tag: 'button',
+              text: { tag: 'plain_text', content: 'Mở hội thoại' },
+              type: 'default',
+              url: input.conversationUrl,
+            },
+          ],
+        },
+      ],
+    },
+  };
+}
+
 export interface NotifyLarkOptions {
   fetch?: typeof fetch;
   now?: () => Date;

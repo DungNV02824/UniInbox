@@ -1,6 +1,8 @@
 // Logic THUẦN của tính năng Chatbot AI trong hộp thư (trạng thái AI của hội thoại, cập nhật lạc quan,
 // bộ lọc "AI đang lo", nhãn tin bot, nhật ký AI). Không phụ thuộc React để test độc lập.
 import {
+  DEFAULT_HANDOFF_ACK_LABEL,
+  DEFAULT_HANDOFF_RESOLVE_LABEL,
   HANDOFF_REASON_LABELS,
   type AiRunDecision,
   type ChatbotRef,
@@ -127,6 +129,53 @@ export function botSenderLabel(m: Pick<MessageDto, 'senderLabel'>): string {
 export function handoffReasonLabel(code: string | null | undefined): string {
   if (!code) return HANDOFF_REASON_LABELS.other;
   return (HANDOFF_REASON_LABELS as Record<string, string>)[code] ?? HANDOFF_REASON_LABELS.other;
+}
+
+export interface HandoffButtonLabels {
+  /** Nút "nhận" (mặc định "Nhận xử lý"; bot có thể đặt riêng, vd. "Nghiệm thu"). */
+  ack: string;
+  /** Nút "xong" (mặc định "Đã xong, trả lại cho AI"; hội thoại không gắn bot ⇒ "Đã xong"). */
+  resolve: string;
+  /** true = bot đặt tên nút nhận riêng (dòng "Đã nhận bởi …" đổi thành `Đã bấm "<tên>" — …`). */
+  customAck: boolean;
+}
+
+/** Chuỗi rỗng/toàn khoảng trắng coi như chưa đặt tên. */
+function customLabel(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
+}
+
+/**
+ * Tên hai nút trên banner "Cần người" theo bot của hội thoại — lấy từ chính hội thoại (ConversationSummary.chatbot
+ * kèm handoffAckLabel/handoffResolveLabel khi bot đặt tên riêng) nên đúng cả khi bot đã tắt / danh sách bot chưa tải.
+ * Không có tên riêng ⇒ tên mặc định; hội thoại không gắn bot ⇒ nút xong là "Đã xong".
+ */
+export function handoffButtonLabels(
+  chatbot: Pick<ChatbotRef, 'id' | 'handoffAckLabel' | 'handoffResolveLabel'> | null | undefined,
+): HandoffButtonLabels {
+  const ack = customLabel(chatbot?.handoffAckLabel);
+  const resolve = customLabel(chatbot?.handoffResolveLabel);
+  return {
+    ack: ack ?? DEFAULT_HANDOFF_ACK_LABEL,
+    resolve: chatbot ? (resolve ?? DEFAULT_HANDOFF_RESOLVE_LABEL) : 'Đã xong',
+    customAck: ack !== null && ack !== DEFAULT_HANDOFF_ACK_LABEL,
+  };
+}
+
+/** Gợi ý khi ô chọn bot bị khóa vì đang chờ người: nêu đúng tên nút "xong" của bot. */
+export function chatbotLockedHint(
+  chatbot: Pick<ChatbotRef, 'id' | 'handoffResolveLabel'> | null | undefined,
+): string {
+  return `Bấm '${customLabel(chatbot?.handoffResolveLabel) ?? DEFAULT_HANDOFF_RESOLVE_LABEL}' để bật lại bot`;
+}
+
+/** Dòng dưới banner sau khi đã bấm nút nhận: "Đã nhận bởi bạn" / `Đã bấm "Nghiệm thu" — Lan`. */
+export function handoffAckedText(
+  labels: Pick<HandoffButtonLabels, 'ack' | 'customAck'>,
+  who: string,
+): string {
+  return labels.customAck ? `Đã bấm "${labels.ack}" — ${who}` : `Đã nhận bởi ${who}`;
 }
 
 export const AI_RUN_DECISION_LABELS: Record<AiRunDecision, string> = {

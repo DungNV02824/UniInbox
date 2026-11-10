@@ -40,6 +40,12 @@ export const chatbots = pgTable(
     escalateWhenUnsure: boolean('escalate_when_unsure').notNull().default(true),
     /** "Tốc độ trả lời" = mức suy nghĩ của Gemini ('fast' | 'balanced' | 'thorough', RESPONSE_SPEEDS). */
     responseSpeed: text('response_speed').$type<ResponseSpeed>().notNull().default('fast'),
+    /** Tên nút "nhận" trên banner Cần người; null = "Nhận xử lý" (vd. "Nghiệm thu"). */
+    handoffAckLabel: text('handoff_ack_label'),
+    /** Tên nút "xong" trên banner Cần người; null = "Đã xong, trả lại cho AI" (vd. "Đã chuyển tiền"). */
+    handoffResolveLabel: text('handoff_resolve_label'),
+    /** true = bấm hai nút trên thì gửi thông báo Lark (kèm tóm tắt yêu cầu chuyển người). */
+    handoffActionLark: boolean('handoff_action_lark').notNull().default(false),
     createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
     ...timestamps(),
   },

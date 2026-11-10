@@ -10,11 +10,16 @@ import {
   messages,
   type ChannelAccount,
 } from '@dezon/db';
-import type { NormalizedInboundMessage } from '@dezon/shared';
+import {
+  DEFAULT_HANDOFF_ACK_LABEL,
+  DEFAULT_HANDOFF_RESOLVE_LABEL,
+  type NormalizedInboundMessage,
+} from '@dezon/shared';
 import { and, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { toChatbotConfig } from '../src/ai/config';
 import { ChatbotNameConflictError } from '../src/ai/errors';
+import { loadHandoffActionNotice } from '../src/ai/handoff-action';
 import {
   ackHandoff,
   createChatbot,
@@ -141,6 +146,70 @@ describe('CRUD chatbot', () => {
     expect(toChatbotConfig(row!, { responseSpeed: 'fast' }).responseSpeed).toBe('fast');
   });
 
+  it('tên nút banner Cần người + báo Lark khi bấm: mặc định null/false, tạo/sửa/đọc lại, rỗng ⇒ null', async () => {
+    const plain = await createChatbot(t.db, t.admin.id, { name: 'Bot Nút Mặc Định' });
+    expect(plain).toMatchObject({
+      handoffAckLabel: null,
+      handoffResolveLabel: null,
+      handoffActionLark: false,
+    });
+
+    const bot = await createChatbot(t.db, t.admin.id, {
+      name: 'Bot Nút Riêng',
+      handoffAckLabel: 'Nghiệm thu',
+      handoffResolveLabel: '   ',
+      handoffActionLark: true,
+    });
+    expect(bot).toMatchObject({
+      handoffAckLabel: 'Nghiệm thu',
+      handoffResolveLabel: null,
+      handoffActionLark: true,
+    });
+
+    const upd = await updateChatbot(t.db, t.admin.id, bot.id, { handoffResolveLabel: 'Đã chuyển tiền' });
+    expect(upd).toMatchObject({
+      handoffAckLabel: 'Nghiệm thu',
+      handoffResolveLabel: 'Đã chuyển tiền',
+      handoffActionLark: true,
+    });
+    // Sửa trường khác không đổi nút.
+    expect(await updateChatbot(t.db, t.admin.id, bot.id, { knowledge: 'k' })).toMatchObject({
+      handoffAckLabel: 'Nghiệm thu',
+      handoffResolveLabel: 'Đã chuyển tiền',
+    });
+    const cleared = await updateChatbot(t.db, t.admin.id, bot.id, {
+      handoffAckLabel: '',
+      handoffResolveLabel: null,
+      handoffActionLark: false,
+    });
+    expect(cleared).toMatchObject({
+      handoffAckLabel: null,
+      handoffResolveLabel: null,
+      handoffActionLark: false,
+    });
+    await updateChatbot(t.db, t.admin.id, bot.id, { handoffAckLabel: 'Nghiệm thu' });
+    const [row] = await t.db.select().from(chatbots).where(eq(chatbots.id, bot.id));
+    expect(row).toMatchObject({
+      handoffAckLabel: 'Nghiệm thu',
+      handoffResolveLabel: null,
+      handoffActionLark: false,
+    });
+    expect(await getChatbot(t.db, bot.id)).toMatchObject({ handoffAckLabel: 'Nghiệm thu' });
+
+    // Hộp thư (cả agent) thấy tên nút qua listChatbots.
+    for (const viewer of [t.admin, t.agent]) {
+      const list = await listChatbots(t.db, viewer);
+      expect(list.find((b) => b.id === bot.id)).toMatchObject({
+        handoffAckLabel: 'Nghiệm thu',
+        handoffResolveLabel: null,
+      });
+      expect(list.find((b) => b.id === plain.id)).toMatchObject({
+        handoffAckLabel: null,
+        handoffResolveLabel: null,
+      });
+    }
+  });
+
   it('xóa bot gỡ khỏi hội thoại (ai_mode off) và kênh', async () => {
     const bot = await createChatbot(t.db, t.admin.id, { name: 'Bot Sẽ Xóa' });
     const ch = await createChannel(t.db, { defaultChatbotId: bot.id });
@@ -248,6 +317,49 @@ describe('chatbot trên hội thoại', () => {
     expect(resolved.conversation).toMatchObject({ status: 'open', aiMode: 'off', handoff: null });
   });
 
+  it('ackHandoff trả ackedHandoffId lần đầu, null khi bấm lại; resolveHandoff trả id vừa đóng rồi []', async () => {
+    const bot = await createChatbot(t.db, t.admin.id, { name: 'Bot Id Handoff' });
+    const conv = await createConversation(t.db, {
+      channel,
+      chatbotId: bot.id,
+      aiMode: 'off',
+      status: 'pending_human',
+      handoffReason: 'other',
+      handoffAt: new Date(),
+    });
+    const [h] = await t.db
+      .insert(handoffs)
+      .values({ conversationId: conv.id, reasonCode: 'other', summary: 'Nghiệm thu nhà A', createdBy: 'ai' })
+      .returning();
+
+    const first = await ackHandoff(t.db, t.agent, conv.id, ctx);
+    expect(first.ackedHandoffId).toBe(h!.id);
+    expect(first.conversation.handoff?.acknowledgedBy?.id).toBe(t.agent.id);
+    const again = await ackHandoff(t.db, t.admin, conv.id, ctx);
+    expect(again.ackedHandoffId).toBeNull();
+    expect(again.conversation.handoff?.acknowledgedBy?.id).toBe(t.agent.id);
+
+    const resolved = await resolveHandoff(t.db, t.agent, conv.id, ctx);
+    expect(resolved.resolvedHandoffIds).toEqual([h!.id]);
+    expect(resolved.conversation).toMatchObject({ status: 'open', handoff: null });
+    const repeat = await resolveHandoff(t.db, t.agent, conv.id, ctx);
+    expect(repeat.resolvedHandoffIds).toEqual([]);
+    expect(repeat.conversation.status).toBe('open');
+  });
+
+  it('resolveHandoff đóng mọi handoff mở (kể cả chưa ack) và trả đủ id', async () => {
+    const conv = await createConversation(t.db, { channel, status: 'pending_human', handoffAt: new Date() });
+    const rows = await t.db
+      .insert(handoffs)
+      .values([
+        { conversationId: conv.id, reasonCode: 'other', summary: 'a', createdBy: 'ai' },
+        { conversationId: conv.id, reasonCode: 'other', summary: 'b', createdBy: 'ai' },
+      ])
+      .returning({ id: handoffs.id });
+    const res = await resolveHandoff(t.db, t.agent, conv.id, ctx);
+    expect([...res.resolvedHandoffIds].sort()).toEqual(rows.map((r) => r.id).sort());
+  });
+
   it('listAiRuns trả tên bot, mới nhất trước', async () => {
     const bot = await createChatbot(t.db, t.admin.id, { name: 'Bot Nhật Ký' });
     const conv = await createConversation(t.db, { channel, chatbotId: bot.id, aiMode: 'auto' });
@@ -271,6 +383,127 @@ describe('chatbot trên hội thoại', () => {
     expect(runs.map((r) => r.decision)).toEqual(['no_reply', 'reply']);
     expect(runs[0]).toMatchObject({ chatbotName: 'Bot Nhật Ký', error: 'Đang tạm dừng' });
     expect(await listAiRuns(t.db, conv.id, 1)).toHaveLength(1);
+  });
+});
+
+describe('loadHandoffActionNotice (báo Lark khi bấm nút banner Cần người)', () => {
+  const now = new Date('2026-11-10T07:36:00Z');
+  const appUrl = 'https://inbox.dezon.vn/';
+
+  async function setup(bot: { id: string } | null) {
+    const conv = await createConversation(t.db, {
+      channel,
+      contactName: 'Anh Thợ Ảnh',
+      chatbotId: bot?.id ?? null,
+      aiMode: 'off',
+      status: 'pending_human',
+    });
+    const inserted = await t.db
+      .insert(handoffs)
+      .values([
+        {
+          conversationId: conv.id,
+          reasonCode: 'other',
+          summary: 'Công trình Q2 — 8 ảnh',
+          createdBy: 'ai',
+          createdAt: new Date(now.getTime() - 2 * MIN),
+        },
+        {
+          conversationId: conv.id,
+          reasonCode: 'other',
+          summary: '  ',
+          createdBy: 'ai',
+          createdAt: new Date(now.getTime() - MIN),
+        },
+        {
+          conversationId: conv.id,
+          reasonCode: 'other',
+          summary: 'Công trình Q7 — 12 ảnh, thù lao 500k',
+          createdBy: 'ai',
+          createdAt: now,
+        },
+      ])
+      .returning({ id: handoffs.id });
+    // Đảo thứ tự id để kiểm sắp theo createdAt.
+    return { conv, ids: inserted.map((r) => r.id).reverse() };
+  }
+
+  it('bot không bật handoffActionLark ⇒ null; hội thoại không gắn bot ⇒ null; không có id ⇒ null', async () => {
+    const off = await createChatbot(t.db, t.admin.id, { name: 'Bot Không Báo Nút', handoffAckLabel: 'X' });
+    const a = await setup(off);
+    const base = { action: 'ack' as const, actorUserId: t.agent.id, now, appUrl };
+    expect(
+      await loadHandoffActionNotice(t.db, { ...base, conversationId: a.conv.id, handoffIds: a.ids }),
+    ).toBeNull();
+
+    const b = await setup(null);
+    expect(
+      await loadHandoffActionNotice(t.db, { ...base, conversationId: b.conv.id, handoffIds: b.ids }),
+    ).toBeNull();
+
+    const on = await createChatbot(t.db, t.admin.id, { name: 'Bot Báo Nút Rỗng', handoffActionLark: true });
+    const c = await setup(on);
+    expect(
+      await loadHandoffActionNotice(t.db, { ...base, conversationId: c.conv.id, handoffIds: [] }),
+    ).toBeNull();
+  });
+
+  it('bot bật: tên nút riêng (ack) / mặc định (resolve), người bấm, giờ VN, tóm tắt theo thời gian, url', async () => {
+    const bot = await createChatbot(t.db, t.admin.id, {
+      name: 'Bot Nghiệm Thu Ảnh',
+      handoffAckLabel: 'Nghiệm thu',
+      handoffActionLark: true,
+    });
+    const { conv, ids } = await setup(bot);
+
+    const ack = await loadHandoffActionNotice(t.db, {
+      conversationId: conv.id,
+      action: 'ack',
+      handoffIds: ids,
+      actorUserId: t.agent.id,
+      now,
+      appUrl,
+    });
+    expect(ack).toEqual({
+      action: 'ack',
+      buttonLabel: 'Nghiệm thu',
+      contactName: 'Anh Thợ Ảnh',
+      channelName: 'Fanpage Dezon',
+      chatbotName: 'Bot Nghiệm Thu Ảnh',
+      actorName: 'Hương',
+      at: '14:36 10/11/2026',
+      summaries: ['Công trình Q2 — 8 ảnh', 'Công trình Q7 — 12 ảnh, thù lao 500k'],
+      conversationUrl: `https://inbox.dezon.vn/inbox/${conv.id}`,
+    });
+
+    const resolve = await loadHandoffActionNotice(t.db, {
+      conversationId: conv.id,
+      action: 'resolve',
+      handoffIds: [ids[0]!],
+      actorUserId: crypto.randomUUID(),
+      now,
+      appUrl: 'https://inbox.dezon.vn',
+    });
+    expect(resolve).toMatchObject({
+      action: 'resolve',
+      buttonLabel: DEFAULT_HANDOFF_RESOLVE_LABEL,
+      actorName: 'Nhân viên',
+      summaries: ['Công trình Q7 — 12 ảnh, thù lao 500k'],
+      conversationUrl: `https://inbox.dezon.vn/inbox/${conv.id}`,
+    });
+
+    // Đổi tên nút: ack về mặc định, resolve tên riêng.
+    await updateChatbot(t.db, t.admin.id, bot.id, {
+      handoffAckLabel: null,
+      handoffResolveLabel: 'Đã chuyển tiền',
+    });
+    const base = { conversationId: conv.id, handoffIds: ids, actorUserId: t.agent.id, now, appUrl };
+    expect((await loadHandoffActionNotice(t.db, { ...base, action: 'ack' }))?.buttonLabel).toBe(
+      DEFAULT_HANDOFF_ACK_LABEL,
+    );
+    expect((await loadHandoffActionNotice(t.db, { ...base, action: 'resolve' }))?.buttonLabel).toBe(
+      'Đã chuyển tiền',
+    );
   });
 });
 

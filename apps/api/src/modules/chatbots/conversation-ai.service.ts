@@ -1,5 +1,10 @@
 import {
   ackHandoff,
+  buildHandoffActionLarkCard,
+  type CredentialsCipher,
+  getLarkConfig,
+  loadHandoffActionNotice,
+  notifyLark,
   AI_KICK_JOB_NAME,
   type AiKickJobData,
   aiKickJobId,
@@ -17,8 +22,10 @@ import { type AiRunDto, type ConversationSummary, REALTIME_EVENTS } from '@dezon
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { Queue } from 'bullmq';
 import { withTimeout } from '../../common/with-timeout';
+import { APP_CONFIG, type AppConfig } from '../../config';
+import { HTTP_FETCH } from '../../infra/ai/ai.constants';
 import { DB } from '../../infra/db/db.constants';
-import { INBOX_CONTEXT } from '../../infra/inbox/inbox.constants';
+import { CREDENTIALS_CIPHER, INBOX_CONTEXT } from '../../infra/inbox/inbox.constants';
 import { AI_REPLY_QUEUE, ENQUEUE_TIMEOUT_MS } from '../../infra/queue/queue.constants';
 import { RealtimeService } from '../realtime/realtime.service';
 import { roomsOfSummary } from '../realtime/rooms';
@@ -33,6 +40,9 @@ export class ConversationAiService {
     @Inject(INBOX_CONTEXT) private readonly ctx: InboxContext,
     private readonly realtime: RealtimeService,
     @Inject(AI_REPLY_QUEUE) private readonly aiReply: Queue<AiKickJobData>,
+    @Inject(APP_CONFIG) private readonly config: AppConfig,
+    @Inject(CREDENTIALS_CIPHER) private readonly cipher: CredentialsCipher,
+    @Inject(HTTP_FETCH) private readonly fetchFn: typeof fetch,
   ) {}
 
   async setChatbot(viewer: Viewer, id: string, chatbotId: string | null): Promise<ConversationSummary> {
@@ -47,13 +57,19 @@ export class ConversationAiService {
     return summary;
   }
 
-  ackHandoff(viewer: Viewer, id: string): Promise<ConversationSummary> {
-    return this.publish(ackHandoff(this.db, viewer, id, this.ctx));
+  async ackHandoff(viewer: Viewer, id: string): Promise<ConversationSummary> {
+    const result = await ackHandoff(this.db, viewer, id, this.ctx);
+    const summary = await this.publish(Promise.resolve(result));
+    await this.notifyHandoffAction(viewer, id, 'ack', result.ackedHandoffId ? [result.ackedHandoffId] : []);
+    return summary;
   }
 
   async resolveHandoff(viewer: Viewer, id: string): Promise<ConversationSummary> {
-    const summary = await this.publish(resolveHandoff(this.db, viewer, id, this.ctx));
+    const result = await resolveHandoff(this.db, viewer, id, this.ctx);
+    const summary = await this.publish(Promise.resolve(result));
+    // Đánh thức bot trước, báo Lark sau (Lark chậm không làm khách chờ lâu hơn).
     await this.kickIfCustomerWaiting(id);
+    await this.notifyHandoffAction(viewer, id, 'resolve', result.resolvedHandoffIds);
     return summary;
   }
 
@@ -71,6 +87,43 @@ export class ConversationAiService {
       },
     );
     return conversation;
+  }
+
+  /**
+   * Bot của hội thoại bật "Gửi Lark khi bấm nút" ⇒ gửi thẻ Lark (vd. "✅ Nghiệm thu" / "☑️ Đã chuyển tiền") kèm
+   * tóm tắt yêu cầu chuyển người. Chỉ báo khi lần bấm này thật sự đổi trạng thái (bấm lại không gửi trùng).
+   * Lỗi Lark chỉ log: thao tác của nhân viên đã lưu. Env LARK_* chỉ dùng khi admin chưa từng lưu cấu hình Lark.
+   */
+  private async notifyHandoffAction(
+    viewer: Viewer,
+    conversationId: string,
+    action: 'ack' | 'resolve',
+    handoffIds: string[],
+  ): Promise<void> {
+    if (handoffIds.length === 0) return;
+    try {
+      const card = await loadHandoffActionNotice(this.db, {
+        conversationId,
+        action,
+        handoffIds,
+        actorUserId: viewer.id,
+        now: this.ctx.now(),
+        appUrl: this.config.APP_URL,
+      });
+      if (!card) return;
+      const lark = await getLarkConfig(this.db, this.cipher, {
+        webhookUrl: this.config.LARK_WEBHOOK_URL ?? null,
+        secret: this.config.LARK_WEBHOOK_SECRET ?? null,
+      });
+      if (!lark) return;
+      await notifyLark(lark, buildHandoffActionLarkCard(card), {
+        fetch: this.fetchFn,
+        now: this.ctx.now,
+        timeoutMs: 5000,
+      });
+    } catch (error) {
+      this.logger.warn({ err: error, conversationId, action }, 'Không gửi được thông báo Lark khi bấm nút');
+    }
   }
 
   /**

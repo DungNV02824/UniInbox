@@ -195,7 +195,8 @@ function ChatbotEditor({
       setErrors({});
       setConversationCount(dto.conversationCount);
       qc.setQueryData(chatbotKeys.detail(dto.id), dto);
-      void qc.invalidateQueries({ queryKey: chatbotKeys.list() });
+      // all = cả danh sách quản trị lẫn danh sách bot của hộp thư (tên nút banner Cần người).
+      void qc.invalidateQueries({ queryKey: chatbotKeys.all });
       const created = !savedId;
       setSavedId(dto.id);
       toast({ title: created ? `Đã tạo chatbot "${dto.name}"` : 'Đã lưu thay đổi', variant: 'success' });

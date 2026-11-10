@@ -29,6 +29,12 @@ export interface ChatbotFormValues {
   handoffMessage: string;
   /** Bot không chắc câu trả lời: true = chuyển người thật, false = vẫn trả lời. */
   escalateWhenUnsure: boolean;
+  /** Tên nút "nhận" trên banner Cần người; '' = mặc định (DEFAULT_HANDOFF_ACK_LABEL). */
+  handoffAckLabel: string;
+  /** Tên nút "xong" (trả lại cho AI); '' = mặc định (DEFAULT_HANDOFF_RESOLVE_LABEL). */
+  handoffResolveLabel: string;
+  /** Bấm hai nút trên thì gửi thông báo Lark. */
+  handoffActionLark: boolean;
   /** "Tốc độ trả lời" = mức suy nghĩ của AI (Nhanh nhất / Cân bằng / Suy nghĩ kỹ). */
   responseSpeed: ResponseSpeed;
   /** '' = mặc định hệ thống. */
@@ -69,6 +75,9 @@ export function emptyChatbotForm(): ChatbotFormValues {
     handoffKeywords: [],
     handoffMessage: '',
     escalateWhenUnsure: CHATBOT_DEFAULTS.escalateWhenUnsure,
+    handoffAckLabel: '',
+    handoffResolveLabel: '',
+    handoffActionLark: CHATBOT_DEFAULTS.handoffActionLark,
     responseSpeed: CHATBOT_DEFAULTS.responseSpeed,
     model: '',
     temperature: CHATBOT_DEFAULTS.temperature,
@@ -89,6 +98,9 @@ export function chatbotToForm(dto: ChatbotDto): ChatbotFormValues {
     handoffKeywords: [...dto.handoffKeywords],
     handoffMessage: dto.handoffMessage ?? '',
     escalateWhenUnsure: dto.escalateWhenUnsure,
+    handoffAckLabel: dto.handoffAckLabel ?? '',
+    handoffResolveLabel: dto.handoffResolveLabel ?? '',
+    handoffActionLark: dto.handoffActionLark ?? CHATBOT_DEFAULTS.handoffActionLark,
     responseSpeed: normalizeResponseSpeed(dto.responseSpeed),
     model: dto.model ?? '',
     temperature: dto.temperature,
@@ -130,6 +142,9 @@ export function formToRequest(form: ChatbotFormValues): CreateChatbotRequest {
     handoffKeywords: form.handoffKeywords,
     handoffMessage: blankToNull(form.handoffMessage),
     escalateWhenUnsure: form.escalateWhenUnsure,
+    handoffAckLabel: blankToNull(form.handoffAckLabel),
+    handoffResolveLabel: blankToNull(form.handoffResolveLabel),
+    handoffActionLark: form.handoffActionLark,
     responseSpeed: form.responseSpeed,
     model: blankToNull(form.model),
     temperature: form.temperature,
@@ -165,6 +180,9 @@ function fieldMessage(path: string, code?: string): string {
         : `Mỗi từ khóa tối đa ${CHATBOT_LIMITS.keywordMax} ký tự`;
     case 'handoffMessage':
       return `Tin giữ chỗ tối đa ${n(CHATBOT_LIMITS.handoffMessageMax)} ký tự`;
+    case 'handoffAckLabel':
+    case 'handoffResolveLabel':
+      return `Tên nút tối đa ${CHATBOT_LIMITS.handoffButtonLabelMax} ký tự`;
     case 'model':
       return 'Model không hợp lệ';
     case 'temperature':
@@ -259,6 +277,9 @@ const FIELD_TAB: Record<string, EditorTab> = {
   handoffKeywords: 'handoff',
   handoffMessage: 'handoff',
   escalateWhenUnsure: 'handoff',
+  handoffAckLabel: 'handoff',
+  handoffResolveLabel: 'handoff',
+  handoffActionLark: 'handoff',
   model: 'advanced',
   responseSpeed: 'advanced',
   temperature: 'advanced',
@@ -366,6 +387,9 @@ export function duplicateRequest(dto: ChatbotDto, existingNames: readonly string
     handoffKeywords: [...dto.handoffKeywords],
     handoffMessage: dto.handoffMessage,
     escalateWhenUnsure: dto.escalateWhenUnsure,
+    handoffAckLabel: dto.handoffAckLabel ?? null,
+    handoffResolveLabel: dto.handoffResolveLabel ?? null,
+    handoffActionLark: dto.handoffActionLark ?? CHATBOT_DEFAULTS.handoffActionLark,
     responseSpeed: normalizeResponseSpeed(dto.responseSpeed),
     model: dto.model,
     temperature: dto.temperature,

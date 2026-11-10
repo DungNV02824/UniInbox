@@ -2,12 +2,16 @@ import { describe, expect, it } from 'vitest';
 import { conv, msg } from './__fixtures__/inbox';
 import {
   AI_RUN_DECISION_LABELS,
+  CHATBOT_LOCKED_HINT,
   botSenderLabel,
   chatbotControlState,
   chatbotSelectOptions,
   conversationAiState,
   extractConversation,
   formatLatency,
+  handoffAckedText,
+  handoffButtonLabels,
+  chatbotLockedHint,
   handoffReasonLabel,
   isAiPaused,
   matchesAiState,
@@ -164,5 +168,47 @@ describe('hiển thị', () => {
     expect(formatLatency(850)).toBe('850 ms');
     expect(formatLatency(1234)).toBe('1,2 s');
     expect(formatLatency(Number.NaN)).toBe('—');
+  });
+});
+
+describe('tên nút banner Cần người', () => {
+  const custom = { ...BOT, handoffAckLabel: 'Nghiệm thu', handoffResolveLabel: 'Đã chuyển tiền' };
+  const def = { ack: 'Nhận xử lý', resolve: 'Đã xong, trả lại cho AI', customAck: false };
+
+  it('bot đặt tên riêng (đi kèm hội thoại) ⇒ dùng tên của bot', () => {
+    expect(handoffButtonLabels(custom)).toEqual({
+      ack: 'Nghiệm thu',
+      resolve: 'Đã chuyển tiền',
+      customAck: true,
+    });
+  });
+
+  it('bot không đặt tên / chuỗi trắng ⇒ mặc định', () => {
+    expect(handoffButtonLabels(BOT)).toEqual(def);
+    expect(handoffButtonLabels({ ...BOT, handoffAckLabel: '  ', handoffResolveLabel: '' })).toEqual(def);
+  });
+
+  it('chỉ đặt một nút ⇒ nút còn lại mặc định; trim khoảng trắng', () => {
+    expect(handoffButtonLabels({ ...BOT, handoffResolveLabel: '  Đã chuyển tiền ' })).toEqual({
+      ack: 'Nhận xử lý',
+      resolve: 'Đã chuyển tiền',
+      customAck: false,
+    });
+  });
+
+  it('hội thoại không gắn bot ⇒ "Nhận xử lý" / "Đã xong"', () => {
+    expect(handoffButtonLabels(null)).toEqual({ ack: 'Nhận xử lý', resolve: 'Đã xong', customAck: false });
+  });
+
+  it('dòng đã nhận: mặc định giữ "Đã nhận bởi …", tên riêng ⇒ Đã bấm "<tên>" — …', () => {
+    expect(handoffAckedText(handoffButtonLabels(null), 'bạn')).toBe('Đã nhận bởi bạn');
+    const labels = handoffButtonLabels(custom);
+    expect(handoffAckedText(labels, 'bạn')).toBe('Đã bấm "Nghiệm thu" — bạn');
+    expect(handoffAckedText(labels, 'Lan')).toBe('Đã bấm "Nghiệm thu" — Lan');
+  });
+
+  it('gợi ý ô chọn bot bị khóa nêu đúng tên nút xong', () => {
+    expect(chatbotLockedHint(BOT)).toBe(CHATBOT_LOCKED_HINT);
+    expect(chatbotLockedHint(custom)).toBe("Bấm 'Đã chuyển tiền' để bật lại bot");
   });
 });

@@ -4,7 +4,7 @@ export const LOGIN_REQUIRED_MESSAGE = 'Vui lòng đăng nhập';
 export const SESSION_INVALID_MESSAGE = 'Phiên đăng nhập đã hết hạn hoặc không hợp lệ';
 export const FORBIDDEN_MESSAGE = 'Bạn không có quyền thực hiện thao tác này';
 
-/** Cookie refresh chỉ gửi kèm các route /auth/* */
+/** Cookie refresh chỉ gửi kèm các route /auth/* (tính từ gốc API; xem refreshCookiePath). */
 export const REFRESH_COOKIE_PATH = '/auth';
 export const JWT_ISSUER = 'dezon-omni-inbox';
 export const JWT_ALGORITHM = 'HS256';

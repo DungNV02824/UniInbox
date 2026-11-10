@@ -1,0 +1,45 @@
+# Site block Dezon Omni-Inbox — dán vào Caddyfile dùng chung (/opt/qspro/infra/deploy/Caddyfile),
+# rồi reload: docker exec qspro-web-1 caddy reload --config /etc/caddy/Caddyfile
+# Yêu cầu: các container dezon-inbox-api / dezon-inbox-web / dezon-inbox-s3 cùng mạng qspro_default
+# (docker-compose.prod.yml đã khai báo). TLS do Caddy chung tự cấp (Let's Encrypt).
+#
+# IP thật của khách sau Cloudflare: {client_ip} chỉ là IP khách khi khối global của Caddy chung có
+#   servers { trusted_proxies static <dải IP Cloudflare, xem https://www.cloudflare.com/ips/>
+#             client_ip_headers CF-Connecting-IP X-Forwarded-For }
+# Không có thì {client_ip} là IP edge Cloudflare (app vẫn chạy đúng, chỉ log thấy IP Cloudflare).
+alo.vuathau.com.vn {
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	# Media: URL ký S3 (SigV4, path-style) https://alo.vuathau.com.vn/dezon-inbox/<key>?X-Amz-...
+	# KHÔNG strip path, KHÔNG encode, giữ nguyên Host (mặc định của reverse_proxy) => chữ ký hợp lệ.
+	# Chỉ cho đọc: chặn mọi method khác từ Internet (app ghi S3 qua mạng nội bộ).
+	@media path /dezon-inbox/*
+	handle @media {
+		@media_write not method GET HEAD
+		respond @media_write 405
+		reverse_proxy dezon-inbox-s3:8333
+	}
+
+	# API: bỏ tiền tố /api (API_URL=https://alo.vuathau.com.vn/api). Socket.IO: /api/socket.io/* -> /socket.io/*
+	# (websocket đi qua reverse_proxy tự động; không nén luồng socket.io).
+	handle_path /api/* {
+		@compressible not path /socket.io/*
+		encode @compressible zstd gzip
+		reverse_proxy dezon-inbox-api:4000 {
+			header_up X-Forwarded-For {client_ip}
+		}
+	}
+
+	# Còn lại: Next.js
+	handle {
+		encode zstd gzip
+		reverse_proxy dezon-inbox-web:3100 {
+			header_up X-Forwarded-For {client_ip}
+		}
+	}
+}

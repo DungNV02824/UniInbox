@@ -1,7 +1,15 @@
 import { createHmac } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { LarkNotifyError } from './errors';
-import { buildHandoffLarkCard, escapeLarkMd, notifyLark, signLarkWebhook } from './lark';
+import { formatVnDateTime } from './handoff-action';
+import {
+  buildHandoffActionLarkCard,
+  buildHandoffLarkCard,
+  escapeLarkMd,
+  notifyLark,
+  signLarkWebhook,
+  type HandoffActionCardInput,
+} from './lark';
 
 const input = {
   contactName: 'Nguyễn *Văn* A',
@@ -47,6 +55,97 @@ describe('buildHandoffLarkCard', () => {
 
   it('escapeLarkMd', () => {
     expect(escapeLarkMd('a*b_c~[d]<e>&')).toBe('a&#42;b&#95;c&#126;&#91;d&#93;&lt;e&gt;&amp;');
+  });
+});
+
+const actionInput: HandoffActionCardInput = {
+  action: 'ack',
+  buttonLabel: 'Nghiệm thu',
+  contactName: 'Trần_Thị *B*',
+  channelName: 'Dezon Nội Thất',
+  chatbotName: 'Bot Nghiệm Thu',
+  actorName: 'Hương',
+  at: '14:36 10/11/2026',
+  summaries: ['Công trình [Q7] — 12 ảnh, thù lao 500k <ok>'],
+  conversationUrl: 'https://inbox.dezon.vn/inbox/xyz',
+};
+
+type ActionCard = {
+  header: { title: { tag: string; content: string }; template: string };
+  elements: [
+    { tag: string; fields: { is_short: boolean; text: { tag: string; content: string } }[] },
+    { tag: string; actions: { tag: string; text: { content: string }; type: string; url: string }[] },
+  ];
+};
+
+describe('buildHandoffActionLarkCard', () => {
+  it('ack ⇒ header xanh lá "✅ <tên nút>"; resolve ⇒ xanh dương "☑️ <tên nút>"', () => {
+    const ack = buildHandoffActionLarkCard(actionInput);
+    expect(ack.msg_type).toBe('interactive');
+    expect(ack.card.header).toEqual({
+      title: { tag: 'plain_text', content: '✅ Nghiệm thu' },
+      template: 'green',
+    });
+    const resolve = buildHandoffActionLarkCard({
+      ...actionInput,
+      action: 'resolve',
+      buttonLabel: 'Đã chuyển tiền',
+    });
+    expect(resolve.card.header).toEqual({
+      title: { tag: 'plain_text', content: '☑️ Đã chuyển tiền' },
+      template: 'blue',
+    });
+  });
+
+  it('các dòng Khách/Kênh/Bot/Người bấm/Lúc/Nội dung (escape lark_md) và nút mở hội thoại', () => {
+    const card = buildHandoffActionLarkCard(actionInput).card as unknown as ActionCard;
+    const [div, action] = card.elements;
+    expect(div.tag).toBe('div');
+    expect(div.fields.map((f) => [f.is_short, f.text.tag])).toEqual([
+      [true, 'lark_md'],
+      [true, 'lark_md'],
+      [true, 'lark_md'],
+      [true, 'lark_md'],
+      [true, 'lark_md'],
+      [false, 'lark_md'],
+    ]);
+    expect(div.fields.map((f) => f.text.content)).toEqual([
+      '**Khách:**\nTrần&#95;Thị &#42;B&#42;',
+      '**Kênh:**\nDezon Nội Thất',
+      '**Bot:**\nBot Nghiệm Thu',
+      '**Người bấm:**\nHương',
+      '**Lúc:**\n14:36 10/11/2026',
+      '**Nội dung:**\nCông trình &#91;Q7&#93; — 12 ảnh, thù lao 500k &lt;ok&gt;',
+    ]);
+    expect(action.tag).toBe('action');
+    expect(action.actions).toEqual([
+      {
+        tag: 'button',
+        text: { tag: 'plain_text', content: 'Mở hội thoại' },
+        type: 'default',
+        url: 'https://inbox.dezon.vn/inbox/xyz',
+      },
+    ]);
+  });
+
+  it('nhiều tóm tắt ⇒ đánh số từng dòng; không có ⇒ "—"', () => {
+    const many = buildHandoffActionLarkCard({ ...actionInput, summaries: [' Nhà A ', 'Nhà *B*'] })
+      .card as unknown as ActionCard;
+    expect(many.elements[0].fields[5]?.text.content).toBe('**Nội dung:**\n1. Nhà A\n2. Nhà &#42;B&#42;');
+    const none = buildHandoffActionLarkCard({ ...actionInput, summaries: [] }).card as unknown as ActionCard;
+    expect(none.elements[0].fields[5]?.text.content).toBe('**Nội dung:**\n—');
+  });
+});
+
+describe('formatVnDateTime', () => {
+  it('UTC ⇒ giờ Việt Nam (UTC+7) dạng "HH:mm dd/MM/yyyy"', () => {
+    expect(formatVnDateTime(new Date('2026-11-10T07:36:00Z'))).toBe('14:36 10/11/2026');
+    expect(formatVnDateTime(new Date('2026-01-05T01:05:09Z'))).toBe('08:05 05/01/2026');
+  });
+
+  it('qua nửa đêm sang ngày/năm mới, giờ 00 không thành 24', () => {
+    expect(formatVnDateTime(new Date('2026-12-31T17:00:00Z'))).toBe('00:00 01/01/2027');
+    expect(formatVnDateTime(new Date('2026-03-08T16:59:00Z'))).toBe('23:59 08/03/2026');
   });
 });
 

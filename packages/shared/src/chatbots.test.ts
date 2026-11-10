@@ -26,6 +26,29 @@ describe('chatbots schemas', () => {
     expect(createChatbotSchema.safeParse({ name: 'a', model: null }).success).toBe(true);
   });
 
+  it('tên nút banner Cần người: trim, ≤ 40 ký tự, nhận null; handoffActionLark boolean', () => {
+    const parsed = createChatbotSchema.parse({
+      name: 'a',
+      handoffAckLabel: '  Nghiệm thu ',
+      handoffResolveLabel: null,
+      handoffActionLark: true,
+    });
+    expect(parsed).toMatchObject({
+      handoffAckLabel: 'Nghiệm thu',
+      handoffResolveLabel: null,
+      handoffActionLark: true,
+    });
+    expect(createChatbotSchema.parse({ name: 'a', handoffAckLabel: '   ' }).handoffAckLabel).toBe('');
+    const max = CHATBOT_LIMITS.handoffButtonLabelMax;
+    expect(createChatbotSchema.safeParse({ name: 'a', handoffAckLabel: 'x'.repeat(max) }).success).toBe(true);
+    expect(
+      createChatbotSchema.safeParse({ name: 'a', handoffResolveLabel: 'x'.repeat(max + 1) }).success,
+    ).toBe(false);
+    expect(createChatbotSchema.safeParse({ name: 'a', handoffActionLark: 'yes' }).success).toBe(false);
+    expect(updateChatbotSchema.safeParse({ handoffResolveLabel: 'Đã chuyển tiền' }).success).toBe(true);
+    expect(updateChatbotSchema.safeParse({ handoffActionLark: false }).success).toBe(true);
+  });
+
   it('updateChatbotSchema: body rỗng bị từ chối', () => {
     expect(updateChatbotSchema.safeParse({}).success).toBe(false);
     expect(updateChatbotSchema.safeParse({ isActive: false }).success).toBe(true);
