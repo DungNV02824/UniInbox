@@ -23,6 +23,7 @@ Tuỳ chọn:
                              (apiUrl = http://localhost:4000 hoặc URL webhook đầy đủ) với app_id = <appId>
   --echo-delay <ms>          Độ trễ trước khi gửi echo (mặc định 300)
   --graph-version <v>        Version mong đợi (mặc định v26.0); version khác vẫn phục vụ nhưng log cảnh báo
+  --name-prefix <text>       Thêm tiền tố vào tên khách giả (vd "[TEST] ") để nhận ra dữ liệu thử ở Lark/hộp thư
   --help                     In hướng dẫn này
 
 Token mặc định (Authorization: Bearer <token> hoặc ?access_token=):
@@ -40,7 +41,8 @@ Conversations API (đồng bộ): GET /{page}/conversations, GET /{t_...}/messag
   (PSID_SYNC_<3 số cuối page>_1..3; có ảnh, chia sẻ link, nhãn dán); tin gửi qua Send API cũng hiện ở đây.
   POST /__inbox/message {"psid":"...","text":"...","pageId"?,"fromPage"?,"mid"?} thêm tin KHÔNG kèm webhook.
 
-Endpoint kiểm tra: GET /__calls[?path=&method=]  ·  POST /__reset  ·  GET /__health`;
+Endpoint kiểm tra: GET /__calls[?path=&method=]  ·  GET /__sender_actions[?psid=] (typing_on/typing_off/mark_seen,
+  trường n cùng dãy số với /__calls để so thứ tự với tin đã gửi)  ·  POST /__reset  ·  GET /__health`;
 
 // ---------- Cấu hình ----------
 
@@ -110,6 +112,7 @@ interface Options {
   echo?: EchoTarget;
   echoDelayMs: number;
   graphVersion: string;
+  namePrefix: string;
 }
 
 function takeValue(argv: string[], i: number, flag: string): string {
@@ -138,6 +141,7 @@ function parseCli(argv: string[]): Options | 'help' {
   let echo: EchoTarget | undefined;
   let echoDelayMs = 300;
   let graphVersion = 'v26.0';
+  let namePrefix = '';
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
     switch (flag) {
@@ -170,6 +174,9 @@ function parseCli(argv: string[]): Options | 'help' {
       case '--graph-version':
         graphVersion = takeValue(argv, i++, flag);
         break;
+      case '--name-prefix':
+        namePrefix = takeValue(argv, i++, flag);
+        break;
       default:
         throw new Error(`Tuỳ chọn không hợp lệ: ${flag} (xem --help)`);
     }
@@ -182,6 +189,7 @@ function parseCli(argv: string[]): Options | 'help' {
     ...(echo ? { echo } : {}),
     echoDelayMs,
     graphVersion,
+    namePrefix,
   };
 }
 
@@ -268,6 +276,18 @@ interface CallRecord {
   response?: unknown;
 }
 
+/** Một lần gọi Send API với `sender_action` (typing_on/typing_off/mark_seen). */
+interface SenderActionRecord {
+  /** Số thứ tự chung với CallRecord.n ⇒ so được thứ tự với lần gửi tin (typing_on trước tin bot). */
+  n: number;
+  at: string;
+  pageId: string;
+  psid: string;
+  action: string;
+}
+
+const MOCK_SENDER_ACTIONS = ['typing_on', 'typing_off', 'mark_seen'];
+
 interface StoredFile {
   data: Buffer;
   mime: string;
@@ -278,6 +298,7 @@ const state = {
   seq: 0,
   sendSeq: 0,
   calls: [] as CallRecord[],
+  senderActions: [] as SenderActionRecord[],
   subscriptions: new Map<string, string[]>(),
   rateLimited: new Set<string>(),
   files: new Map<string, StoredFile>(),
@@ -290,6 +311,7 @@ const state = {
 
 function resetState(): void {
   state.calls = [];
+  state.senderActions = [];
   state.sendSeq = 0;
   state.subscriptions.clear();
   state.rateLimited.clear();
@@ -491,11 +513,14 @@ const FIRST_NAMES = [
   'Thảo',
 ];
 
+/** Tiền tố tên khách (--name-prefix), đặt một lần lúc khởi động. */
+let profileNamePrefix = '';
+
 /** Hồ sơ khách xác định theo PSID (cùng PSID luôn cùng tên). */
 function profileFor(psid: string, publicUrl: string) {
   const h = hashOf(psid);
   const first = FIRST_NAMES[h % FIRST_NAMES.length] as string;
-  const last = LAST_NAMES[(h >>> 8) % LAST_NAMES.length] as string;
+  const last = `${profileNamePrefix}${LAST_NAMES[(h >>> 8) % LAST_NAMES.length] as string}`;
   return {
     id: psid,
     first_name: first,
@@ -676,6 +701,32 @@ function handleSend(ctx: Ctx, opts: Options, p: Principal, pageParam: string): v
     return;
   }
   if (f.sender_action !== undefined) {
+    const action = String(f.sender_action);
+    if (!MOCK_SENDER_ACTIONS.includes(action)) {
+      graphError(ctx, {
+        code: 100,
+        message: '(#100) param sender_action must be one of {MARK_SEEN, TYPING_ON, TYPING_OFF}',
+      });
+      return;
+    }
+    if (message || f.messaging_type !== undefined || f.tag !== undefined) {
+      graphError(ctx, {
+        code: 100,
+        message: '(#100) sender_action cannot be sent with message, messaging_type or tag',
+      });
+      return;
+    }
+    // Graph thật chặn cả sender_action ngoài cửa sổ 24 giờ.
+    if (psid === 'PSID_OUTSIDE') {
+      graphError(ctx, {
+        code: 10,
+        subcode: 2018278,
+        message: '(#10) This message is sent outside of allowed window.',
+      });
+      return;
+    }
+    state.senderActions.push({ n: ctx.record.n, at: ctx.record.at, pageId: page.id, psid, action });
+    ctx.note.push(`sender_action=${action} recipient=${psid}`);
     sendJson(ctx, 200, { recipient_id: psid });
     return;
   }
@@ -1249,6 +1300,13 @@ async function route(ctx: Ctx, opts: Options): Promise<void> {
       ctx.res.end(JSON.stringify({ count: calls.length, calls }));
       return;
     }
+    if (s0 === '__sender_actions' && method === 'GET') {
+      const psid = ctx.url.searchParams.get('psid');
+      const actions = state.senderActions.filter((a) => !psid || a.psid === psid);
+      ctx.res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      ctx.res.end(JSON.stringify({ count: actions.length, actions }));
+      return;
+    }
     if (s0 === '__inbox' && s1 === 'message' && method === 'POST') return handleInboxMessage(ctx, opts);
     if (s0 === '__reset' && method === 'POST') {
       resetState();
@@ -1355,7 +1413,7 @@ function createMockServer(opts: Options) {
       record,
       note: [],
     };
-    const internal = ['__calls', '__reset', '__health', '__inbox'].includes(all[0] ?? '');
+    const internal = ['__calls', '__reset', '__health', '__inbox', '__sender_actions'].includes(all[0] ?? '');
     void (async () => {
       try {
         const raw = await readBody(req);
@@ -1392,6 +1450,7 @@ function main(): void {
     return;
   }
   const options = opts;
+  profileNamePrefix = options.namePrefix;
   const server = createMockServer(options);
   server.on('error', (err) => {
     console.error(`[mock-graph] Không mở được cổng ${options.port}: ${err.message}`);
@@ -1402,6 +1461,7 @@ function main(): void {
     for (const page of options.config.pages)
       log(`  Page ${page.id} "${page.name}" — token: ${page.tokens.join(' | ')}`);
     if (options.echo) log(`  Echo webhook -> ${options.echo.webhookUrl} (app_id ${options.echo.appId})`);
+    if (options.namePrefix) log(`  Tiền tố tên khách: "${options.namePrefix}"`);
   };
   if (options.host) server.listen(options.port, options.host, onListen);
   else server.listen(options.port, onListen);

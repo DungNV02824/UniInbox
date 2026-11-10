@@ -45,3 +45,7 @@ export type CatalogItem = typeof s.catalogItems.$inferSelect;
 export type NewCatalogItem = typeof s.catalogItems.$inferInsert;
 export type AuditLog = typeof s.auditLogs.$inferSelect;
 export type NewAuditLog = typeof s.auditLogs.$inferInsert;
+export type Chatbot = typeof s.chatbots.$inferSelect;
+export type NewChatbot = typeof s.chatbots.$inferInsert;
+export type AppSetting = typeof s.appSettings.$inferSelect;
+export type NewAppSetting = typeof s.appSettings.$inferInsert;

@@ -114,12 +114,31 @@ function profileJson(profile: ProfileResult, previous: IdentityProfile = {}, now
   };
 }
 
+/**
+ * Việc chậm, không cần trước khi lưu tin (tải avatar về S3): caller truyền mảng này thì việc được XẾP vào đây
+ * thay vì chờ ngay — luồng tin đến chạy sau khi đã lên lịch chatbot (bớt độ trễ trả lời). Mỗi việc tự bắt lỗi.
+ */
+export type DeferredTasks = (() => Promise<void>)[];
+
+function saveAvatarLater(
+  db: Db,
+  deps: PipelineDeps,
+  contactId: string,
+  avatarUrl: string,
+  deferred: DeferredTasks | undefined,
+): Promise<void> {
+  if (!deferred) return saveAvatar(db, deps, contactId, avatarUrl);
+  deferred.push(() => saveAvatar(db, deps, contactId, avatarUrl));
+  return Promise.resolve();
+}
+
 /** Identity đã có nhưng chưa có tên: thử lấy lại (tối đa 1 lần/24h), cập nhật tên tạm và avatar. */
 async function refreshProfile(
   db: Db,
   deps: PipelineDeps,
   msg: NormalizedInboundMessage,
   identity: ContactIdentity,
+  deferred: DeferredTasks | undefined,
 ): Promise<void> {
   const previous = identity.profile as IdentityProfile;
   if (previous.name) return;
@@ -145,7 +164,7 @@ async function refreshProfile(
         ),
       );
   }
-  if (profile.avatarUrl) await saveAvatar(db, deps, identity.contactId, profile.avatarUrl);
+  if (profile.avatarUrl) await saveAvatarLater(db, deps, identity.contactId, profile.avatarUrl, deferred);
 }
 
 /**
@@ -198,15 +217,17 @@ export async function applyParticipantName(
 /**
  * Trả identity của khách (tạo contact + identity nếu mới). An toàn khi nhiều job chạy song song:
  * insert identity ON CONFLICT DO NOTHING, thua thì xóa contact vừa tạo và đọc lại bản đã có.
+ * `deferred`: có ⇒ việc tải avatar được xếp vào đó (caller tự chạy sau), không chờ ở đây.
  */
 export async function ensureContactIdentity(
   db: Db,
   deps: PipelineDeps,
   msg: NormalizedInboundMessage,
+  deferred?: DeferredTasks,
 ): Promise<ContactIdentity> {
   const existing = await findIdentity(db, msg.channelAccountId, msg.externalUserId);
   if (existing) {
-    await refreshProfile(db, deps, msg, existing);
+    await refreshProfile(db, deps, msg, existing, deferred);
     return existing;
   }
 
@@ -236,6 +257,6 @@ export async function ensureContactIdentity(
     if (!winner) throw new Error('Không tìm thấy contact_identity sau khi upsert');
     return winner;
   }
-  if (profile.avatarUrl) await saveAvatar(db, deps, created.contactId, profile.avatarUrl);
+  if (profile.avatarUrl) await saveAvatarLater(db, deps, created.contactId, profile.avatarUrl, deferred);
   return created;
 }

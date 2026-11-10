@@ -1,6 +1,7 @@
 import { sql } from 'drizzle-orm';
 import { check, index, jsonb, pgTable, text, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
 import { id, timestamps } from './_common';
+import { chatbots } from './chatbots';
 import { aiModeEnum, channelAccountStatusEnum, channelTypeEnum } from './enums';
 import { users } from './users';
 
@@ -28,6 +29,8 @@ export const channelAccounts = pgTable(
     lastError: text('last_error'),
     /** Giai đoạn 1 mặc định 'off'; zalo_personal => 'suggest' do code ứng dụng đặt khi tạo. */
     defaultAiMode: aiModeEnum('default_ai_mode').notNull().default('off'),
+    /** Hội thoại MỚI của kênh tự gắn bot này (ai_mode 'auto'). */
+    defaultChatbotId: uuid('default_chatbot_id').references(() => chatbots.id, { onDelete: 'set null' }),
     color: text('color').notNull().default('#2563eb'),
     settings: jsonb('settings').$type<Record<string, unknown>>().notNull().default({}),
     ...timestamps(),

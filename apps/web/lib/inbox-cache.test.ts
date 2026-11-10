@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { ConversationSummary } from '@dezon/shared';
 import { conv, conversationsData, messagesData, msg } from './__fixtures__/inbox';
 import {
   applyConversationsToList,
@@ -9,6 +10,8 @@ import {
   matchesFilters,
   mergeFetchedMessages,
   mergeSummaryIntoDetail,
+  patchContactTagsInDetail,
+  patchContactTagsInList,
   type MessagesData,
   patchTempMessage,
   resolveOptimistic,
@@ -295,7 +298,7 @@ describe('mergeSummaryIntoDetail', () => {
     };
     const merged = mergeSummaryIntoDetail(
       detail,
-      conv({ unreadCount: 4, contact: { id: 'k-1', displayName: 'Lan Anh', avatarUrl: 'u' } }),
+      conv({ unreadCount: 4, contact: { id: 'k-1', displayName: 'Lan Anh', avatarUrl: 'u', tags: ['vip'] } }),
     )!;
     expect(merged.unreadCount).toBe(4);
     expect(merged.contactDetail).toMatchObject({
@@ -305,5 +308,52 @@ describe('mergeSummaryIntoDetail', () => {
       notes: 'ghi chú',
     });
     expect(mergeSummaryIntoDetail(detail, conv({ id: 'other' }))).toBe(detail);
+  });
+});
+
+describe('đổi nhãn khách trong cache', () => {
+  const detailOf = (c = conv()) => ({
+    ...c,
+    contactDetail: {
+      id: c.contact.id,
+      displayName: c.contact.displayName,
+      avatarUrl: null,
+      phone: null,
+      email: null,
+      tags: ['cũ'],
+      notes: null,
+      identities: [],
+    },
+  });
+
+  it('patchContactTagsInList: sửa mọi hội thoại của khách (mọi trang), giữ nguyên khách khác', () => {
+    const a = conv({ id: 'c-1', contact: { id: 'k-1', displayName: 'Lan', avatarUrl: null, tags: [] } });
+    const b = conv({ id: 'c-2', contact: { id: 'k-2', displayName: 'Hà', avatarUrl: null, tags: ['x'] } });
+    const a2 = conv({ id: 'c-3', contact: { id: 'k-1', displayName: 'Lan', avatarUrl: null, tags: [] } });
+    const data = conversationsData({ items: [a, b], nextCursor: 'n' }, { items: [a2], nextCursor: null });
+    const next = patchContactTagsInList(data, 'k-1', ['VIP'])!;
+    expect(next.pages[0]!.items[0]!.contact.tags).toEqual(['VIP']);
+    expect(next.pages[0]!.items[1]).toBe(b);
+    expect(next.pages[1]!.items[0]!.contact.tags).toEqual(['VIP']);
+    expect(patchContactTagsInList(undefined, 'k-1', ['VIP'])).toBeUndefined();
+  });
+
+  it('patchContactTagsInDetail: sửa cả contact lẫn contactDetail; khác khách thì trả nguyên', () => {
+    const detail = detailOf();
+    const next = patchContactTagsInDetail(detail, 'k-1', ['VIP', 'Sỉ'])!;
+    expect(next.contact.tags).toEqual(['VIP', 'Sỉ']);
+    expect(next.contactDetail.tags).toEqual(['VIP', 'Sỉ']);
+    expect(patchContactTagsInDetail(detail, 'k-9', ['VIP'])).toBe(detail);
+    expect(patchContactTagsInDetail(undefined, 'k-1', ['VIP'])).toBeUndefined();
+  });
+
+  it('mergeSummaryIntoDetail: đồng bộ nhãn từ tóm tắt; tóm tắt thiếu tags thì giữ nhãn cũ', () => {
+    const detail = detailOf();
+    const withTags = conv({ contact: { id: 'k-1', displayName: 'Chị Lan', avatarUrl: null, tags: ['VIP'] } });
+    expect(mergeSummaryIntoDetail(detail, withTags)!.contactDetail.tags).toEqual(['VIP']);
+    const legacy = conv({
+      contact: { id: 'k-1', displayName: 'Chị Lan', avatarUrl: null } as ConversationSummary['contact'],
+    });
+    expect(mergeSummaryIntoDetail(detail, legacy)!.contactDetail.tags).toEqual(['cũ']);
   });
 });

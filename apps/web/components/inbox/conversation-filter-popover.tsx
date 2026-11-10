@@ -9,7 +9,7 @@ import type { ConversationFilters } from '@/lib/inbox-api';
 import { useDirectory } from '@/lib/inbox-queries';
 import { cn } from '@/lib/utils';
 import { FilterChip } from './filter-chip';
-import { clearPopoverFilters, countPopoverFilters } from './list-filters';
+import { activeAiFilter, applyAiFilter, clearPopoverFilters, countPopoverFilters } from './list-filters';
 import { useDismiss } from './use-dismiss';
 
 /** Admin lọc theo một nhân viên cụ thể (agent chỉ thấy hội thoại của mình + chưa phân công nên không cần). */
@@ -64,6 +64,7 @@ export function ConversationFilterPopover({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const count = countPopoverFilters(filters);
+  const aiFilter = activeAiFilter(filters);
 
   const close = (refocus: boolean) => {
     setOpen(false);
@@ -121,19 +122,34 @@ export function ConversationFilterPopover({
               active={filters.status === 'open'}
               onClick={() => setStatus('open')}
             />
-            <Feature flag="featureAiEnabled">
-              <FilterChip
-                label="Cần người"
-                active={filters.status === 'pending_human'}
-                onClick={() => setStatus('pending_human')}
-              />
-            </Feature>
             <FilterChip
               label="Đã xong"
               active={filters.status === 'resolved'}
               onClick={() => setStatus('resolved')}
             />
           </Section>
+
+          <Feature flag="featureAiEnabled">
+            <Section title="Chatbot AI">
+              <FilterChip
+                label="Tất cả"
+                active={aiFilter === 'all'}
+                onClick={() => onChange((f) => applyAiFilter(f, 'all'))}
+              />
+              <FilterChip
+                label="Cần người"
+                title="Hội thoại AI đã chuyển cho người thật, đang chờ nhân viên"
+                active={aiFilter === 'needs_human'}
+                onClick={() => onChange((f) => applyAiFilter(f, 'needs_human'))}
+              />
+              <FilterChip
+                label="AI đang lo"
+                title="Hội thoại đang có chatbot tự trả lời"
+                active={aiFilter === 'ai_handled'}
+                onClick={() => onChange((f) => applyAiFilter(f, 'ai_handled'))}
+              />
+            </Section>
+          </Feature>
 
           <Section title="Người phụ trách">
             <FilterChip label="Mọi người" active={!filters.assignee} onClick={() => setAssignee(undefined)} />
@@ -154,7 +170,7 @@ export function ConversationFilterPopover({
             <button
               type="button"
               className="rounded text-xs font-medium text-brand outline-none hover:underline focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
-              disabled={!filters.status && !filters.assignee}
+              disabled={!filters.status && !filters.assignee && !filters.aiState}
               onClick={() => onChange(clearPopoverFilters)}
             >
               Xóa bộ lọc

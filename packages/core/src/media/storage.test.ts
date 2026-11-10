@@ -1,7 +1,8 @@
 import sharp from 'sharp';
+import { Readable } from 'node:stream';
 import { describe, expect, it } from 'vitest';
 import { createMemoryStorage } from '../../test/helpers/memory-storage';
-import { storeMedia } from './storage';
+import { readObjectLimited, storeMedia } from './storage';
 
 const image = (width: number, height: number, format: 'jpeg' | 'png' | 'tiff' | 'gif') =>
   sharp({ create: { width, height, channels: 3, background: '#3366cc' } })
@@ -167,5 +168,34 @@ describe('storeMedia', () => {
     });
     expect(stored).toMatchObject({ type: 'image', mime: 'image/jpeg', size: 12 });
     expect(stored.width).toBeUndefined();
+  });
+});
+
+describe('readObjectLimited', () => {
+  it('đọc đủ khi ≤ giới hạn; vượt ⇒ null và hủy stream giữa chừng', async () => {
+    const storage = createMemoryStorage();
+    await storage.put('a', Buffer.from([1, 2, 3]), 'image/jpeg');
+    expect(await readObjectLimited(storage, 'a', 3)).toEqual(Buffer.from([1, 2, 3]));
+
+    let pulled = 0;
+    let stream: Readable | undefined;
+    storage.getStream = async () => {
+      stream = Readable.from(
+        (function* () {
+          for (let i = 0; i < 100; i++) {
+            pulled++;
+            yield Buffer.alloc(10, i);
+          }
+        })(),
+      );
+      return stream;
+    };
+    expect(await readObjectLimited(storage, 'big', 25)).toBeNull();
+    expect(pulled).toBeLessThan(10);
+    expect(stream?.destroyed).toBe(true);
+  });
+
+  it('không có object ⇒ ném lỗi như get', async () => {
+    await expect(readObjectLimited(createMemoryStorage(), 'missing', 10)).rejects.toThrow();
   });
 });

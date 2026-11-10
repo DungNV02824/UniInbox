@@ -81,6 +81,31 @@ export function createS3Storage(config: MediaStorageConfig): MediaStorage {
   };
 }
 
+/**
+ * Đọc object qua stream, dừng (hủy stream ⇒ hủy request) ngay khi vượt `maxBytes` ⇒ null — không giữ cả tệp
+ * lớn trong bộ nhớ (vd. HEIC/GIF thô tới 25 MB). Lỗi kho (không có object…) ném ra như `get`.
+ */
+export async function readObjectLimited(
+  storage: MediaStorage,
+  key: string,
+  maxBytes: number,
+): Promise<Buffer | null> {
+  const stream = await storage.getStream(key);
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    for await (const chunk of stream as AsyncIterable<Buffer | Uint8Array | string>) {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      total += buf.length;
+      if (total > maxBytes) return null;
+      chunks.push(buf);
+    }
+  } finally {
+    if (!stream.destroyed) stream.destroy();
+  }
+  return Buffer.concat(chunks, total);
+}
+
 /** Khóa lưu trữ: prefix/yyyy/mm/<uuid>.<ext> (theo giờ UTC). */
 export function buildStorageKey(prefix: StoreMediaInput['prefix'], ext: string, now = new Date()): string {
   const yyyy = now.getUTCFullYear();

@@ -2,6 +2,7 @@
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import {
   channelAccounts,
+  chatbots,
   contactIdentities,
   contacts,
   conversations,
@@ -407,6 +408,80 @@ describe('tin echo', () => {
   });
 });
 
+describe('echo tự động của Page (Instant Reply / Away message)', () => {
+  const PAGE_INBOX = 263902037430900;
+  const echoAt = (psid: string, mid: string, sentAt: Date) =>
+    inbound(psid, mid, {
+      direction: 'out',
+      senderType: 'agent',
+      text: 'Cảm ơn bạn đã liên hệ, chúng tôi sẽ phản hồi sớm',
+      sentAt,
+      raw: { message: { mid, is_echo: true, app_id: PAGE_INBOX } },
+    });
+
+  /** Hội thoại có bot (tạo bằng một tin khách cũ rồi gắn chatbot). */
+  async function botConversation(psid: string, firstAt: Date) {
+    await processInboundEvent(db, deps, inbound(psid, `${psid}_first`, { sentAt: firstAt }));
+    const [bot] = await db
+      .insert(chatbots)
+      .values({ name: `Bot ${psid}` })
+      .returning({ id: chatbots.id });
+    const { conversation } = await conversationOf(psid);
+    await db
+      .update(conversations)
+      .set({ chatbotId: bot!.id, aiMode: 'auto' })
+      .where(eq(conversations.id, conversation.id));
+    return conversation.id;
+  }
+
+  const echoRow = async (conversationId: string, mid: string) => {
+    const rows = await messagesOf(conversationId);
+    return rows.find((r) => r.externalMessageId === mid)!;
+  };
+  const pausedUntil = async (conversationId: string) =>
+    (await db.select().from(conversations).where(eq(conversations.id, conversationId)))[0]!.aiPausedUntil;
+
+  it('echo trong 15 giây sau tin khách ⇒ đánh dấu tự động, KHÔNG tạm dừng AI', async () => {
+    const t = Date.now() - 5 * MINUTE;
+    const conv = await botConversation('psid-auto-1', new Date(t));
+    await processInboundEvent(db, deps, echoAt('psid-auto-1', 'm_auto1', new Date(t + 3_000)));
+    expect((await echoRow(conv, 'm_auto1')).raw).toMatchObject({ automatedEcho: true });
+    expect(await pausedUntil(conv)).toBeNull();
+  });
+
+  it('echo muộn (nhân viên thật) ⇒ tạm dừng AI, ghi mốc pause của echo', async () => {
+    const t = Date.now() - 5 * MINUTE;
+    const conv = await botConversation('psid-auto-2', new Date(t));
+    await processInboundEvent(db, deps, echoAt('psid-auto-2', 'm_auto2', new Date(t + 60_000)));
+    const row = await echoRow(conv, 'm_auto2');
+    expect(row.raw).not.toHaveProperty('automatedEcho');
+    const paused = await pausedUntil(conv);
+    expect(paused).not.toBeNull();
+    expect((row.raw as { aiPauseUntil?: string }).aiPauseUntil).toBe(paused!.toISOString());
+  });
+
+  it('echo được xử lý TRƯỚC tin khách (song song) ⇒ khi lưu tin khách thì đánh dấu lại và gỡ pause', async () => {
+    const t = Date.now() - 2 * MINUTE;
+    const conv = await botConversation('psid-auto-3', new Date(t - 30 * MINUTE));
+    await processInboundEvent(db, deps, echoAt('psid-auto-3', 'm_auto3', new Date(t + 2_000)));
+    expect(await pausedUntil(conv)).not.toBeNull();
+    await processInboundEvent(db, deps, inbound('psid-auto-3', 'm_auto3_in', { sentAt: new Date(t) }));
+    expect((await echoRow(conv, 'm_auto3')).raw).toMatchObject({ automatedEcho: true });
+    expect(await pausedUntil(conv)).toBeNull();
+  });
+
+  it('đảo thứ tự nhưng pause đã bị nhân viên khác kéo dài ⇒ giữ pause', async () => {
+    const t = Date.now() - 2 * MINUTE;
+    const conv = await botConversation('psid-auto-4', new Date(t - 30 * MINUTE));
+    await processInboundEvent(db, deps, echoAt('psid-auto-4', 'm_auto4', new Date(t + 2_000)));
+    const later = new Date(Date.now() + 90 * MINUTE);
+    await db.update(conversations).set({ aiPausedUntil: later }).where(eq(conversations.id, conv));
+    await processInboundEvent(db, deps, inbound('psid-auto-4', 'm_auto4_in', { sentAt: new Date(t) }));
+    expect((await echoRow(conv, 'm_auto4')).raw).toMatchObject({ automatedEcho: true });
+    expect((await pausedUntil(conv))?.getTime()).toBe(later.getTime());
+  });
+});
+
 describe('delivery / read', () => {
   it('delivery theo mids và read theo watermark cập nhật status, phát message.updated', async () => {
     await processInboundEvent(db, deps, inbound('psid-7', 'm_7in'));
@@ -610,7 +685,8 @@ describe('processOutboundMessage', () => {
 
     // Hết lượt thử lại (markOutboundFailed) cũng hủy phần sau.
     const batch3 = { outbound: { batchId: 'batch-3' } };
-    const c = await queuedMessage(conversationId, { text: 'c', raw: batch3 });
+    // sent_at tường minh (giờ máy chạy test): mặc định now() của Postgres trong Docker có thể lệch giờ.
+    const c = await queuedMessage(conversationId, { text: 'c', raw: batch3, sentAt: new Date() });
     const d = await queuedMessage(conversationId, {
       text: 'd',
       raw: batch3,
@@ -749,5 +825,133 @@ describe('processOutboundMessage', () => {
     });
     const [row] = await db.select().from(messages).where(eq(messages.id, known!.id));
     expect(row!.status).toBe('delivered');
+  });
+
+  describe('typing giữa các bong bóng bot', () => {
+    let senderActions: { action: string; psid: string; at: number }[];
+    let order: string[];
+
+    beforeEach(() => {
+      senderActions = [];
+      order = [];
+      const connector = deps.connectors.messenger!;
+      deps.connectors = {
+        messenger: {
+          ...connector,
+          send: async (...args) => {
+            order.push('send');
+            return sendMock(...args);
+          },
+          async sendSenderAction(_account, to, action) {
+            order.push(action);
+            senderActions.push({ action, psid: to.externalUserId, at: Date.now() });
+          },
+        },
+      };
+    });
+
+    const botBubble = (part: number, parts: number, sentAt: Date) =>
+      queuedMessage(conversationId, {
+        senderType: 'bot',
+        senderUserId: null,
+        text: `Bong bóng ${part + 1}`,
+        raw: { outbound: { batchId: 'typing-batch', part, parts } },
+        sentAt,
+      });
+
+    it('gửi xong bong bóng chưa phải cuối ⇒ typing_on (sau khi gửi); bong bóng cuối thì không', async () => {
+      const t0 = Date.now();
+      const first = await botBubble(0, 2, new Date(t0));
+      const second = await botBubble(1, 2, new Date(t0 + 1));
+
+      await processOutboundMessage(db, deps, first);
+      await vi.waitFor(() => expect(senderActions.map((a) => a.action)).toEqual(['typing_on']));
+      expect(order).toEqual(['send', 'typing_on']);
+      expect(senderActions[0]!.psid).toBe('psid-out');
+
+      await processOutboundMessage(db, deps, second);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(order).toEqual(['send', 'typing_on', 'send']);
+      const rows = await db.select().from(messages).where(eq(messages.conversationId, conversationId));
+      expect(rows.filter((r) => r.id === first || r.id === second).every((r) => r.status === 'sent')).toBe(
+        true,
+      );
+    });
+
+    it('typing_on giữa bong bóng xong TRƯỚC khi đánh dấu sent (mở khóa bong bóng kế tiếp)', async () => {
+      deps.connectors.messenger!.sendSenderAction = async (_account, to, action) => {
+        await new Promise((r) => setTimeout(r, 50));
+        order.push(`${action}:done`);
+        senderActions.push({ action, psid: to.externalUserId, at: Date.now() });
+      };
+      const t0 = Date.now();
+      const first = await botBubble(0, 2, new Date(t0));
+      await botBubble(1, 2, new Date(t0 + 1));
+      await processOutboundMessage(db, deps, first);
+      // Không cần chờ thêm: processOutboundMessage chỉ xong sau khi typing_on xong.
+      expect(order).toEqual(['send', 'typing_on:done']);
+      const [row] = await db.select().from(messages).where(eq(messages.id, first));
+      expect(row!.status).toBe('sent');
+    });
+
+    it('tin nhân viên / tin bot cũ không có part ⇒ không typing; sender_action lỗi không làm hỏng gửi', async () => {
+      const agent = await queuedMessage(conversationId);
+      await processOutboundMessage(db, deps, agent);
+      const legacy = await queuedMessage(conversationId, {
+        senderType: 'bot',
+        senderUserId: null,
+        raw: { outbound: { batchId: 'old' } },
+      });
+      await processOutboundMessage(db, deps, legacy);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(senderActions).toEqual([]);
+
+      deps.connectors.messenger!.sendSenderAction = async () => {
+        throw new Error('Graph lỗi');
+      };
+      const t0 = Date.now();
+      const failing = await botBubble(0, 2, new Date(t0));
+      await processOutboundMessage(db, deps, failing);
+      const [row] = await db.select().from(messages).where(eq(messages.id, failing));
+      expect(row!.status).toBe('sent');
+    });
+  });
+});
+
+describe('đường trễ chatbot: thứ tự sau khi lưu tin khách', () => {
+  it('lên lịch chatbot TRƯỚC khi tải avatar và phát message.created; avatar vẫn có trong summary', async () => {
+    const order: string[] = [];
+    const baseFetch = deps.fetch!;
+    deps.fetch = (async (input, init) => {
+      if (String(input) === 'http://media.test/avatar.jpg') order.push('avatar');
+      return baseFetch(input, init);
+    }) as typeof fetch;
+    const basePublisher = deps.publisher;
+    deps.publisher = {
+      emit: (rooms, event, payload) => {
+        order.push(event);
+        basePublisher.emit(rooms, event, payload);
+      },
+    };
+    deps.onCustomerMessageStored = async () => {
+      order.push('schedule');
+    };
+
+    await processInboundEvent(db, deps, inbound('psid-latency', 'm_latency_1'));
+    expect(order).toEqual(['schedule', 'avatar', 'message.created']);
+    const { contact } = await conversationOf('psid-latency');
+    expect(contact.avatarUrl).toMatch(/^avatars\//);
+    const created = published.find((p) => p.event === 'message.created')!.payload as {
+      conversation: { contact: { avatarUrl: string | null } };
+    };
+    expect(created.conversation.contact.avatarUrl).toBeTruthy();
+  });
+
+  it('tin trùng do đua vẫn chạy việc đã xếp (avatar) — không mất ảnh đại diện', async () => {
+    deps.onCustomerMessageStored = async () => undefined;
+    const event = inbound('psid-latency-dup', 'm_latency_dup');
+    await Promise.all([processInboundEvent(db, deps, event), processInboundEvent(db, deps, event)]);
+    const { contact } = await conversationOf('psid-latency-dup');
+    expect(contact.avatarUrl).toMatch(/^avatars\//);
   });
 });

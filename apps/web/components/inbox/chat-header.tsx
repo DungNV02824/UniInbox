@@ -6,10 +6,17 @@ import type { ConversationDetail } from '@dezon/shared';
 import { Avatar } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Feature } from '@/lib/config';
+import { contactTagsOf } from '@/lib/contact-tags';
 import { useUpdateConversation } from '@/lib/inbox-queries';
 import { AssigneeSelect } from './assignee-select';
 import { ChannelLabel } from './channel-label';
+import { ChatbotSelect } from './chatbot-controls';
+import { ContactTagChips } from './contact-tag-chips';
 import { SendWindowClock } from './send-window-clock';
+
+/** Đầu khung chat hiện tối đa ngần này nhãn trên một dòng; còn lại gộp "+N" (rê chuột xem đủ). */
+const HEADER_TAGS_MAX = 4;
 
 export function ChatHeader({
   conversation: c,
@@ -31,8 +38,16 @@ export function ChatHeader({
           </Link>
         </Button>
         <Avatar src={c.contact.avatarUrl} name={c.contact.displayName} className="size-8 text-xs" />
-        <div className="flex min-w-0 flex-col gap-0.5">
-          <h2 className="truncate text-sm font-semibold">{c.contact.displayName}</h2>
+        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <h2 className="min-w-0 truncate text-sm font-semibold">{c.contact.displayName}</h2>
+            <ContactTagChips
+              tags={contactTagsOf(c.contact)}
+              max={HEADER_TAGS_MAX}
+              className="max-w-[65%] shrink-0 overflow-hidden"
+              chipClassName="max-w-[8rem]"
+            />
+          </div>
           <ChannelLabel channel={c.channel} className="w-fit" />
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-1">
@@ -65,6 +80,9 @@ export function ChatHeader({
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
+        <Feature flag="featureAiEnabled">
+          <ChatbotSelect conversation={c} />
+        </Feature>
         <SendWindowClock conversationId={c.id} info={sendWindow} />
         {sendWindow.tag === 'HUMAN_AGENT' && (
           <Badge

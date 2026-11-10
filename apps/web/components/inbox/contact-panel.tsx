@@ -8,7 +8,10 @@ import { EmptyState } from '@/components/empty-state';
 import { Avatar } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
+import { useAuth } from '@/lib/auth';
+import { Feature } from '@/lib/config';
 import { useConversation } from '@/lib/inbox-queries';
+import { AiRunsSection } from './ai-runs-section';
 import { ChannelLabel } from './channel-label';
 import { ContactNameEditor, ContactNotesEditor, ContactTagsEditor } from './contact-editors';
 import { Panel } from './panel';
@@ -24,6 +27,7 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
 
 function ContactProfile({ conversation: c }: { conversation: ConversationDetail }) {
   const contact = c.contactDetail;
+  const { user } = useAuth();
   return (
     <>
       <div className="flex flex-col items-center gap-2 border-b p-4 text-center">
@@ -73,9 +77,15 @@ function ContactProfile({ conversation: c }: { conversation: ConversationDetail 
         <ContactNotesEditor conversationId={c.id} contactId={contact.id} notes={contact.notes} />
       </Section>
 
-      <Section title="Tag">
+      <Section title="Nhãn">
         <ContactTagsEditor conversationId={c.id} contactId={contact.id} tags={contact.tags} />
       </Section>
+
+      {user?.role === 'admin' && (
+        <Feature flag="featureAiEnabled">
+          <AiRunsSection key={c.id} conversationId={c.id} />
+        </Feature>
+      )}
     </>
   );
 }

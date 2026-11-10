@@ -16,6 +16,7 @@ export function createInboxContext(config: AppConfig, storage: MediaStorage | nu
       metaHumanAgentEnabled: config.META_HUMAN_AGENT_ENABLED,
       zaloOaAllowPaidBot: config.ZALO_OA_ALLOW_PAID_BOT,
     },
+    aiPauseAfterAgentMin: config.AI_PAUSE_AFTER_AGENT_MIN,
   };
 }
 

@@ -5,6 +5,11 @@ import { graphErrorCode, graphRequest } from './graph';
 import { pageTokenOf } from './send';
 
 const PROFILE_FIELDS = 'first_name,last_name,name,profile_pic';
+/**
+ * Hồ sơ khách được lấy NGAY trong luồng tin đến (trước khi lưu tin ⇒ trước khi lên lịch chatbot), nên không chờ
+ * tới GRAPH_TIMEOUT_MS: quá hạn thì bỏ qua (tên tạm), tin sau thử lại (PROFILE_RETRY_MS của pipeline).
+ */
+export const PROFILE_TIMEOUT_MS = 5_000;
 
 function str(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined;
@@ -21,6 +26,7 @@ export async function fetchMessengerProfile(
     path: encodeURIComponent(psid),
     token,
     query: { fields: PROFILE_FIELDS },
+    timeoutMs: PROFILE_TIMEOUT_MS,
   });
   if (!res.ok) {
     // Thiếu Advanced Access, khách từ quảng cáo chưa trả lời, tài khoản tạo bằng SĐT (2018218)...

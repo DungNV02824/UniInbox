@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
 import { AppHeader } from '@/components/app-header';
+import { HandoffNotifier } from '@/components/inbox/handoff-notifier';
 import { InboxLayout } from '@/components/inbox/inbox-layout';
 import { RequireAuth } from '@/components/require-auth';
 import { RealtimeProvider } from '@/lib/realtime';
@@ -24,6 +25,7 @@ export default function InboxRootLayout({ children }: { children: ReactNode }) {
           </div>
           {children}
         </div>
+        <HandoffNotifier />
       </RealtimeProvider>
     </RequireAuth>
   );

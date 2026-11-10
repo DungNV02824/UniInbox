@@ -1,0 +1,2 @@
+ALTER TABLE "chatbots" ADD COLUMN "response_speed" text DEFAULT 'fast' NOT NULL;--> statement-breakpoint
+ALTER TABLE "chatbots" ADD CONSTRAINT "chatbots_response_speed_check" CHECK ("chatbots"."response_speed" IN ('fast', 'balanced', 'thorough'));

@@ -1,7 +1,9 @@
 // Lời gọi REST của hộp thư và trang Kênh (hợp đồng: @dezon/shared/inbox).
 import type {
+  AiRunDto,
   ChannelAccountDto,
   ChannelType,
+  ChatbotSummary,
   ConnectFacebookPagesRequest,
   ConnectFacebookPagesResult,
   ConnectMessengerPageRequest,
@@ -22,6 +24,7 @@ import type {
   UserDirectoryEntry,
 } from '@dezon/shared';
 import { api } from '@/lib/api';
+import type { AiStateFilter } from '@/lib/inbox-ai';
 
 /** Bộ lọc danh sách hội thoại (phía web). Chỉ chứa khóa có giá trị để query key ổn định. */
 export interface ConversationFilters {
@@ -31,6 +34,11 @@ export interface ConversationFilters {
   /** 'me' | 'none' | id nhân viên (admin lọc theo người phụ trách). */
   assignee?: 'me' | 'none' | (string & {});
   unread?: boolean;
+  /**
+   * 'handled' = "AI đang lo". Máy chủ hiện CHƯA hỗ trợ tham số này (Zod bỏ qua khóa lạ) nên web lọc
+   * thêm trên trang đã tải; khi API có `aiState=handled` thì kết quả đúng ngay từ máy chủ.
+   */
+  aiState?: AiStateFilter;
 }
 
 /** Bỏ khóa undefined/false để hai bộ lọc giống nhau luôn cho cùng query key. */
@@ -41,6 +49,7 @@ export function normalizeFilters(f: ConversationFilters): ConversationFilters {
   if (f.status) out.status = f.status;
   if (f.assignee) out.assignee = f.assignee;
   if (f.unread) out.unread = true;
+  if (f.aiState) out.aiState = f.aiState;
   return out;
 }
 
@@ -84,6 +93,29 @@ export const inboxApi = {
   },
   userDirectory() {
     return api.request<UserDirectoryEntry[]>('/users/directory');
+  },
+  /** Bot cho ô chọn ở khung chat (nhân viên chỉ nhận bot đang bật; admin nhận cả bot tắt). */
+  listChatbots() {
+    return api.request<ChatbotSummary[]>('/chatbots');
+  },
+  setConversationChatbot(id: string, chatbotId: string | null) {
+    return api.request<unknown>(`/conversations/${enc(id)}/chatbot`, {
+      method: 'PATCH',
+      body: { chatbotId },
+    });
+  },
+  resumeAi(id: string) {
+    return api.request<unknown>(`/conversations/${enc(id)}/ai/resume`, { method: 'POST' });
+  },
+  ackHandoff(id: string) {
+    return api.request<unknown>(`/conversations/${enc(id)}/handoff/ack`, { method: 'POST' });
+  },
+  resolveHandoff(id: string) {
+    return api.request<unknown>(`/conversations/${enc(id)}/handoff/resolve`, { method: 'POST' });
+  },
+  /** Nhật ký AI (admin): 20 lần chạy gần nhất. */
+  listAiRuns(id: string) {
+    return api.request<AiRunDto[]>(`/conversations/${enc(id)}/ai-runs`);
   },
   uploadMedia(file: File) {
     const form = new FormData();

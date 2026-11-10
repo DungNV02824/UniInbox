@@ -8,11 +8,12 @@ import type {
   MessageDto,
   Page,
 } from '@dezon/shared';
-import { and, desc, eq, gt, isNull, lt, or, sql, type SQL } from 'drizzle-orm';
+import { and, desc, eq, gt, isNotNull, isNull, lt, or, sql, type SQL } from 'drizzle-orm';
 import { assertCanView, CONVERSATION_NOT_FOUND, visibleConversationsWhere } from './access';
 import { decodeCursor, encodeCursor } from './cursor';
 import { InboxNotFoundError } from './errors';
 import {
+  type DbLike,
   loadContactDetail,
   loadSummary,
   selectMessageRows,
@@ -32,6 +33,9 @@ function conversationFilters(viewer: Viewer, query: ListConversationsQuery): (SQ
   else if (query.assignee) f.push(eq(conversations.assignedUserId, query.assignee));
   // unread=false nghĩa là không lọc (không có bộ lọc "đã đọc").
   if (query.unread) f.push(gt(conversations.unreadCount, 0));
+  if (query.aiState === 'handled') {
+    f.push(and(isNotNull(conversations.chatbotId), eq(conversations.aiMode, 'auto')));
+  }
   if (query.cursor) {
     const c = decodeCursor(query.cursor);
     const lastAt = conversations.lastMessageAt;
@@ -125,6 +129,25 @@ export async function getConversationSummary(
   const summary = await loadSummary(db, conversationId, ctx);
   if (!summary) throw new InboxNotFoundError(CONVERSATION_NOT_FOUND);
   return summary;
+}
+
+/**
+ * Id hội thoại của các khách, mới nhất trước (last_message_at giảm dần, null cuối), tối đa `limit` —
+ * dùng để phát conversation.updated khi tag của khách đổi. Không kiểm quyền.
+ */
+export async function recentConversationIdsOfContacts(
+  db: DbLike,
+  contactIds: readonly string[],
+  limit: number,
+): Promise<string[]> {
+  if (contactIds.length === 0 || limit <= 0) return [];
+  const rows = await db
+    .select({ id: conversations.id })
+    .from(conversations)
+    .where(sql`${conversations.contactId} = any(${sql.param([...contactIds])}::uuid[])`)
+    .orderBy(sql`${conversations.lastMessageAt} desc nulls last`, desc(conversations.id))
+    .limit(limit);
+  return rows.map((r) => r.id);
 }
 
 /** MessageDto không kiểm quyền (dùng để phát realtime). */

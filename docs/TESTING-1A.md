@@ -157,18 +157,21 @@ Runner tự gọi `POST /__reset` của mock. Có thể chạy lại nhiều l�
 
 Các mục s1–s4 cần worker chạy với `MESSENGER_SYNC_INTERVAL_SEC=5` (mặc định 60 thì phải tăng `--sync-wait 90`). Cờ của runner: `--api <url>`, `--mock <url>`, `--sync-wait <giây>` (mặc định 30), `--no-sync` (bỏ s1–s4).
 
-**Chạy trên một stack tạm, không đụng stack dev đang chạy:** dùng DB riêng và Redis DB số khác để worker dev không nhận nhầm job:
+**Chạy trên một stack tạm, không đụng stack dev đang chạy:** dùng DB riêng và một **Redis riêng** (container khác cổng). Chỉ đổi số DB Redis (`/5`) là chưa đủ: hàng đợi BullMQ thì tách được, nhưng Pub/Sub của Socket.IO (redis-adapter của API, redis-emitter của worker) không phân theo số DB, nên sự kiện realtime của stack tạm sẽ lọt sang trình duyệt đang mở stack thật (và ngược lại):
 
 ```bash
+docker run -d --name dezon-e2e-redis -p 6380:6379 redis:7-alpine
 docker exec dezon-inbox-postgres-1 psql -U dezon -d postgres -c "CREATE DATABASE sync_check"
-export DATABASE_URL=postgres://dezon:dezon@localhost:5433/sync_check REDIS_URL=redis://localhost:6379/5
+export DATABASE_URL=postgres://dezon:dezon@localhost:5433/sync_check REDIS_URL=redis://localhost:6380
 pnpm db:migrate && pnpm db:seed
 pnpm --filter @dezon/worker exec tsx ../../scripts/mock-graph.ts --port 4900 &
 export META_GRAPH_BASE_URL=http://localhost:4900 META_APP_ID=dev-app-id META_APP_SECRET=dev-app-secret   META_VERIFY_TOKEN=dev-verify-token META_LOGIN_DIALOG_BASE_URL=http://localhost:4900   API_PORT=4100 API_URL=http://localhost:4100 MESSENGER_SYNC_INTERVAL_SEC=5
 node apps/api/dist/main.js & node apps/worker/dist/main.js &
 pnpm --filter @dezon/worker exec tsx ../../scripts/e2e-1a.ts --api http://localhost:4100
-# xong: tắt 3 tiến trình, DROP DATABASE sync_check, redis-cli -n 5 flushdb
+# xong: tắt 3 tiến trình, DROP DATABASE sync_check, docker rm -f dezon-e2e-redis
 ```
+
+Kiểm thử Chatbot AI (Gemini thật, cùng kiểu stack tạm): `scripts/e2e-chatbot.ts` (cách dựng stack và chạy nằm ở đầu file).
 
 Biến môi trường của runner: `E2E_API_URL` (http://localhost:4000), `E2E_MOCK_URL` (http://localhost:4900), `META_APP_ID`, `META_APP_SECRET`, `META_VERIFY_TOKEN`, `META_GRAPH_VERSION` (phải khớp với api/worker), `DATABASE_URL` (mặc định đọc từ `.env`).
 

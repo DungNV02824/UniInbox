@@ -6,6 +6,7 @@ import { createGraphApi } from './graph-api';
 import { createLoginApi, type MessengerLoginApi } from './oauth';
 import { parseMessengerWebhook } from './parse';
 import { fetchMessengerProfile } from './profile';
+import { sendMessengerSenderAction } from './sender-action';
 import { sendMessengerPart } from './send';
 import { headerValue, verifyMessengerSignature } from './signature';
 
@@ -34,6 +35,7 @@ export {
   messengerSendMetadata,
   parseMessengerSendMetadata,
 } from './send';
+export { SENDER_ACTION_TIMEOUT_MS } from './sender-action';
 
 /** Connector Messenger kèm bộ đọc hội thoại (dùng cho đồng bộ; không thuộc interface chung ChannelConnector). */
 export interface MessengerConnector extends ChannelConnector {
@@ -65,6 +67,9 @@ export function createMessengerConnector(config: MessengerConfig): MessengerConn
     },
     send(account, to, part, options) {
       return sendMessengerPart(config, account, to, part, options);
+    },
+    sendSenderAction(account, to, action) {
+      return sendMessengerSenderAction(config, account, to, action);
     },
     fetchProfile(account, externalUserId) {
       return fetchMessengerProfile(config, account, externalUserId);

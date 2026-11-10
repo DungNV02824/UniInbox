@@ -9,11 +9,17 @@ import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter, type NestFastifyApplication } from '@nestjs/platform-fastify';
 import { Logger } from 'nestjs-pino';
 import { AppModule, type AppOverrides } from './app.module';
+import { BODY_TOO_LARGE_MESSAGE_KEY } from './common/all-exceptions.filter';
 import { type AppConfig, loadAppConfig } from './config';
 import {
   WEBHOOK_BODY_LIMIT_BYTES,
   WEBHOOK_PATH_PREFIX,
 } from './modules/connectors/messenger/messenger.constants';
+import {
+  CHATBOT_TEST_BODY_LIMIT_BYTES,
+  CHATBOT_TEST_BODY_TOO_LARGE_MESSAGE,
+  CHATBOT_TEST_ROUTE_URLS,
+} from './modules/chatbots/chatbot-test.constants';
 import { RedisIoAdapter } from './modules/realtime/redis-io.adapter';
 
 export type { AppOverrides } from './app.module';
@@ -47,8 +53,15 @@ export async function createApp(
 
   const fastify = app.getHttpAdapter().getInstance();
   // Webhook có thể gom nhiều sự kiện: nới giới hạn body riêng cho /webhooks/* (route khác giữ mặc định 1MB).
+  // "Chat thử" kèm ảnh base64: nới riêng hai route chạy thử (xem CHATBOT_TEST_BODY_LIMIT_BYTES).
   fastify.addHook('onRoute', (route) => {
     if (route.url.startsWith(WEBHOOK_PATH_PREFIX)) route.bodyLimit = WEBHOOK_BODY_LIMIT_BYTES;
+    if (CHATBOT_TEST_ROUTE_URLS.has(route.url)) {
+      route.bodyLimit = CHATBOT_TEST_BODY_LIMIT_BYTES;
+      route.config = Object.assign({}, route.config, {
+        [BODY_TOO_LARGE_MESSAGE_KEY]: CHATBOT_TEST_BODY_TOO_LARGE_MESSAGE,
+      });
+    }
   });
 
   await app.register(fastifyHelmet);

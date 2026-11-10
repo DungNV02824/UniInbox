@@ -5,5 +5,7 @@ export * from './auth';
 export * from './config';
 export * from './duration';
 export * from './inbox';
+export * from './chatbots';
+export * from './contact-tags';
 export * from './zalo';
 export * from './realtime';

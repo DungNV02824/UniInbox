@@ -11,6 +11,8 @@ import {
   applyConversationsToList,
   applyConversationToList,
   mergeSummaryIntoDetail,
+  patchContactTagsInDetail,
+  patchContactTagsInList,
   patchConversationsInList,
   updateExistingMessage,
   upsertMessage,
@@ -110,4 +112,51 @@ export function renameContactLocally(qc: QueryClient, contactId: string, display
       ),
     );
   }
+}
+
+/**
+ * Đổi nhãn khách ngay trên giao diện: mọi danh sách + mọi chi tiết hội thoại của khách đó
+ * (realtime `conversation.updated` sẽ gộp bản của máy chủ sau). Trả về hàm hoàn tác.
+ */
+export function setContactTagsLocally(qc: QueryClient, contactId: string, tags: string[]): () => void {
+  const prevLists = qc.getQueriesData<ConversationsData>({ queryKey: inboxKeys.lists() });
+  const prevDetails = qc.getQueriesData<ConversationDetail>({ queryKey: inboxKeys.details() });
+  for (const [key] of prevLists) {
+    qc.setQueryData<ConversationsData>(key, (old) => patchContactTagsInList(old, contactId, tags));
+  }
+  for (const [key] of prevDetails) {
+    qc.setQueryData<ConversationDetail>(key, (old) => patchContactTagsInDetail(old, contactId, tags));
+  }
+  return () => {
+    for (const [key, data] of prevLists) qc.setQueryData(key, data);
+    for (const [key, data] of prevDetails) {
+      if (data?.contact.id === contactId) qc.setQueryData(key, data);
+    }
+  };
+}
+
+/**
+ * Sửa lạc quan một hội thoại trong chi tiết + mọi danh sách đã tải (không lọc lại; kết quả máy chủ
+ * sẽ đi qua `applyConversationUpdate`). Trả về hàm hoàn tác (khôi phục bản chụp trước khi sửa).
+ */
+export function patchConversationEverywhere(
+  qc: QueryClient,
+  conversationId: string,
+  patch: (c: ConversationSummary) => ConversationSummary,
+): () => void {
+  const detailKey = inboxKeys.detail(conversationId);
+  const prevDetail = qc.getQueryData<ConversationDetail>(detailKey);
+  const prevLists = qc.getQueriesData<ConversationsData>({ queryKey: inboxKeys.lists() });
+
+  qc.setQueryData<ConversationDetail>(detailKey, (old) => (old ? { ...old, ...patch(old) } : old));
+  for (const [key] of prevLists) {
+    qc.setQueryData<ConversationsData>(key, (old) =>
+      patchConversationsInList(old, (c) => c.id === conversationId, patch),
+    );
+  }
+
+  return () => {
+    if (prevDetail !== undefined) qc.setQueryData(detailKey, prevDetail);
+    for (const [key, data] of prevLists) qc.setQueryData(key, data);
+  };
 }

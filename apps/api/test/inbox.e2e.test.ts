@@ -336,7 +336,10 @@ describe('hội thoại', () => {
   it('GET /conversations theo quyền: admin thấy tất cả, agent thấy của mình + chưa phân công', async () => {
     const asAdmin = await app.inject({ method: 'GET', url: '/conversations', headers: bearer(adminToken) });
     expect(asAdmin.statusCode).toBe(200);
-    const adminIds = asAdmin.json<Page<ConversationSummary>>().items.map((c) => c.id);
+    const adminItems = asAdmin.json<Page<ConversationSummary>>().items;
+    // contact.tags luôn có (mảng, [] khi khách chưa có tag).
+    for (const c of adminItems) expect(c.contact.tags).toEqual([]);
+    const adminIds = adminItems.map((c) => c.id);
     expect(adminIds).toEqual(
       expect.arrayContaining([
         seed.adminConversationId,
@@ -486,6 +489,27 @@ describe('hội thoại', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json<ConversationSummary>().assignedUser?.id).toBe(seed.agentId);
     expect((await updated).conversation.id).toBe(seed.unassignedConversationId);
+  });
+
+  it('PATCH /contacts/:id đổi tên => phát conversation.updated có contact mới (kèm tags)', async () => {
+    const agentSocket = await connectSocket(agentToken);
+    const updated = nextEvent<{ conversation: ConversationSummary }>(agentSocket, 'conversation.updated');
+    const detail = await app.inject({
+      method: 'GET',
+      url: `/conversations/${seed.agentConversationId}`,
+      headers: bearer(agentToken),
+    });
+    const contactId = detail.json<ConversationSummary>().contact.id;
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/contacts/${contactId}`,
+      headers: bearer(agentToken),
+      payload: { displayName: 'Khách đổi tên' },
+    });
+    expect(res.statusCode).toBe(200);
+    const { conversation } = await updated;
+    expect(conversation.id).toBe(seed.agentConversationId);
+    expect(conversation.contact).toMatchObject({ id: contactId, displayName: 'Khách đổi tên', tags: [] });
   });
 
   it('POST /conversations/:id/read => unreadCount = 0', async () => {

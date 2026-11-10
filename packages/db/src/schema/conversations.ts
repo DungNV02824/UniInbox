@@ -1,6 +1,7 @@
 import { index, integer, pgTable, unique, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
 import { id, timestamps, tstz } from './_common';
 import { channelAccounts } from './channel-accounts';
+import { chatbots } from './chatbots';
 import { contactIdentities, contacts } from './contacts';
 import { aiModeEnum, conversationStatusEnum, handoffReasonCodeEnum, windowSourceEnum } from './enums';
 import { users } from './users';
@@ -22,6 +23,8 @@ export const conversations = pgTable(
     status: conversationStatusEnum('status').notNull().default('open'),
     aiMode: aiModeEnum('ai_mode').notNull().default('off'),
     aiPausedUntil: tstz('ai_paused_until'),
+    /** Chatbot đang gắn (bật bot ⇒ ai_mode 'auto'; escalate giữ nguyên để "trả lại cho AI"). */
+    chatbotId: uuid('chatbot_id').references(() => chatbots.id, { onDelete: 'set null' }),
     assignedUserId: uuid('assigned_user_id').references(() => users.id, { onDelete: 'set null' }),
     /** Dùng để tính cửa sổ gửi (6.5). */
     lastCustomerMessageAt: tstz('last_customer_message_at'),
@@ -41,5 +44,6 @@ export const conversations = pgTable(
     index('conversations_status_idx').on(t.status),
     index('conversations_assigned_user_id_idx').on(t.assignedUserId),
     index('conversations_contact_id_idx').on(t.contactId),
+    index('conversations_chatbot_id_idx').on(t.chatbotId),
   ],
 );

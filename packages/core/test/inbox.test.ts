@@ -1,4 +1,4 @@
-import { auditLogs, conversations, messages, type Db } from '@dezon/db';
+import { auditLogs, contactTags, conversations, messages, type Db } from '@dezon/db';
 import type { ConversationSummary, ListConversationsQuery } from '@dezon/shared';
 import { and, asc, eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -20,6 +20,7 @@ import {
   getMessageDto,
   listConversations,
   listMessages,
+  recentConversationIdsOfContacts,
 } from '../src/inbox/queries';
 import { splitOutboundText } from '../src/inbox/split-text';
 import {
@@ -193,7 +194,7 @@ describe('listConversations', () => {
     expect(s).toMatchObject({
       id: conv.id,
       assignedUser: { id: t.agent.id, name: 'Hương' },
-      contact: { displayName: 'Chị Mai', avatarUrl: 'https://signed.test/avatars/mai.jpg' },
+      contact: { displayName: 'Chị Mai', avatarUrl: 'https://signed.test/avatars/mai.jpg', tags: [] },
       channel: { id: channel.id, type: 'messenger', displayName: 'Fanpage A', color: '#16a34a' },
       lastMessage: { text: null, senderType: 'agent', hasAttachments: true },
       sendWindow: { allowed: true },
@@ -528,6 +529,10 @@ describe('updateContact', () => {
     const channel = await createChannel(db);
     const visible = await createConversation(db, { channel, contactName: 'Cũ' });
     const hidden = await createConversation(db, { channel, assignedUserId: t.agent2.id });
+    await db
+      .insert(contactTags)
+      .values([{ name: 'vip' }, { name: 'sofa' }])
+      .onConflictDoNothing();
 
     const d = await updateContact(
       db,
@@ -545,5 +550,41 @@ describe('updateContact', () => {
       InboxForbiddenError,
     );
     expect((await updateContact(db, t.admin, hidden.contactId, { notes: 'x' }, ctx)).notes).toBe('x');
+  });
+
+  it('contact.tags có trong summary danh sách + chi tiết, đúng thứ tự đã lưu', async () => {
+    const channel = await createChannel(db);
+    const conv = await createConversation(db, { channel, contactName: 'Chị Tag', lastMessageAt: ago(HOUR) });
+    await db
+      .insert(contactTags)
+      .values([{ name: 'vip' }, { name: 'sofa' }])
+      .onConflictDoNothing();
+    await updateContact(db, t.admin, conv.contactId, { tags: ['sofa', 'VIP'] }, ctx);
+
+    const [s] = (await listConversations(db, t.admin, q({ channelAccountId: channel.id }), ctx)).items;
+    expect(s!.contact).toEqual({
+      id: conv.contactId,
+      displayName: 'Chị Tag',
+      avatarUrl: null,
+      tags: ['sofa', 'vip'],
+    });
+    const d = await getConversationDetail(db, t.admin, conv.id, ctx);
+    expect(d.contact.tags).toEqual(['sofa', 'vip']);
+    expect(d.contactDetail.tags).toEqual(['sofa', 'vip']);
+    expect((await getConversationSummary(db, conv.id, ctx)).contact.tags).toEqual(['sofa', 'vip']);
+  });
+});
+
+describe('recentConversationIdsOfContacts', () => {
+  it('hội thoại của các khách, mới nhất trước, giới hạn số lượng', async () => {
+    const channel = await createChannel(db);
+    const a = await createConversation(db, { channel, lastMessageAt: ago(3 * HOUR) });
+    const b = await createConversation(db, { channel, lastMessageAt: ago(HOUR) });
+    const never = await createConversation(db, { channel });
+    await createConversation(db, { channel, lastMessageAt: ago(10) });
+    const contactIds = [a.contactId, b.contactId, never.contactId];
+    expect(await recentConversationIdsOfContacts(db, contactIds, 10)).toEqual([b.id, a.id, never.id]);
+    expect(await recentConversationIdsOfContacts(db, contactIds, 1)).toEqual([b.id]);
+    expect(await recentConversationIdsOfContacts(db, [], 10)).toEqual([]);
   });
 });

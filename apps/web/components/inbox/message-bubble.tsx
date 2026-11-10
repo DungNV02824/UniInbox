@@ -4,6 +4,7 @@ import { memo } from 'react';
 import { AlertCircle, Check, CheckCheck, Clock, RotateCw } from 'lucide-react';
 import type { MessageStatus } from '@dezon/shared';
 import { Button } from '@/components/ui/button';
+import { botSenderLabel } from '@/lib/inbox-ai';
 import { isTempMessage, type ChatMessage } from '@/lib/inbox-cache';
 import { formatClock, formatDateTime, MESSAGE_STATUS_LABELS } from '@/lib/inbox-format';
 import { sendErrorHint } from '@/lib/send-error-hint';
@@ -29,9 +30,9 @@ function StatusIcon({ status }: { status: MessageStatus }) {
   }
 }
 
-/** Tên người gửi phía shop: nhân viên, nhãn phụ (vd. "Meta Business Suite") hoặc "AI". */
+/** Tên người gửi phía shop: nhân viên, nhãn phụ (vd. "Meta Business Suite") hoặc "AI · <tên bot>". */
 export function senderName(m: ChatMessage): string | null {
-  if (m.senderType === 'bot') return 'AI';
+  if (m.senderType === 'bot') return botSenderLabel(m);
   if (m.senderType !== 'agent') return null;
   return m.senderUser?.name ?? m.senderLabel ?? 'Nhân viên';
 }
@@ -68,10 +69,13 @@ export const MessageBubble = memo(function MessageBubble({
     <div className={cn('flex flex-col gap-1', outbound ? 'items-end' : 'items-start')}>
       {showSender && name && (
         <span className="flex items-center gap-1 px-1 text-xs text-muted-foreground">
-          {bot && (
-            <span className="rounded bg-violet-100 px-1 text-[10px] font-semibold text-violet-700">AI</span>
+          {bot ? (
+            <span className="rounded bg-violet-100 px-1.5 py-px text-[11px] font-semibold text-violet-700">
+              {name}
+            </span>
+          ) : (
+            name
           )}
-          {!bot && name}
         </span>
       )}
       <MessageAttachments

@@ -14,6 +14,7 @@ import { errorText, useConversation, useMarkRead, useSendMessage } from '@/lib/i
 import { usePageVisible } from '@/lib/use-now';
 import { cn } from '@/lib/utils';
 import { ChatHeader } from './chat-header';
+import { ConversationAiNotices } from './chatbot-controls';
 import { Composer } from './composer';
 import { MessageList } from './message-list';
 import { Panel } from './panel';
@@ -93,6 +94,7 @@ function ChatView({ conversationId, onShowInfo }: { conversationId: string; onSh
   return (
     <>
       <ChatHeader conversation={conv} onShowInfo={onShowInfo} />
+      <ConversationAiNotices conversation={conv} />
       {!viewable && (
         <Alert className="rounded-none border-x-0 border-t-0 border-amber-200 bg-amber-50 text-amber-800">
           <ShieldAlert aria-hidden />

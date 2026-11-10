@@ -24,6 +24,18 @@ export interface PipelineDeps {
   /** META_APP_ID...: tin echo mang app_id này là tin hệ thống đã gửi. */
   ownAppIds: Partial<Record<ChannelType, string>>;
   fetch?: typeof fetch;
+  /**
+   * Chatbot AI: gọi SAU khi lưu (commit) một tin KHÁCH mới với source 'webhook' | 'sync-incremental'
+   * (KHÔNG gọi với 'sync-backfill'). Worker cài bằng maybeScheduleChatbotReply. Lỗi hook chỉ log warn,
+   * không làm hỏng pipeline. Thiếu ⇒ không làm gì.
+   */
+  onCustomerMessageStored?: (event: CustomerMessageStoredEvent) => Promise<void>;
+}
+
+export interface CustomerMessageStoredEvent {
+  conversationId: string;
+  messageId: string;
+  source: InboundSource;
 }
 
 /**

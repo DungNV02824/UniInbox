@@ -1,7 +1,9 @@
 import Link from 'next/link';
-import { TriangleAlert, UserRound } from 'lucide-react';
+import { PauseCircle, TriangleAlert, UserRound } from 'lucide-react';
 import type { ConversationSummary } from '@dezon/shared';
 import { Avatar } from '@/components/ui/avatar';
+import { contactTagsOf } from '@/lib/contact-tags';
+import { conversationAiState, handoffReasonLabel } from '@/lib/inbox-ai';
 import {
   CHANNEL_TYPE_LABELS,
   formatDateTime,
@@ -10,9 +12,13 @@ import {
   safeColor,
 } from '@/lib/inbox-format';
 import { cn } from '@/lib/utils';
+import { ConversationPreviewText } from './ai-typing';
+import { ContactTagChips } from './contact-tag-chips';
+
+const ROW_TAGS_MAX = 2;
 
 /**
- * Một dòng trong danh sách hội thoại (gọn): tên + giờ / kênh (chấm màu) + người phụ trách /
+ * Một dòng trong danh sách hội thoại (gọn): tên + nhãn khách + giờ / kênh (chấm màu) + người phụ trách /
  * xem trước 1 dòng + số tin chưa đọc.
  */
 export function ConversationRow({
@@ -27,8 +33,13 @@ export function ConversationRow({
   viewerId?: string;
 }) {
   const unread = c.unreadCount > 0;
+  const tags = contactTagsOf(c.contact);
   const time = c.lastMessage?.sentAt ?? c.lastMessageAt;
   const channelTitle = `${CHANNEL_TYPE_LABELS[c.channel.type]} · ${c.channel.displayName}`;
+  const aiState = conversationAiState(c, now);
+  const handoffTitle = c.handoff
+    ? `Cần người: ${handoffReasonLabel(c.handoff.reasonCode)}${c.handoff.acknowledgedBy ? ` · đã nhận bởi ${c.handoff.acknowledgedBy.name}` : ''}`
+    : 'Cần người xử lý';
   return (
     <Link
       href={`/inbox/${c.id}`}
@@ -41,11 +52,28 @@ export function ConversationRow({
       <Avatar src={c.contact.avatarUrl} name={c.contact.displayName} className="mt-0.5 size-9 text-[13px]" />
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
         <div className="flex items-center gap-1.5">
-          <span className={cn('truncate text-sm leading-5', unread ? 'font-semibold' : 'font-medium')}>
+          <span
+            className={cn('min-w-0 truncate text-sm leading-5', unread ? 'font-semibold' : 'font-medium')}
+          >
             {c.contact.displayName}
           </span>
-          {c.status === 'pending_human' && (
-            <TriangleAlert className="size-3.5 shrink-0 text-amber-600" aria-label="Cần người xử lý" />
+          {/* Nhãn khách cạnh tên: tối đa 2 chip, chiếm tối đa ~một nửa dòng để tên vẫn đọc được. */}
+          <ContactTagChips
+            tags={tags}
+            max={ROW_TAGS_MAX}
+            className="max-w-[55%] shrink-0 overflow-hidden"
+            chipClassName="max-w-[6.5rem]"
+          />
+          {aiState === 'handoff' && (
+            <TriangleAlert
+              className={cn(
+                'size-3.5 shrink-0',
+                c.handoff?.acknowledgedBy ? 'text-amber-600' : 'text-red-600',
+              )}
+              aria-label={handoffTitle}
+            >
+              <title>{handoffTitle}</title>
+            </TriangleAlert>
           )}
           {time && (
             <time
@@ -70,6 +98,26 @@ export function ConversationRow({
             />
             <span className="truncate font-medium text-foreground/75">{c.channel.displayName}</span>
           </span>
+          {c.chatbot && (
+            <span
+              className={cn(
+                'flex max-w-[45%] min-w-0 items-center gap-0.5 rounded px-1 text-[10px] leading-4 font-medium',
+                aiState === 'active' ? 'bg-violet-100 text-violet-700' : 'bg-muted text-muted-foreground',
+              )}
+              title={
+                aiState === 'paused'
+                  ? `Chatbot ${c.chatbot.name} · tạm dừng vì nhân viên vừa nhắn`
+                  : aiState === 'active'
+                    ? `Chatbot ${c.chatbot.name} đang trả lời`
+                    : `Chatbot ${c.chatbot.name} · đang tắt cho hội thoại này`
+              }
+            >
+              <span aria-hidden>🤖</span>
+              <span className="sr-only">Chatbot: </span>
+              <span className="truncate">{c.chatbot.name}</span>
+              {aiState === 'paused' && <PauseCircle className="size-3 shrink-0" aria-label="AI tạm dừng" />}
+            </span>
+          )}
           {c.assignedUser && (
             <span
               className="flex min-w-0 items-center gap-0.5"
@@ -82,14 +130,14 @@ export function ConversationRow({
           )}
         </div>
         <div className="flex min-w-0 items-center gap-1.5">
-          <span
+          <ConversationPreviewText
+            conversationId={c.id}
+            preview={formatPreview(c.lastMessage, viewerId)}
             className={cn(
               'min-w-0 flex-1 truncate text-xs leading-4',
               unread ? 'font-medium text-foreground' : 'text-muted-foreground',
             )}
-          >
-            {formatPreview(c.lastMessage, viewerId)}
-          </span>
+          />
           {unread && (
             <span
               className="ml-auto inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-brand px-1 text-[10px] font-semibold text-brand-foreground"

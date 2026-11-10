@@ -67,6 +67,14 @@ export interface SendOptions {
   messageId?: string;
 }
 
+/**
+ * Hành động người gửi (Messenger Send API `sender_action`): 'typing_on' = hiện dấu ba chấm "đang soạn tin" trên
+ * Messenger của khách (Facebook tự tắt sau ~20 s hoặc khi Page gửi tin), 'typing_off' = tắt ngay,
+ * 'mark_seen' = đánh dấu đã xem.
+ */
+export const SENDER_ACTIONS = ['typing_on', 'typing_off', 'mark_seen'] as const;
+export type SenderAction = (typeof SENDER_ACTIONS)[number];
+
 export interface SendResult {
   externalMessageId: string;
 }
@@ -126,4 +134,17 @@ export interface ChannelConnector {
     account: ResolvedChannelAccount,
     externalUserId: string,
   ): Promise<{ name?: string; avatarUrl?: string; phone?: string }>;
+  /**
+   * Gửi hành động người gửi (chỉ báo "đang soạn tin"). Tùy chọn: kênh không hỗ trợ (Zalo OA) bỏ trống ⇒ caller bỏ
+   * qua. Messenger: POST `<config.graphBaseUrl>/<account.externalId>/messages` (token = pageTokenOf(account), như
+   * send) với body `{ recipient: { id: to.externalUserId }, sender_action: action }` — KHÔNG kèm `message`,
+   * `messaging_type` hay `tag`. Lỗi ném PermanentSendError / TransientSendError giống send; caller (runtime AI)
+   * PHẢI nuốt mọi lỗi (chỉ log debug) vì đây là việc phụ, không được làm chậm hay hỏng lượt trả lời.
+   * Timeout nên ngắn (≤ 3 s) — không thử lại.
+   */
+  sendSenderAction?(
+    account: ResolvedChannelAccount,
+    to: ChannelRecipient,
+    action: SenderAction,
+  ): Promise<void>;
 }

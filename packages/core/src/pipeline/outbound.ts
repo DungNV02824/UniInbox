@@ -2,6 +2,8 @@
 import { channelAccounts, contactIdentities, conversations, messages, type Db } from '@dezon/db';
 import type { MessageAttachment } from '@dezon/shared';
 import { and, eq, gt, inArray, lt, ne, or, sql } from 'drizzle-orm';
+import { hasNextBotBubble } from '../ai/delivery';
+import { createSenderActionQueue } from '../ai/typing';
 import { loadResolvedAccount } from '../channels/service';
 import {
   PermanentSendError,
@@ -26,6 +28,25 @@ type ConvRef = { assignedUserId: string | null };
 export const OUTBOUND_ORDER_WINDOW_MS = 5 * 60_000;
 /** Chờ bao lâu rồi thử lại khi tin trước chưa gửi xong. */
 export const OUTBOUND_WAIT_RETRY_MS = 1_000;
+
+/**
+ * Trần chờ typing_on giữa các bong bóng bot trước khi đánh dấu sent (sender_action đã có timeout
+ * SENDER_ACTION_TIMEOUT_MS = 3 s; trần này chỉ phòng connector treo).
+ */
+export const OUTBOUND_TYPING_WAIT_MS = 3_500;
+
+async function withTimeout(work: Promise<void>, ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const cap = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
+  try {
+    await Promise.race([work, cap]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 export const MSG_BATCH_ABORTED = 'Không gửi vì phần trước của tin nhắn gửi thất bại';
 
@@ -315,6 +336,28 @@ export async function processOutboundMessage(db: Db, deps: PipelineDeps, message
         .where(eq(channelAccounts.id, account.id));
     }
     return fail(db, deps, messageId, conv, error.message);
+  }
+
+  // Bong bóng bot còn phần sau (giãn BOT_BUBBLE_GAP_*): tin vừa gửi đã tắt dấu ba chấm ⇒ bật lại để khách thấy
+  // "đang soạn tin" trong khoảng chờ tới bong bóng kế tiếp. CHỜ typing_on xong (có trần) rồi mới markSent:
+  // markSent mở khóa thứ tự cho bong bóng kế tiếp, nên typing_on luôn tới Facebook TRƯỚC tin sau (không thì dấu
+  // ba chấm có thể hiện sau bong bóng cuối tới ~20 s). Lỗi chỉ log debug (hàng đợi tự nuốt lỗi).
+  if (message.senderType === 'bot' && hasNextBotBubble(message.raw)) {
+    const typing = createSenderActionQueue(
+      db,
+      deps,
+      {
+        conversationId: conv.id,
+        channelType: account.type,
+        channelAccountId: account.id,
+        externalUserId: row.externalUserId,
+      },
+      resolved,
+    );
+    if (typing) {
+      typing.push('typing_on');
+      await withTimeout(typing.idle(), OUTBOUND_TYPING_WAIT_MS);
+    }
   }
 
   await markSent(db, deps, messageId, conv, progress.externalMessageId);

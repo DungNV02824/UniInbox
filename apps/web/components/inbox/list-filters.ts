@@ -121,14 +121,39 @@ export function applyQuickTab(filters: ConversationFilters, tab: QuickTab): Conv
 }
 
 /** Số bộ lọc đang bật trong popover (không tính phần tab "Của tôi" đã hiển thị). */
-export function countPopoverFilters(filters: Pick<ConversationFilters, 'status' | 'assignee' | 'unread'>) {
+export function countPopoverFilters(
+  filters: Pick<ConversationFilters, 'status' | 'assignee' | 'unread' | 'aiState'>,
+) {
   let n = 0;
   if (filters.status) n += 1;
   if (filters.assignee && activeQuickTab(filters) !== 'mine') n += 1;
+  if (filters.aiState) n += 1;
   return n;
 }
 
-/** "Xóa bộ lọc" trong popover: bỏ trạng thái + người phụ trách, giữ kênh và "Chưa đọc". */
+/** "Xóa bộ lọc" trong popover: bỏ trạng thái + người phụ trách + lọc AI, giữ kênh và "Chưa đọc". */
 export function clearPopoverFilters(filters: ConversationFilters): ConversationFilters {
-  return { ...filters, status: undefined, assignee: undefined };
+  return { ...filters, status: undefined, assignee: undefined, aiState: undefined };
+}
+
+// ---------- Lọc "Cần người" / "AI đang lo" ----------
+
+export type AiQuickFilter = 'all' | 'needs_human' | 'ai_handled';
+
+/** Mục đang chọn trong nhóm "Chatbot AI" của popover. */
+export function activeAiFilter(filters: Pick<ConversationFilters, 'status' | 'aiState'>): AiQuickFilter {
+  if (filters.status === 'pending_human') return 'needs_human';
+  if (filters.aiState === 'handled') return 'ai_handled';
+  return 'all';
+}
+
+/**
+ * Chọn "Cần người" (= trạng thái pending_human) hoặc "AI đang lo" (= có bot, ai_mode auto). Hai lựa chọn
+ * loại trừ nhau (hội thoại chờ người đã tắt AI); bỏ chọn thì chỉ gỡ phần do nhóm này đặt.
+ */
+export function applyAiFilter(filters: ConversationFilters, choice: AiQuickFilter): ConversationFilters {
+  const status = filters.status === 'pending_human' ? undefined : filters.status;
+  if (choice === 'needs_human') return { ...filters, status: 'pending_human', aiState: undefined };
+  if (choice === 'ai_handled') return { ...filters, status, aiState: 'handled' };
+  return { ...filters, status, aiState: undefined };
 }

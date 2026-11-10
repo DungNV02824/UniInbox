@@ -3,7 +3,13 @@ import { Global, Inject, Injectable, Logger, Module, type OnApplicationShutdown 
 import { type DefaultJobOptions, Queue } from 'bullmq';
 import { Redis } from 'ioredis';
 import { APP_CONFIG, type AppConfig } from '../../config';
-import { CHANNEL_SYNC_QUEUE, INBOUND_QUEUE, OUTBOUND_QUEUE, QUEUE_CONNECTION } from './queue.constants';
+import {
+  AI_REPLY_QUEUE,
+  CHANNEL_SYNC_QUEUE,
+  INBOUND_QUEUE,
+  OUTBOUND_QUEUE,
+  QUEUE_CONNECTION,
+} from './queue.constants';
 
 /** Mặc định cho job do API đẩy (giống worker). */
 const DEFAULT_JOB_OPTIONS: DefaultJobOptions = {
@@ -28,13 +34,14 @@ class QueueLifecycle implements OnApplicationShutdown {
     @Inject(INBOUND_QUEUE) private readonly inbound: Queue,
     @Inject(OUTBOUND_QUEUE) private readonly outbound: Queue,
     @Inject(CHANNEL_SYNC_QUEUE) private readonly channelSync: Queue,
+    @Inject(AI_REPLY_QUEUE) private readonly aiReply: Queue,
     @Inject(QUEUE_CONNECTION) private readonly connection: Redis,
   ) {}
 
   async onApplicationShutdown(): Promise<void> {
     // BullMQ còn đang khởi tạo (đọc version Redis) mà đóng kết nối ngay thì sinh lỗi không ai bắt:
     // chờ khởi tạo xong, tối đa SHUTDOWN_READY_WAIT_MS (Redis chết thì không chờ mãi).
-    const queues = [this.inbound, this.outbound, this.channelSync];
+    const queues = [this.inbound, this.outbound, this.channelSync, this.aiReply];
     const ready = Promise.allSettled(queues.map((q) => q.waitUntilReady()));
     await Promise.race([ready, new Promise((r) => setTimeout(r, SHUTDOWN_READY_WAIT_MS).unref())]);
     await Promise.allSettled(queues.map((q) => q.close()));
@@ -83,8 +90,13 @@ class QueueLifecycle implements OnApplicationShutdown {
       inject: [QUEUE_CONNECTION],
       useFactory: (connection: Redis) => createQueue(QUEUE_NAMES.channelSync, connection),
     },
+    {
+      provide: AI_REPLY_QUEUE,
+      inject: [QUEUE_CONNECTION],
+      useFactory: (connection: Redis) => createQueue(QUEUE_NAMES.aiReply, connection),
+    },
     QueueLifecycle,
   ],
-  exports: [INBOUND_QUEUE, OUTBOUND_QUEUE, CHANNEL_SYNC_QUEUE],
+  exports: [INBOUND_QUEUE, OUTBOUND_QUEUE, CHANNEL_SYNC_QUEUE, AI_REPLY_QUEUE],
 })
 export class QueueModule {}

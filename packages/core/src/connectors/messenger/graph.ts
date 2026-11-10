@@ -33,6 +33,8 @@ export interface GraphRequest {
   query?: Record<string, string>;
   /** JSON (object) hoặc FormData (multipart). */
   body?: Record<string, unknown> | FormData;
+  /** Ghi đè GRAPH_TIMEOUT_MS (vd. sender_action chỉ chờ ngắn). */
+  timeoutMs?: number;
 }
 
 function toNumber(value: unknown): number | undefined {
@@ -85,7 +87,7 @@ export async function graphRequest(config: MessengerConfig, req: GraphRequest): 
       method: req.method,
       headers,
       body,
-      signal: AbortSignal.timeout(GRAPH_TIMEOUT_MS),
+      signal: AbortSignal.timeout(req.timeoutMs ?? GRAPH_TIMEOUT_MS),
     });
     text = await res.text();
   } catch (err) {

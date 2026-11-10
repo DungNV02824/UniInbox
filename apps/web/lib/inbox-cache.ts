@@ -10,6 +10,7 @@ import type {
   SendMessageRequest,
   UserRole,
 } from '@dezon/shared';
+import { matchesAiState } from '@/lib/inbox-ai';
 import type { ConversationFilters } from '@/lib/inbox-api';
 
 /** Tin trong cache khung chat; `pending` chỉ có ở tin lạc quan (để gửi lại khi lỗi). */
@@ -44,6 +45,7 @@ export function matchesFilters(conv: ConversationSummary, f: ConversationFilters
     if ((conv.assignedUser?.id ?? null) !== want) return false;
   }
   if (f.unread && conv.unreadCount <= 0) return false;
+  if (!matchesAiState(conv, f.aiState)) return false;
   return true;
 }
 
@@ -345,6 +347,38 @@ export function mergeSummaryIntoDetail(
       ...detail.contactDetail,
       displayName: conv.contact.displayName,
       avatarUrl: conv.contact.avatarUrl,
+      // Máy chủ cũ chưa gửi `tags` trong tóm tắt ⇒ giữ nhãn đang có.
+      ...(Array.isArray(conv.contact.tags) && { tags: conv.contact.tags }),
     },
   };
+}
+
+/** Đặt lại nhãn của khách `contactId` trên một bản tóm tắt (khác khách thì trả nguyên). */
+export function withContactTags<T extends ConversationSummary>(c: T, contactId: string, tags: string[]): T {
+  if (c.contact.id !== contactId) return c;
+  return { ...c, contact: { ...c.contact, tags } };
+}
+
+/** Đặt lại nhãn của khách trong mọi hội thoại của khách đó trong một danh sách đã tải. */
+export function patchContactTagsInList(
+  data: ConversationsData | undefined,
+  contactId: string,
+  tags: string[],
+): ConversationsData | undefined {
+  return patchConversationsInList(
+    data,
+    (c) => c.contact.id === contactId,
+    (c) => withContactTags(c, contactId, tags),
+  );
+}
+
+/** Như trên cho chi tiết hội thoại (cả `contact` lẫn `contactDetail`). */
+export function patchContactTagsInDetail(
+  detail: ConversationDetail | undefined,
+  contactId: string,
+  tags: string[],
+): ConversationDetail | undefined {
+  if (!detail || detail.contact.id !== contactId) return detail;
+  const next = withContactTags(detail, contactId, tags);
+  return { ...next, contactDetail: { ...next.contactDetail, tags } };
 }

@@ -1,7 +1,7 @@
 'use client';
 
-import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
-import { Check, Loader2, Pencil, Plus, X } from 'lucide-react';
+import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { Check, Loader2, Pencil } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
@@ -9,8 +9,6 @@ import { useUpdateContact } from '@/lib/inbox-queries';
 
 const NAME_MAX = 200;
 const NOTES_MAX = 5000;
-const TAG_MAX = 50;
-const TAGS_MAX = 30;
 
 interface EditorProps {
   conversationId: string;
@@ -154,74 +152,4 @@ export function ContactNotesEditor({
   );
 }
 
-/** Tag của khách: thêm bằng Enter, xóa bằng nút x trên chip. */
-export function ContactTagsEditor({ conversationId, contactId, tags }: EditorProps & { tags: string[] }) {
-  const update = useUpdateContact(conversationId, contactId);
-  const [input, setInput] = useState('');
-  const [error, setError] = useState<string | null>(null);
-  const shown = update.isPending && update.variables?.tags ? update.variables.tags : tags;
-
-  function add(e?: FormEvent) {
-    e?.preventDefault();
-    const tag = input.trim().replace(/,+$/, '').trim();
-    setError(null);
-    if (!tag) return;
-    if (tag.length > TAG_MAX) return setError(`Tag tối đa ${TAG_MAX} ký tự.`);
-    if (shown.some((t) => t.toLowerCase() === tag.toLowerCase())) return setInput('');
-    if (shown.length >= TAGS_MAX) return setError(`Tối đa ${TAGS_MAX} tag.`);
-    update.mutate({ tags: [...shown, tag] });
-    setInput('');
-  }
-
-  function remove(tag: string) {
-    update.mutate({ tags: shown.filter((t) => t !== tag) });
-  }
-
-  return (
-    <div className="flex flex-col gap-2">
-      {shown.length > 0 && (
-        <ul className="flex flex-wrap gap-x-1.5 gap-y-2" aria-label="Tag của khách">
-          {shown.map((tag) => (
-            <li
-              key={tag}
-              className="inline-flex items-center gap-1 rounded-full bg-secondary py-0.5 pr-1 pl-2.5 text-xs font-medium"
-            >
-              {tag}
-              {/* Vùng bấm ≥32px cho điện thoại (lớp ::before), nút nhìn vẫn nhỏ gọn. */}
-              <button
-                type="button"
-                onClick={() => remove(tag)}
-                disabled={update.isPending}
-                className="relative rounded-full p-0.5 text-muted-foreground before:absolute before:top-1/2 before:left-1/2 before:size-8 before:-translate-x-1/2 before:-translate-y-1/2 before:content-[''] hover:bg-background hover:text-foreground"
-                aria-label={`Xóa tag ${tag}`}
-              >
-                <X className="size-3" aria-hidden />
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-      <form onSubmit={add} className="flex gap-2">
-        <Input
-          value={input}
-          maxLength={TAG_MAX + 1}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === ',') {
-              e.preventDefault();
-              add();
-            }
-          }}
-          placeholder="Thêm tag..."
-          aria-label="Thêm tag"
-          className="h-8"
-        />
-        <Button type="submit" variant="outline" size="sm" disabled={!input.trim() || update.isPending}>
-          <Plus aria-hidden />
-          Thêm
-        </Button>
-      </form>
-      {error && <p className="text-xs text-destructive">{error}</p>}
-    </div>
-  );
-}
+export { ContactTagsEditor } from './contact-tags-editor';

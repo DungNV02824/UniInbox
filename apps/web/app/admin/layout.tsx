@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
+import { AdminNav } from '@/components/admin/admin-nav';
 import { AppHeader } from '@/components/app-header';
 import { RequireAuth } from '@/components/require-auth';
 import { RequireRole } from '@/components/require-role';
@@ -13,7 +14,10 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
       <div className="relative flex h-dvh flex-col overflow-hidden">
         <AppHeader />
         <div className="relative flex min-h-0 flex-1 flex-col overflow-y-auto bg-muted/40">
-          <RequireRole roles={['admin']}>{children}</RequireRole>
+          <RequireRole roles={['admin']}>
+            <AdminNav />
+            {children}
+          </RequireRole>
         </div>
       </div>
     </RequireAuth>

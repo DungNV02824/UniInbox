@@ -2,6 +2,7 @@
 import {
   createMessengerConnector,
   createS3Storage,
+  maybeScheduleChatbotReply,
   type ChannelConnector,
   type MediaStorage,
   type PipelineDeps,
@@ -12,6 +13,12 @@ import type { ChannelType } from '@dezon/shared';
 import { decryptJson, encryptJson, parseEncryptionKey, type Env } from '@dezon/shared/server';
 import { Emitter } from '@socket.io/redis-emitter';
 import type { Redis } from 'ioredis';
+import {
+  createAiRuntime,
+  createCustomerMessageHook,
+  startBotOutboundSweeper,
+  type AiRuntime,
+} from './ai/runtime';
 import { INBOUND_MAX_MEDIA_BYTES } from './config';
 import type { Logger } from './logger';
 import { closeRedis, createRedisConnection } from './redis';
@@ -19,6 +26,8 @@ import { closeRedis, createRedisConnection } from './redis';
 export interface PipelineRuntime {
   db: Db;
   deps: PipelineDeps;
+  /** Chatbot AI: deps cho job ai-reply; enabled = có GEMINI_API_KEY. */
+  ai: AiRuntime;
   close: () => Promise<void>;
 }
 
@@ -94,17 +103,36 @@ export function createPipelineRuntime(env: Env, logger: Logger): PipelineRuntime
         metaHumanAgentEnabled: env.META_HUMAN_AGENT_ENABLED,
         zaloOaAllowPaidBot: env.ZALO_OA_ALLOW_PAID_BOT,
       },
+      aiPauseAfterAgentMin: env.AI_PAUSE_AFTER_AGENT_MIN,
     },
     logger,
     maxMediaBytes: INBOUND_MAX_MEDIA_BYTES,
     ownAppIds: env.META_APP_ID ? { messenger: env.META_APP_ID } : {},
   };
 
+  const ai = createAiRuntime(env, deps, logger.child({ component: 'ai' }));
+  if (ai.enabled) {
+    // Chỉ lên lịch khi có LLM: không có key thì không tạo job ai-reply thừa.
+    deps.onCustomerMessageStored = createCustomerMessageHook(
+      handle.db,
+      ai.deps.redis,
+      ai.deps.scheduler,
+      logger,
+      maybeScheduleChatbotReply,
+      ai.deps,
+    );
+  }
+
+  // Tin bot 'queued' bị bỏ rơi (worker chết giữa commit và enqueue) ⇒ xếp hàng lại định kỳ.
+  const sweeper = startBotOutboundSweeper(handle.db, ai.deps.scheduler, logger.child({ component: 'ai' }));
+
   return {
     db: handle.db,
     deps,
+    ai,
     close: async () => {
-      await Promise.allSettled([handle.close(), closeRedis(redis)]);
+      sweeper.stop();
+      await Promise.allSettled([handle.close(), closeRedis(redis), ai.close()]);
     },
   };
 }

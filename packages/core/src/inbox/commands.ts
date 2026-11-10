@@ -5,6 +5,7 @@ import {
   channelAccounts,
   contacts,
   conversations,
+  handoffs,
   messages,
   users,
   type Db,
@@ -20,7 +21,9 @@ import type {
   UpdateContactRequest,
   UpdateConversationRequest,
 } from '@dezon/shared';
-import { and, asc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { DEFAULT_AI_PAUSE_AFTER_AGENT_MIN, pauseAiAfterAgentMessage } from '../ai/runtime';
+import { normalizeContactTags } from '../contact-tags/service';
 import { firstCustomerMessageAt } from '../pipeline/window-anchor';
 import { canSend } from '../policy';
 import {
@@ -78,6 +81,7 @@ function toStoredAttachment(a: OutboundAttachmentInput): MessageAttachment {
  * sender_user_id = viewer), cập nhật last_message_at. Caller đẩy job outbound cho từng message.
  * Idempotent theo `clientId`: gửi lại cùng clientId trả các tin đã tạo (duplicate = true). An toàn khi
  * hai request chạy đồng thời vì kiểm tra nằm sau khóa FOR UPDATE của dòng hội thoại.
+ * Hội thoại có chatbot ⇒ ai_paused_until = now + ctx.aiPauseAfterAgentMin (mặc định 30) phút.
  */
 export async function sendAgentMessage(
   db: Db,
@@ -164,6 +168,13 @@ export async function sendAgentMessage(
         updatedAt: now,
       })
       .where(eq(conversations.id, conv.id));
+    // Nhân viên vừa nhắn ⇒ tạm dừng chatbot của hội thoại (nếu có).
+    await pauseAiAfterAgentMessage(
+      tx,
+      conv.id,
+      now,
+      ctx.aiPauseAfterAgentMin ?? DEFAULT_AI_PAUSE_AFTER_AGENT_MIN,
+    );
     return { ids: inserted.map((r) => r.id), duplicate: false };
   });
 
@@ -224,7 +235,31 @@ async function assertCanAssign(
 }
 
 /**
- * Đổi trạng thái open/resolved và/hoặc phân công. Agent chỉ được nhận về mình hoặc bỏ nhận
+ * Đóng mọi handoff đang mở của hội thoại (resolved_at = now; chưa ai nhận thì coi `userId` là người nhận).
+ * Trả id các handoff vừa đóng. Gọi trong transaction đã khóa dòng hội thoại.
+ */
+export async function resolveOpenHandoffs(
+  tx: Pick<Db, 'update'>,
+  conversationId: string,
+  userId: string,
+  now: Date,
+): Promise<string[]> {
+  const rows = await tx
+    .update(handoffs)
+    .set({
+      resolvedAt: now,
+      acknowledgedBy: sql`coalesce(${handoffs.acknowledgedBy}, ${userId}::uuid)`,
+      acknowledgedAt: sql`coalesce(${handoffs.acknowledgedAt}, ${now.toISOString()}::timestamptz)`,
+      updatedAt: now,
+    })
+    .where(and(eq(handoffs.conversationId, conversationId), isNull(handoffs.resolvedAt)))
+    .returning({ id: handoffs.id });
+  return rows.map((r) => r.id);
+}
+
+/**
+ * Đổi trạng thái open/resolved và/hoặc phân công. Đổi trạng thái ⇒ đóng handoff đang mở
+ * (resolveOpenHandoffs) và xóa handoff_reason/handoff_at; ai_mode giữ nguyên. Agent chỉ được nhận về mình hoặc bỏ nhận
  * hội thoại của mình; admin phân công cho bất kỳ nhân viên đang hoạt động. Ghi audit_logs.
  */
 export async function updateConversation(
@@ -262,7 +297,19 @@ export async function updateConversation(
     }
     if (input.status !== undefined && input.status !== conv.status) {
       set.status = input.status;
-      audit('conversation.status', { from: conv.status, to: input.status });
+      // Rời pending_human (hoặc đổi trạng thái khi còn handoff mở sót lại) ⇒ đóng handoff để lần chuyển
+      // người sau không bị coi là trùng và banner "Cần người" không treo. ai_mode GIỮ NGUYÊN (thường là
+      // 'off' sau escalate): bot chỉ chạy lại khi nhân viên chủ động bật (ô Chatbot hiện "Bật lại").
+      const resolvedHandoffIds = await resolveOpenHandoffs(tx, conv.id, viewer.id, now);
+      if (conv.status === 'pending_human' || resolvedHandoffIds.length > 0) {
+        set.handoffReason = null;
+        set.handoffAt = null;
+      }
+      audit('conversation.status', {
+        from: conv.status,
+        to: input.status,
+        ...(resolvedHandoffIds.length > 0 ? { resolvedHandoffIds } : {}),
+      });
     }
     if (audits.length > 0) {
       await tx
@@ -284,7 +331,10 @@ export async function updateContact(
   input: UpdateContactRequest,
   ctx: InboxContext,
 ): Promise<ContactDetail> {
-  const [contact] = await db.select({ id: contacts.id }).from(contacts).where(eq(contacts.id, contactId));
+  const [contact] = await db
+    .select({ id: contacts.id, tags: contacts.tags })
+    .from(contacts)
+    .where(eq(contacts.id, contactId));
   if (!contact) throw new InboxNotFoundError('Không tìm thấy khách hàng');
   if (viewer.role !== 'admin') {
     const [visible] = await db
@@ -298,7 +348,8 @@ export async function updateContact(
   const set: Partial<typeof contacts.$inferInsert> = {};
   if (input.displayName !== undefined) set.displayName = input.displayName;
   if (input.notes !== undefined) set.notes = input.notes;
-  if (input.tags !== undefined) set.tags = [...new Set(input.tags)];
+  // Nhãn mới phải có trong danh sách nhãn (đổi về cách viết của danh sách); nhãn cũ ngoài danh sách được giữ.
+  if (input.tags !== undefined) set.tags = await normalizeContactTags(db, contact.tags, input.tags);
   const fields = Object.keys(set);
   if (fields.length > 0) {
     await db.transaction(async (tx) => {

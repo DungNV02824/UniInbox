@@ -7,6 +7,7 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useAuth } from '@/lib/auth';
+import { matchesAiState } from '@/lib/inbox-ai';
 import { normalizeFilters, type ConversationFilters } from '@/lib/inbox-api';
 import { errorText, useChannels, useConversations } from '@/lib/inbox-queries';
 import { useRealtimeStatus } from '@/lib/realtime';
@@ -61,14 +62,20 @@ export function ConversationListPanel({
   const now = useNow(30_000);
   const sentinelRef = useRef<HTMLDivElement>(null);
 
-  const items = useMemo(() => query.data?.pages.flatMap((p) => p.items) ?? [], [query.data]);
+  // "AI đang lo" chưa có bộ lọc phía máy chủ: lọc thêm trên các trang đã tải (xem inbox-api.ts).
+  const clientFiltered = !!filters.aiState;
+  const items = useMemo(
+    () => (query.data?.pages.flatMap((p) => p.items) ?? []).filter((c) => matchesAiState(c, filters.aiState)),
+    [query.data, filters.aiState],
+  );
   const hasFilters = Object.keys(normalizeFilters(filters)).length > 0;
 
   const { hasNextPage, isFetchingNextPage, fetchNextPage } = query;
   // Cuộn tới cuối danh sách thì tải trang kế (cursor).
   useEffect(() => {
     const el = sentinelRef.current;
-    if (!el || !hasNextPage) return;
+    // Đang lọc phía web: không tự tải dồn mọi trang, để nhân viên bấm "Tải thêm".
+    if (!el || !hasNextPage || clientFiltered) return;
     const observer = new IntersectionObserver(
       (entries) => {
         if (entries.some((e) => e.isIntersecting) && !isFetchingNextPage) void fetchNextPage();
@@ -77,7 +84,7 @@ export function ConversationListPanel({
     );
     observer.observe(el);
     return () => observer.disconnect();
-  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
+  }, [hasNextPage, isFetchingNextPage, fetchNextPage, clientFiltered]);
 
   const tab = activeQuickTab(filters);
 
@@ -156,7 +163,7 @@ export function ConversationListPanel({
               </AlertDescription>
             </Alert>
           </div>
-        ) : items.length === 0 ? (
+        ) : items.length === 0 && !(clientFiltered && hasNextPage) ? (
           hasFilters ? (
             <EmptyState
               icon={SearchX}
@@ -184,11 +191,30 @@ export function ConversationListPanel({
                 </li>
               ))}
             </ul>
-            <div ref={sentinelRef} className="flex h-10 shrink-0 items-center justify-center">
-              {isFetchingNextPage && (
-                <Loader2 className="size-4 animate-spin text-muted-foreground" aria-hidden />
-              )}
-            </div>
+            {clientFiltered && hasNextPage ? (
+              <div className="flex shrink-0 flex-col items-center gap-1 px-3 pt-1 pb-3 text-center">
+                {items.length === 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    Chưa thấy hội thoại phù hợp trong phần đã tải.
+                  </p>
+                )}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={isFetchingNextPage}
+                  onClick={() => void fetchNextPage()}
+                >
+                  {isFetchingNextPage && <Loader2 className="animate-spin" aria-hidden />}
+                  Tải thêm hội thoại
+                </Button>
+              </div>
+            ) : (
+              <div ref={sentinelRef} className="flex h-10 shrink-0 items-center justify-center">
+                {isFetchingNextPage && (
+                  <Loader2 className="size-4 animate-spin text-muted-foreground" aria-hidden />
+                )}
+              </div>
+            )}
           </>
         )}
       </div>

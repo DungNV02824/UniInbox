@@ -123,6 +123,11 @@ export const envSchema = z
     SEED_AGENT_PASSWORD: optional(z.string()),
 
     // ===== AI (Giai đoạn 2+) =====
+    /** Nhà cung cấp LLM cho chatbot. Chủ sản phẩm chọn Gemini (xem DECISIONS.md). */
+    AI_PROVIDER: withDefault(z.enum(['gemini', 'anthropic']), 'gemini'),
+    GEMINI_API_KEY: optional(z.string()),
+    /** Model mặc định của chatbot (mỗi bot chọn được model riêng). */
+    GEMINI_MODEL: withDefault(z.string(), 'gemini-3.5-flash'),
     ANTHROPIC_API_KEY: optional(z.string()),
     AI_MODEL_MAIN: withDefault(z.string(), 'claude-sonnet-5-5'),
     AI_MODEL_FAST: withDefault(z.string(), 'claude-haiku-5-5'),

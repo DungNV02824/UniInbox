@@ -1,6 +1,7 @@
 // Hợp đồng API hộp thư (Giai đoạn 1A) — dùng chung giữa api, worker và web.
 // Ngày giờ trong DTO luôn là chuỗi ISO 8601 (UTC).
 import { z } from 'zod';
+import type { ChatbotRef } from './chatbots';
 import {
   ATTACHMENT_TYPES,
   CHANNEL_TYPES,
@@ -9,6 +10,7 @@ import {
   type ChannelAccountStatus,
   type ChannelType,
   type ConversationStatus,
+  type HandoffReasonCode,
   type MessageStatus,
   type SenderType,
   type UserRole,
@@ -47,6 +49,8 @@ export interface ChannelAccountDto {
   zaloOa?: ZaloOaChannelInfo | null;
   /** Số hội thoại / tin nhắn của kênh (GET /channels); null/thiếu = không rõ. */
   stats?: ChannelStats | null;
+  /** Chatbot tự gắn cho hội thoại MỚI của kênh; null = không. */
+  defaultChatbotId?: string | null;
 }
 
 export interface ChannelStats {
@@ -109,8 +113,10 @@ export const updateChannelSchema = z
   .object({
     displayName: z.string().trim().min(1).max(100).optional(),
     color: hexColorSchema.optional(),
+    /** null = bỏ chatbot mặc định của kênh. */
+    defaultChatbotId: z.uuid().nullable().optional(),
   })
-  .refine((v) => v.displayName !== undefined || v.color !== undefined, {
+  .refine((v) => v.displayName !== undefined || v.color !== undefined || v.defaultChatbotId !== undefined, {
     message: 'Không có gì để cập nhật',
   });
 export type UpdateChannelRequest = z.infer<typeof updateChannelSchema>;
@@ -230,6 +236,8 @@ export interface ContactRef {
   displayName: string;
   /** URL ký có thời hạn (ảnh đã lưu trên S3), hoặc null. */
   avatarUrl: string | null;
+  /** Tag của khách, đúng thứ tự đã lưu; [] nếu không có. */
+  tags: string[];
 }
 
 export interface LastMessagePreview {
@@ -256,6 +264,22 @@ export interface ConversationSummary {
   contact: ContactRef;
   channel: ChannelBadge;
   sendWindow: SendWindowInfo;
+  /** Chatbot đang gắn (vẫn giữ khi đã chuyển người thật để "trả lại cho AI"); null = không có. */
+  chatbot?: ChatbotRef | null;
+  /** AI tạm dừng tới thời điểm này (nhân viên vừa nhắn), ISO; null = không tạm dừng. */
+  aiPausedUntil?: string | null;
+  /** Yêu cầu chuyển người thật đang mở (chưa resolve); null = không có. */
+  handoff?: ConversationHandoff | null;
+}
+
+/** Handoff đang mở của hội thoại. */
+export interface ConversationHandoff {
+  reasonCode: HandoffReasonCode;
+  summary: string;
+  /** Thời điểm tạo handoff, ISO. */
+  at: string;
+  /** Nhân viên đã bấm "Nhận xử lý"; null = chưa ai nhận. */
+  acknowledgedBy: UserRef | null;
 }
 
 export interface ContactIdentityDto {
@@ -268,7 +292,6 @@ export interface ContactIdentityDto {
 export interface ContactDetail extends ContactRef {
   phone: string | null;
   email: string | null;
-  tags: string[];
   notes: string | null;
   identities: ContactIdentityDto[];
 }
@@ -296,6 +319,8 @@ export const listConversationsQuerySchema = z.object({
   /** 'me' | 'none' | uuid của nhân viên */
   assignee: z.union([z.literal('me'), z.literal('none'), z.uuid()]).optional(),
   unread: booleanQuery,
+  /** 'handled' = "AI đang lo": hội thoại có chatbot và ai_mode 'auto'. */
+  aiState: z.enum(['handled']).optional(),
   limit: z.coerce.number().int().min(1).max(CONVERSATIONS_PAGE_MAX).default(30),
   cursor: z.string().max(200).optional(),
 });

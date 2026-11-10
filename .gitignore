@@ -10,3 +10,6 @@ coverage
 *.tsbuildinfo
 next-env.d.ts
 .DS_Store
+
+# Playwright MCP snapshots
+.playwright-mcp/

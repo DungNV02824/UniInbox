@@ -29,6 +29,34 @@
       "when": 1793852663238,
       "tag": "0003_message_client_id",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1794193981395,
+      "tag": "0004_chatbots",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1794208040708,
+      "tag": "0005_escalate_when_unsure",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1794212092807,
+      "tag": "0006_response_speed",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1794238364602,
+      "tag": "0007_contact_tags",
+      "breakpoints": true
     }
   ]
 }

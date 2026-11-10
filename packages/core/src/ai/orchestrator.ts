@@ -1,0 +1,438 @@
+// Một lượt chatbot (thuần, không DB): pre-filter ⇒ prompt ⇒ LLM (retry) ⇒ quyết định.
+// Dùng chung cho job ai-reply (runtime.ts) và "Chat thử" (POST /chatbots/:id/test).
+import {
+  HANDOFF_REASON_LABELS,
+  type BusinessHours,
+  type ChatbotTestImage,
+  type LlmUsage,
+} from '@dezon/shared';
+import { claimsHandoffInReply } from './handoff-claim';
+import { LlmError, type LlmClient, type LlmContent, type LlmRequest, type LlmResponse } from './llm';
+import { keywordHandoffReason, matchHandoffKeyword } from './prefilter';
+import { buildChatbotPrompt, llmTimeoutExtraMsForImages } from './prompt';
+import { thinkingForSpeed } from './speed';
+import {
+  boundToolArgsForLog,
+  CHATBOT_MAX_BUBBLE_CHARS,
+  CHATBOT_MAX_BUBBLES,
+  CHATBOT_MAX_HANDOFF_MESSAGES,
+  CHATBOT_MAX_REASON_CHARS,
+  buildChatbotTools,
+  escalateArgsSchema,
+  noReplyArgsSchema,
+  replyArgsSchema,
+  sanitizeAgentSummary,
+  truncateAtWord,
+} from './tools';
+import type { ChatHistoryItem, ChatbotConfig, ChatbotTurnResult, PromptImage } from './types';
+
+/** Timeout mỗi lần gọi LLM. */
+export const LLM_TIMEOUT_MS = 30_000;
+/** Số lần thử lại khi LlmError.retryable. */
+export const LLM_MAX_RETRIES = 2;
+/**
+ * Lượt có ảnh: hết thời gian chờ chỉ thử lại chừng này lần (timeout đã nới theo số ảnh — 3 lần × ~60 s quá lâu cho
+ * khách). Lỗi tạm thời khác vẫn thử lại LLM_MAX_RETRIES lần.
+ */
+export const LLM_MAX_TIMEOUT_RETRIES_WITH_IMAGES = 1;
+/** confidence < ngưỡng này ⇒ escalate low_confidence (env AI_MIN_CONFIDENCE). */
+export const DEFAULT_MIN_CONFIDENCE = 0.6;
+/** Độ tự tin gán cho câu trả lời dạng chữ thường (model không gọi tool) — xem runChatbotTurn. */
+export const TEXT_FALLBACK_CONFIDENCE = 0.7;
+/** Chữ thường dài hơn ngưỡng này không được coi là câu trả lời. */
+export const TEXT_FALLBACK_MAX_CHARS = 600;
+
+export interface ChatbotTurnDeps {
+  llm: LlmClient;
+  now: () => Date;
+  /** GEMINI_MODEL — dùng khi chatbot.model null. */
+  defaultModel: string;
+  /** AI_MIN_CONFIDENCE, mặc định DEFAULT_MIN_CONFIDENCE. */
+  minConfidence?: number;
+  /** Mặc định LLM_TIMEOUT_MS. */
+  timeoutMs?: number;
+  /** Chờ giữa các lần thử lại (test truyền hàm không chờ). Mặc định backoff 500ms × lần thử. */
+  sleep?: (ms: number) => Promise<void>;
+}
+
+export interface ChatbotTurnInput {
+  chatbot: ChatbotConfig;
+  history: ChatHistoryItem[];
+  /** Tin khách mới chưa xử lý (≥ 1 khi chạy thật). */
+  newMessages: ChatHistoryItem[];
+  channelName: string;
+  businessHours: BusinessHours;
+  /**
+   * MỌI ảnh trong `newMessages` theo thứ tự gửi (cũ ⇒ mới), kể cả ảnh không đọc được (`skipped`) — xem
+   * PromptImage. Job ai-reply lấy từ loadPromptImages; "Chat thử" dựng bằng promptImagesFromTest. Prompt tự áp
+   * giới hạn (10 ảnh mới nhất, ≤ 4 MB/ảnh, tổng ≤ 13,5 MB) và đánh nhãn
+   * "Ảnh k/N — thuộc tin lúc HH:MM:SS (tin thứ m trong lượt này):".
+   */
+  images?: PromptImage[];
+}
+
+/**
+ * Ảnh "Chat thử" (ChatbotTestRequest.messages[].images, đã qua Zod) ⇒ PromptImage. API gọi cho từng tin khách MỚI
+ * theo thứ tự rồi nối lại; `sentAt` (tùy chọn) = giờ của tin để nhãn ghi "thuộc tin lúc HH:MM:SS";
+ * `messageIndex` (tùy chọn, 1-based trong các tin mới) để nhãn ghi "(tin thứ m trong lượt này)". Tin chứa ảnh nên
+ * có `attachmentCount` = số ảnh để dòng hội thoại ghi "[gửi N ảnh/tệp]".
+ */
+export function promptImagesFromTest(
+  images: readonly Pick<ChatbotTestImage, 'mimeType' | 'data'>[] | undefined,
+  sentAt?: Date,
+  messageIndex?: number,
+): PromptImage[] {
+  return (images ?? []).map((img) => ({
+    mime: img.mimeType,
+    data: img.data,
+    ...(sentAt ? { sentAt } : {}),
+    ...(messageIndex !== undefined ? { messageIndex } : {}),
+  }));
+}
+
+const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+type Decided = Omit<ChatbotTurnResult, 'usage' | 'model' | 'latencyMs' | 'toolCalls'>;
+
+function errorDecision(reason: string): Decided {
+  return { decision: 'error', reasonCode: 'other', reason: truncateAtWord(reason, CHATBOT_MAX_REASON_CHARS) };
+}
+
+/** trim, bỏ bong bóng rỗng, tối đa `max` (CHATBOT_MAX_BUBBLES), mỗi bong bóng ≤ CHATBOT_MAX_BUBBLE_CHARS. */
+function cleanBubbles(messages: readonly string[], max: number = CHATBOT_MAX_BUBBLES): string[] {
+  return messages
+    .map((m) => m.trim())
+    .filter((m) => m.length > 0)
+    .slice(0, max)
+    .map((m) => truncateAtWord(m, CHATBOT_MAX_BUBBLE_CHARS));
+}
+
+/**
+ * Ngưỡng độ tự tin áp cho lượt này: null = không escalate vì độ tự tin thấp (bot đặt
+ * escalateWhenUnsure = false ⇒ vẫn gửi câu trả lời).
+ */
+type MinConfidence = number | null;
+
+function replyDecision(messages: string[], confidence: number, minConfidence: MinConfidence): Decided {
+  if (messages.length === 0) return errorDecision('AI trả lời rỗng');
+  if (minConfidence !== null && confidence < minConfidence) {
+    return {
+      decision: 'escalate',
+      reasonCode: 'low_confidence',
+      summary: `AI không chắc câu trả lời (độ tự tin ${confidence.toFixed(2)})`,
+      // KHÔNG mang `messages`: với escalate, `messages` là tin GỬI khách (câu trả lời không chắc thì không gửi;
+      // nội dung vẫn có trong toolCalls để xem log).
+      confidence,
+    };
+  }
+  return { decision: 'reply', messages, confidence };
+}
+
+/**
+ * Model trả chữ thường thay vì gọi tool (hiếm khi mode ANY): coi là reply với độ tin
+ * TEXT_FALLBACK_CONFIDENCE nếu chữ ngắn (≤ TEXT_FALLBACK_MAX_CHARS) và không giống mã/JSON/markdown;
+ * tách đoạn theo dòng trống/xuống dòng thành ≤ 3 bong bóng. Ngược lại ⇒ error.
+ */
+function textFallback(text: string | null, minConfidence: MinConfidence): Decided {
+  const t = text?.trim() ?? '';
+  if (!t) return errorDecision('AI không gọi công cụ nào và không có nội dung');
+  if (t.length > TEXT_FALLBACK_MAX_CHARS || /[{}`#*]|<\/?\w/.test(t)) {
+    return errorDecision('AI không gọi công cụ và trả về chữ không dùng được');
+  }
+  const paragraphs = t.split(/\n+/);
+  const bubbles = cleanBubbles(
+    paragraphs.length > CHATBOT_MAX_BUBBLES
+      ? [...paragraphs.slice(0, CHATBOT_MAX_BUBBLES - 1), paragraphs.slice(CHATBOT_MAX_BUBBLES - 1).join(' ')]
+      : paragraphs,
+  );
+  return replyDecision(bubbles, TEXT_FALLBACK_CONFIDENCE, minConfidence);
+}
+
+function decide(res: LlmResponse, minConfidence: MinConfidence): Decided {
+  const call = res.functionCall;
+  if (!call) return textFallback(res.text, minConfidence);
+  switch (call.name) {
+    case 'reply': {
+      const parsed = replyArgsSchema.safeParse(call.args);
+      if (!parsed.success) return errorDecision('AI gọi reply với tham số không hợp lệ');
+      return replyDecision(cleanBubbles(parsed.data.messages), parsed.data.confidence, minConfidence);
+    }
+    case 'escalate': {
+      const parsed = escalateArgsSchema.safeParse(call.args);
+      if (!parsed.success) return errorDecision('AI gọi escalate với tham số không hợp lệ');
+      const summary =
+        sanitizeAgentSummary(parsed.data.summary_for_agent) || HANDOFF_REASON_LABELS[parsed.data.reason_code];
+      const messages = cleanBubbles(parsed.data.messages_to_customer ?? [], CHATBOT_MAX_HANDOFF_MESSAGES);
+      return {
+        decision: 'escalate',
+        reasonCode: parsed.data.reason_code,
+        summary,
+        ...(messages.length > 0 ? { messages } : {}),
+      };
+    }
+    case 'no_reply': {
+      const parsed = noReplyArgsSchema.safeParse(call.args);
+      if (!parsed.success) return errorDecision('AI gọi no_reply với tham số không hợp lệ');
+      return {
+        decision: 'no_reply',
+        reason: truncateAtWord(parsed.data.reason.trim(), CHATBOT_MAX_REASON_CHARS),
+      };
+    }
+    default:
+      return errorDecision(`AI gọi công cụ không tồn tại: ${call.name.slice(0, 50)}`);
+  }
+}
+
+export { claimsHandoffInReply } from './handoff-claim';
+
+/**
+ * Tên mục ghi vào ai_runs.tool_calls khi chặn reply tự nói "đã chuyển nhân viên": args.action 'retry' (gọi lại model
+ * một lần kèm ghi chú) hoặc 'convert' (vẫn nói vậy ⇒ hệ thống đổi thành escalate 'other'). Runtime đọc để biết
+ * reason_code khi escalate bù.
+ */
+export const HANDOFF_CLAIM_GUARD = 'handoff_claim_guard';
+
+/** Ghi chú thêm vào cuối prompt cho lần gọi lại (sau khi reply tự nói đã chuyển mà không gọi escalate). */
+export const HANDOFF_CLAIM_CORRECTION =
+  'Lượt trước bạn nói đã chuyển cho nhân viên nhưng không gọi escalate. Nếu cần chuyển thì gọi escalate và đặt lời nhắn vào messages_to_customer; nếu không thì trả lời lại, không nói đã chuyển.';
+
+/** Part chữ của lần gọi lại: ghi chú + các bong bóng model định gửi (để model dùng lại trong messages_to_customer). */
+export function handoffCorrectionText(bubbles: readonly string[]): string {
+  const quoted = bubbles.map((b) => `"${b.replace(/\s+/g, ' ')}"`).join(' / ');
+  return `(Ghi chú của hệ thống, không phải lời người nhắn) ${HANDOFF_CLAIM_CORRECTION} Các bong bóng bạn định gửi ở lượt trước: ${quoted}`;
+}
+
+/** Thêm part chữ vào content user cuối (không đổi tiền tố prompt ⇒ vẫn dùng được cache ngầm). */
+function withCorrection(contents: readonly LlmContent[], text: string): LlmContent[] {
+  const out = contents.map((c) => ({ ...c, parts: [...c.parts] }));
+  const last = out[out.length - 1];
+  if (last && last.role === 'user') last.parts.push({ text });
+  else out.push({ role: 'user', parts: [{ text }] });
+  return out;
+}
+
+/** Tóm tắt tự động cho nhân viên khi hệ thống tự chuyển (bot nói đã chuyển mà không gọi escalate). */
+function autoHandoffSummary(bubbles: readonly string[]): string {
+  return sanitizeAgentSummary(
+    `Bot báo người nhắn đã chuyển cho nhân viên nhưng không gọi escalate — hệ thống tự chuyển. Bot đã nhắn: ${bubbles.join(' / ')}`,
+  );
+}
+
+/** reply tự nói đã chuyển ⇒ escalate 'other', gửi chính các bong bóng đó (giờ đã đúng sự thật) thay handoffMessage. */
+function convertClaimToEscalate(bubbles: string[], confidence: number | undefined): Decided {
+  return {
+    decision: 'escalate',
+    reasonCode: 'other',
+    summary: autoHandoffSummary(bubbles),
+    messages: bubbles,
+    ...(confidence !== undefined ? { confidence } : {}),
+  };
+}
+
+const isClaimingReply = (d: Decided): boolean =>
+  d.decision === 'reply' && claimsHandoffInReply(d.messages ?? []);
+
+/** Mục toolCalls cho một phản hồi của model (giới hạn kích thước; `llm` = meta cache/thinking nếu client có). */
+function toolCallEntries(response: LlmResponse): unknown[] {
+  const llmMeta = response.meta ? { llm: { ...response.meta } } : {};
+  if (response.functionCall) {
+    return [
+      {
+        name: response.functionCall.name.slice(0, 100),
+        args: boundToolArgsForLog(response.functionCall.args),
+        ...llmMeta,
+      },
+    ];
+  }
+  if (response.text)
+    return [{ name: 'text_fallback', args: boundToolArgsForLog({ text: response.text }), ...llmMeta }];
+  return [];
+}
+
+/**
+ * Hành vi:
+ * 1. Pre-filter: text của bất kỳ tin `newMessages` role 'customer' khớp
+ *    matchHandoffKeyword(text, chatbot.handoffKeywords) ⇒ { decision 'escalate', reasonCode =
+ *    keywordHandoffReason(kw) (giảm giá ⇒ discount, khiếu nại ⇒ complaint, chốt đơn ⇒ closing, còn lại
+ *    human_request), summary 'Khách nhắn từ khóa chuyển người "<kw>" (<nhãn lý do>)', matchedKeyword, usage 0/0,
+ *    latencyMs 0, model = chatbot.model ?? defaultModel, toolCalls [{ name: 'prefilter', args: { keyword,
+ *    reason_code } }] } — KHÔNG gọi LLM.
+ * 2. buildChatbotPrompt({ ..., now: deps.now() }) rồi llm.generate({ model: chatbot.model ?? defaultModel,
+ *    tools: buildChatbotTools(chatbot) (escalateWhenUnsure=false ⇒ escalate không có out_of_scope /
+ *    low_confidence), temperature: chatbot.temperature, timeoutMs (+ llmTimeoutExtraMsForImages(images)), thinking:
+ *    thinkingForSpeed(chatbot.responseSpeed) (thiếu ⇒ 'fast' ⇒ 'minimal') }). LlmError.retryable ⇒ thử lại
+ *    tối đa LLM_MAX_RETRIES lần (chờ deps.sleep(500 × lần thử)); lượt có ảnh hết thời gian chờ chỉ thử lại
+ *    LLM_MAX_TIMEOUT_RETRIES_WITH_IMAGES lần; usage cộng dồn qua các lần.
+ * 3. Kết quả (args parse bằng Zod trong tools.ts):
+ *    - reply: trim, bỏ bong bóng rỗng, tối đa 3 (thừa thì cắt), mỗi bong bóng ≤ 1000 ký tự (cắt ở ranh giới từ). confidence < minConfidence ⇒ decision 'escalate',
+ *      reasonCode 'low_confidence', summary 'AI không chắc câu trả lời (độ tự tin X)', KHÔNG có messages (không gửi
+ *      câu trả lời không chắc; nội dung vẫn ở toolCalls)
+ *      — CHỈ khi chatbot.escalateWhenUnsure; false ⇒ luôn 'reply' (vẫn ghi confidence).
+ *      Không còn bong bóng nào ⇒ 'error'.
+ *    - escalate ⇒ decision 'escalate', reasonCode, summary = summary_for_agent bỏ link, ≤ 500 ký tự (rỗng ⇒
+ *      nhãn lý do); messages = messages_to_customer (trim, bỏ rỗng, ≤ 3 tin, mỗi tin ≤ 1000 ký tự; rỗng ⇒ bỏ) —
+ *      runtime gửi các tin này THAY cho bot.handoffMessage.
+ *    - reply mà bong bóng tự khẳng định đã/sẽ chuyển cho nhân viên/bộ phận (claimsHandoffInReply) ⇒ gọi lại model
+ *      MỘT lần, cùng prompt + part chữ handoffCorrectionText(bong bóng) ở content cuối; toolCalls thêm
+ *      { name: HANDOFF_CLAIM_GUARD, args: { action: 'retry' } } rồi mục của lần gọi lại. Lần gọi lại: escalate ⇒
+ *      dùng; reply không còn tự nói đã chuyển (hoặc no_reply) ⇒ dùng; còn lại (vẫn tự nói đã chuyển, lỗi gọi AI,
+ *      args sai) ⇒ decision 'escalate', reasonCode 'other', messages = bong bóng tự nói đã chuyển gần nhất,
+ *      summary tự động; toolCalls thêm { name: HANDOFF_CLAIM_GUARD, args: { action: 'convert', reason_code: 'other',
+ *      messages } }.
+ *    - no_reply ⇒ decision 'no_reply', reason.
+ *    - Không có functionCall nhưng có chữ ngắn (≤ 600 ký tự, không giống mã/markdown) ⇒ coi như reply với
+ *      confidence TEXT_FALLBACK_CONFIDENCE (0.7), toolCalls ghi { name: 'text_fallback', args: { text } }.
+ *    - Không có gì dùng được / tên lạ / args sai ⇒ decision 'error', reasonCode 'other', reason tiếng Việt.
+ *    - Lỗi LLM sau khi hết lượt thử (hoặc lỗi không retryable) ⇒ decision 'error', reasonCode 'other',
+ *      reason 'Lỗi gọi AI: <message>'.
+ * 4. latencyMs = deps.now() cuối − đầu; toolCalls = [{ name, args }] model trả về; model = response.model.
+ * KHÔNG bao giờ ném lỗi (mọi lỗi ⇒ decision 'error').
+ */
+export async function runChatbotTurn(
+  deps: ChatbotTurnDeps,
+  input: ChatbotTurnInput,
+): Promise<ChatbotTurnResult> {
+  const { chatbot } = input;
+  const model = chatbot.model?.trim() || deps.defaultModel;
+  const usage: LlmUsage = { inputTokens: 0, outputTokens: 0 };
+  let startedAt = 0;
+  const elapsed = () => {
+    try {
+      return Math.max(0, deps.now().getTime() - startedAt);
+    } catch {
+      return 0;
+    }
+  };
+
+  try {
+    // 1. Pre-filter từ khóa chuyển người.
+    for (const msg of input.newMessages) {
+      if (msg.role !== 'customer' || !msg.text) continue;
+      const keyword = matchHandoffKeyword(msg.text, chatbot.handoffKeywords);
+      if (keyword) {
+        const reasonCode = keywordHandoffReason(keyword);
+        return {
+          decision: 'escalate',
+          reasonCode,
+          summary: `Khách nhắn từ khóa chuyển người "${keyword}" (${HANDOFF_REASON_LABELS[reasonCode]})`,
+          matchedKeyword: keyword,
+          usage,
+          model,
+          latencyMs: 0,
+          toolCalls: [{ name: 'prefilter', args: { keyword, reason_code: reasonCode } }],
+        };
+      }
+    }
+
+    // 2. Gọi LLM có retry.
+    const now = deps.now();
+    startedAt = now.getTime();
+    const prompt = buildChatbotPrompt({
+      chatbot,
+      history: input.history,
+      newMessages: input.newMessages,
+      channelName: input.channelName,
+      businessHours: input.businessHours,
+      now,
+      images: input.images,
+    });
+    const sleep = deps.sleep ?? defaultSleep;
+    const request: LlmRequest = {
+      model,
+      systemInstruction: prompt.systemInstruction,
+      contents: prompt.contents,
+      tools: buildChatbotTools(chatbot),
+      temperature: chatbot.temperature,
+      // Ảnh làm Gemini chậm hơn: +3 s mỗi ảnh thật sự đính kèm (tối đa +30 s).
+      timeoutMs: (deps.timeoutMs ?? LLM_TIMEOUT_MS) + llmTimeoutExtraMsForImages(input.images),
+      thinking: thinkingForSpeed(chatbot.responseSpeed),
+    };
+    const hasImages = (input.images ?? []).some((img) => !img.skipped);
+    /** Gọi LLM có retry; cộng dồn usage. Lỗi sau khi hết lượt ⇒ { error }. */
+    const call = async (req: LlmRequest): Promise<{ response: LlmResponse } | { error: unknown }> => {
+      let lastError: unknown = null;
+      let timeouts = 0;
+      for (let attempt = 0; attempt <= LLM_MAX_RETRIES; attempt++) {
+        if (attempt > 0) await sleep(500 * attempt);
+        try {
+          const response = await deps.llm.generate(req);
+          usage.inputTokens += response.usage.inputTokens;
+          usage.outputTokens += response.usage.outputTokens;
+          return { response };
+        } catch (err) {
+          lastError = err;
+          if (!(err instanceof LlmError) || !err.retryable) break;
+          if (err.timedOut && hasImages && ++timeouts > LLM_MAX_TIMEOUT_RETRIES_WITH_IMAGES) break;
+        }
+      }
+      return { error: lastError };
+    };
+    const errorMessage = (err: unknown) => (err instanceof Error ? err.message : 'không rõ nguyên nhân');
+
+    const first = await call(request);
+    if (!('response' in first)) {
+      return {
+        ...errorDecision(`Lỗi gọi AI: ${errorMessage(first.error)}`),
+        usage,
+        model,
+        latencyMs: elapsed(),
+        toolCalls: [],
+      };
+    }
+    const response = first.response;
+    // Ghi log có giới hạn kích thước (model có thể trả args rất dài). `llm` (khi client có meta) = token lấy từ
+    // cache ngầm của Gemini, token suy nghĩ, hedge — để kiểm tra độ trễ trong ai_runs.tool_calls.
+    const toolCalls: unknown[] = toolCallEntries(response);
+
+    // 3. Quyết định.
+    const minConfidence = chatbot.escalateWhenUnsure ? (deps.minConfidence ?? DEFAULT_MIN_CONFIDENCE) : null;
+    let decided = decide(response, minConfidence);
+    let finalModel = response.model || model;
+
+    // 3b. reply tự nói đã chuyển cho người thật mà không gọi escalate ⇒ gọi lại một lần; vẫn vậy ⇒ tự chuyển.
+    if (isClaimingReply(decided)) {
+      toolCalls.push({ name: HANDOFF_CLAIM_GUARD, args: { action: 'retry' } });
+      let claim = decided;
+      const second = await call({
+        ...request,
+        contents: withCorrection(request.contents, handoffCorrectionText(decided.messages ?? [])),
+      });
+      let retried: Decided | null = null;
+      if ('response' in second) {
+        toolCalls.push(...toolCallEntries(second.response));
+        finalModel = second.response.model || finalModel;
+        retried = decide(second.response, minConfidence);
+      } else {
+        toolCalls.push({
+          name: HANDOFF_CLAIM_GUARD,
+          args: { action: 'retry_failed', error: truncateAtWord(errorMessage(second.error), 300) },
+        });
+      }
+      if (retried && isClaimingReply(retried)) claim = retried;
+      const acceptable =
+        retried !== null &&
+        !isClaimingReply(retried) &&
+        (retried.decision === 'escalate' || retried.decision === 'reply' || retried.decision === 'no_reply');
+      if (acceptable) {
+        decided = retried!;
+      } else {
+        decided = convertClaimToEscalate(claim.messages ?? [], claim.confidence);
+        toolCalls.push({
+          name: HANDOFF_CLAIM_GUARD,
+          args: boundToolArgsForLog({ action: 'convert', reason_code: 'other', messages: decided.messages }),
+        });
+      }
+    }
+    return {
+      ...decided,
+      usage,
+      model: finalModel,
+      latencyMs: elapsed(),
+      toolCalls,
+    };
+  } catch (err) {
+    // Phòng hờ (prompt/now lỗi bất ngờ): không bao giờ ném ra ngoài.
+    const message = err instanceof Error ? err.message : String(err);
+    return { ...errorDecision(`Lỗi chatbot: ${message}`), usage, model, latencyMs: elapsed(), toolCalls: [] };
+  }
+}

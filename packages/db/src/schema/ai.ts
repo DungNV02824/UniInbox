@@ -1,6 +1,7 @@
 import { sql } from 'drizzle-orm';
 import { index, integer, jsonb, pgTable, text, uuid } from 'drizzle-orm/pg-core';
 import { id, timestamps } from './_common';
+import { chatbots } from './chatbots';
 import { conversations } from './conversations';
 import { aiRunDecisionEnum, aiSuggestionStatusEnum } from './enums';
 
@@ -17,6 +18,8 @@ export const aiRuns = pgTable(
       .array()
       .notNull()
       .default(sql`'{}'::uuid[]`),
+    /** Bot đã chạy lượt này (null = bot đã bị xóa / lượt không thuộc bot nào). */
+    chatbotId: uuid('chatbot_id').references(() => chatbots.id, { onDelete: 'set null' }),
     model: text('model').notNull(),
     inputTokens: integer('input_tokens').notNull().default(0),
     outputTokens: integer('output_tokens').notNull().default(0),

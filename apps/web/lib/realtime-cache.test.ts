@@ -16,6 +16,7 @@ import {
   applyMessageCreated,
   applyMessageUpdated,
   markReadLocally,
+  setContactTagsLocally,
 } from './realtime-cache';
 
 const agent = { id: 'u-a', role: 'agent' as const };
@@ -155,5 +156,48 @@ describe('realtime-cache', () => {
       expect(flat[0]!.status).toBe('sent');
       unsubscribe();
     });
+  });
+});
+
+describe('setContactTagsLocally', () => {
+  it('đổi nhãn khách ở mọi danh sách + mọi chi tiết của khách đó; hoàn tác được', () => {
+    const qc = new QueryClient();
+    const mine = conv({ id: 'c-1' });
+    const mine2 = conv({ id: 'c-3' });
+    const otherContact = conv({
+      id: 'c-2',
+      contact: { id: 'k-2', displayName: 'Hà', avatarUrl: null, tags: [] },
+    });
+    qc.setQueryData(inboxKeys.list({}), conversationsData({ items: [mine, otherContact], nextCursor: null }));
+    qc.setQueryData(
+      inboxKeys.list({ status: 'resolved' }),
+      conversationsData({ items: [mine2], nextCursor: null }),
+    );
+    const detail = (c: typeof mine): ConversationDetail => ({
+      ...c,
+      contactDetail: { ...c.contact, phone: null, email: null, tags: [], notes: null, identities: [] },
+    });
+    qc.setQueryData(inboxKeys.detail('c-1'), detail(mine));
+    qc.setQueryData(inboxKeys.detail('c-3'), detail(mine2));
+    qc.setQueryData(inboxKeys.detail('c-2'), detail(otherContact));
+
+    const undo = setContactTagsLocally(qc, 'k-1', ['VIP']);
+
+    const all = qc.getQueryData<ConversationsData>(inboxKeys.list({}))!.pages[0]!.items;
+    expect(all.map((c) => c.contact.tags)).toEqual([['VIP'], []]);
+    const resolved = qc.getQueryData<ConversationsData>(inboxKeys.list({ status: 'resolved' }))!;
+    expect(resolved.pages[0]!.items[0]!.contact.tags).toEqual(['VIP']);
+    for (const id of ['c-1', 'c-3']) {
+      const d = qc.getQueryData<ConversationDetail>(inboxKeys.detail(id))!;
+      expect(d.contact.tags).toEqual(['VIP']);
+      expect(d.contactDetail.tags).toEqual(['VIP']);
+    }
+    expect(qc.getQueryData<ConversationDetail>(inboxKeys.detail('c-2'))!.contact.tags).toEqual([]);
+
+    undo();
+    expect(qc.getQueryData<ConversationDetail>(inboxKeys.detail('c-1'))!.contactDetail.tags).toEqual([]);
+    expect(qc.getQueryData<ConversationsData>(inboxKeys.list({}))!.pages[0]!.items[0]!.contact.tags).toEqual(
+      [],
+    );
   });
 });

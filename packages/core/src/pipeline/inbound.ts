@@ -1,6 +1,7 @@
-// Luồng tin đến (6.1, bỏ bước 7 gọi AI ở Giai đoạn 1).
+// Luồng tin đến (6.1). Bước 7 (AI): gọi PipelineDeps.onCustomerMessageStored để worker lên lịch chatbot.
 import {
   channelAccounts,
+  chatbots,
   conversations,
   messages,
   type ContactIdentity,
@@ -9,18 +10,26 @@ import {
 } from '@dezon/db';
 import type { MessageAttachment, NormalizedInboundMessage } from '@dezon/shared';
 import { and, eq, ne, sql } from 'drizzle-orm';
+import { DEFAULT_AI_PAUSE_AFTER_AGENT_MIN, pauseAiAfterAgentMessage } from '../ai/runtime';
 import type { AccountResolver, InboundEvent } from '../connectors/types';
 import type { InboundJobData } from '../jobs';
 import { DEFAULT_MIME } from '../media/mime';
 import { downloadToBuffer, storeMedia } from '../media/storage';
+import {
+  isLikelyAutomatedEcho,
+  reclassifyEchoesAfterCustomer,
+  recordEchoPause,
+  withAutomatedFlag,
+} from './automation-echo';
 import { isOwnEcho, ownEchoMessageId } from './echo';
 import { emitMessageCreated, errorMessage } from './helpers';
-import { ensureContactIdentity } from './identity';
+import { ensureContactIdentity, type DeferredTasks } from './identity';
 import { markSentFromEcho } from './outbound';
 import { isOwnSentCopy, recordSentExternalId } from './own-sent';
 import { processDelivery, processRead, ReceiptNotReadyError } from './receipts';
 import type { InboundMessageResult, InboundProcessOptions, PipelineDeps } from './types';
 
+export { AUTOMATED_ECHO_RAW_KEY, AUTOMATION_ECHO_WINDOW_SEC } from './automation-echo';
 export { isOwnEcho } from './echo';
 export { ReceiptNotReadyError } from './receipts';
 
@@ -150,21 +159,57 @@ export async function processInboundMessage(
   }
 
   const [account] = await db
-    .select({ defaultAiMode: channelAccounts.defaultAiMode })
+    .select({ defaultAiMode: channelAccounts.defaultAiMode, defaultChatbotId: chatbots.id })
     .from(channelAccounts)
+    .leftJoin(chatbots, and(eq(chatbots.id, channelAccounts.defaultChatbotId), eq(chatbots.isActive, true)))
     .where(eq(channelAccounts.id, msg.channelAccountId))
     .limit(1);
   if (!account) throw new Error('Không tìm thấy channel_account của sự kiện');
 
-  // (3) Khách + hội thoại.
-  const identity = await ensureContactIdentity(db, deps, msg);
-  const conversation = await upsertConversation(db, msg, identity, account.defaultAiMode);
+  const deferred: DeferredTasks = [];
+  try {
+    return await storeInboundMessage(db, deps, msg, { source, backfill, log, account }, deferred);
+  } finally {
+    // Đường ra sớm (tin trùng do đua, lỗi giữa chừng): việc đã xếp (avatar) vẫn chạy. Mỗi việc tự bắt lỗi.
+    await runDeferred(deferred);
+  }
+}
+
+async function runDeferred(deferred: DeferredTasks): Promise<void> {
+  for (const task of deferred.splice(0)) await task();
+}
+
+interface StoreInboundInput {
+  source: NonNullable<InboundProcessOptions['source']>;
+  backfill: boolean;
+  log: Record<string, unknown>;
+  account: { defaultAiMode: Conversation['aiMode']; defaultChatbotId: string | null };
+}
+
+/** Phần lưu của processInboundMessage (sau chống trùng/echo): khách, hội thoại, media, tin, hook chatbot, realtime. */
+async function storeInboundMessage(
+  db: Db,
+  deps: PipelineDeps,
+  msg: NormalizedInboundMessage,
+  { source, backfill, log, account }: StoreInboundInput,
+  deferred: DeferredTasks,
+): Promise<InboundMessageResult> {
+  // (3) Khách + hội thoại. Hội thoại MỚI (không tính đồng bộ lịch sử) tự gắn chatbot mặc định của kênh.
+  const identity = await ensureContactIdentity(db, deps, msg, deferred);
+  const defaults: ConversationDefaults =
+    account.defaultChatbotId && !backfill
+      ? { aiMode: 'auto', chatbotId: account.defaultChatbotId }
+      : { aiMode: account.defaultAiMode, chatbotId: null };
+  const conversation = await upsertConversation(db, msg, identity, defaults);
 
   // (5) Media rồi mới lưu tin để tin hiện đủ ảnh.
   const attachments = await downloadAttachments(deps, msg);
   const isCustomer = msg.direction === 'in';
 
   const saved = await db.transaction(async (tx) => {
+    // Echo từ nền tảng gửi ngay sau tin khách ⇒ tin tự động của Page (Instant Reply/Away...), xem automation-echo.ts.
+    const isPlatformEcho = !isCustomer && msg.senderType === 'agent';
+    const automatedEcho = isPlatformEcho && (await isLikelyAutomatedEcho(tx, conversation.id, msg.sentAt));
     const [row] = await tx
       .insert(messages)
       .values({
@@ -176,7 +221,7 @@ export async function processInboundMessage(
         text: msg.text ?? null,
         attachments,
         status: isCustomer ? 'received' : 'sent',
-        raw: msg.raw ?? null,
+        raw: automatedEcho ? withAutomatedFlag(msg.raw) : (msg.raw ?? null),
         sentAt: msg.sentAt,
       })
       .onConflictDoNothing({ target: [messages.channelAccountId, messages.externalMessageId] })
@@ -189,6 +234,19 @@ export async function processInboundMessage(
       .set(conversationUpdate(isCustomer, backfill, msg.sentAt))
       .where(eq(conversations.id, conversation.id))
       .returning({ id: conversations.id, assignedUserId: conversations.assignedUserId });
+    // Nhân viên trả lời từ công cụ của nền tảng (Business Suite) ⇒ tạm dừng chatbot như tin từ hệ thống.
+    // Đồng bộ định kỳ tính từ lúc tin được gửi (tin cũ không kéo dài pause). Echo tự động thì không.
+    if (updated && isPlatformEcho && !automatedEcho && !backfill) {
+      const pauseMin = deps.ctx.aiPauseAfterAgentMin ?? DEFAULT_AI_PAUSE_AFTER_AGENT_MIN;
+      const from = source === 'webhook' ? deps.ctx.now() : msg.sentAt;
+      const until = new Date(from.getTime() + pauseMin * 60_000);
+      const after = await pauseAiAfterAgentMessage(tx, conversation.id, from, pauseMin);
+      // Echo này "sở hữu" pause hiện tại ⇒ ghi lại để gỡ nếu tin khách (đến sau, do chạy song song) cho thấy
+      // đây là tin tự động.
+      if (after && after.getTime() === until.getTime()) await recordEchoPause(tx, row.id, until);
+    }
+    // Tin khách đến sau echo tự động (thứ tự xử lý đảo) ⇒ đánh dấu lại echo, gỡ pause echo đã đặt.
+    if (updated && isCustomer) await reclassifyEchoesAfterCustomer(tx, conversation.id, msg.sentAt);
     return updated ? { messageId: row.id, conversation: updated } : null;
   });
 
@@ -200,6 +258,23 @@ export async function processInboundMessage(
     deps.logger.debug(log, 'Tin trùng (đua), bỏ qua');
     return NOT_STORED;
   }
+  // Lên lịch chatbot TRƯỚC (đường trễ của câu trả lời bot), rồi mới tới việc chậm (avatar) và phát realtime.
+  // Avatar chạy trước message.created để summary của tin đầu tiên đã có ảnh đại diện (như trước).
+  if (isCustomer && !backfill && deps.onCustomerMessageStored) {
+    try {
+      await deps.onCustomerMessageStored({
+        conversationId: saved.conversation.id,
+        messageId: saved.messageId,
+        source,
+      });
+    } catch (error) {
+      deps.logger.warn(
+        { conversationId: saved.conversation.id, err: errorMessage(error) },
+        'Không lên lịch được chatbot cho tin khách',
+      );
+    }
+  }
+  await runDeferred(deferred);
   if (!backfill) await emitMessageCreated(db, deps, saved.messageId, saved.conversation);
   return { stored: true, conversation: saved.conversation };
 }
@@ -225,11 +300,16 @@ function conversationUpdate(isCustomer: boolean, backfill: boolean, sentAt: Date
  * Upsert hội thoại theo contact_identity_id. window_source (chỉ Messenger): 'ads' khi gặp
  * referral.source = 'ADS' (kể cả đến sau tin đầu), còn lại 'organic'.
  */
+interface ConversationDefaults {
+  aiMode: Conversation['aiMode'];
+  chatbotId: string | null;
+}
+
 async function upsertConversation(
   db: Db,
   msg: NormalizedInboundMessage,
   identity: ContactIdentity,
-  defaultAiMode: Conversation['aiMode'],
+  defaults: ConversationDefaults,
 ): Promise<Pick<Conversation, 'id' | 'windowSource'>> {
   const fromAds = msg.referral?.source?.toUpperCase() === 'ADS';
   const windowSource = msg.channelType === 'messenger' ? (fromAds ? 'ads' : 'organic') : null;
@@ -239,7 +319,8 @@ async function upsertConversation(
       contactId: identity.contactId,
       channelAccountId: msg.channelAccountId,
       contactIdentityId: identity.id,
-      aiMode: defaultAiMode,
+      aiMode: defaults.aiMode,
+      chatbotId: defaults.chatbotId,
       windowSource,
     })
     .onConflictDoNothing({ target: conversations.contactIdentityId })

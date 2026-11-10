@@ -42,7 +42,7 @@ export function conv(overrides: Partial<ConversationSummary> = {}): Conversation
     lastCustomerMessageAt: '2026-11-05T08:00:00.000Z',
     windowSource: 'organic',
     lastMessage: null,
-    contact: { id: 'k-1', displayName: 'Chị Lan', avatarUrl: null },
+    contact: { id: 'k-1', displayName: 'Chị Lan', avatarUrl: null, tags: [] },
     channel: CHANNEL,
     sendWindow: { allowed: true, expiresAt: '2026-11-06T08:00:00.000Z' },
     ...overrides,

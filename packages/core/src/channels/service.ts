@@ -1,5 +1,13 @@
 // Quản lý channel_accounts (trang admin Kênh).
-import { auditLogs, channelAccounts, conversations, messages, type ChannelAccount, type Db } from '@dezon/db';
+import {
+  auditLogs,
+  channelAccounts,
+  chatbots,
+  conversations,
+  messages,
+  type ChannelAccount,
+  type Db,
+} from '@dezon/db';
 import type {
   ChannelAccountDto,
   ChannelConnectedBy,
@@ -80,6 +88,7 @@ function toDto(row: ChannelAccount): ChannelAccountDto {
     connectedBy,
     pictureUrl,
     sync: readSyncState(row.settings),
+    defaultChatbotId: row.defaultChatbotId,
   };
 }
 
@@ -227,11 +236,19 @@ export async function updateChannel(
   id: string,
   input: UpdateChannelRequest,
 ): Promise<ChannelAccountDto> {
-  const set: { displayName?: string; color?: string } = {};
+  const set: { displayName?: string; color?: string; defaultChatbotId?: string | null } = {};
   if (input.displayName !== undefined) set.displayName = input.displayName;
   if (input.color !== undefined) set.color = input.color;
+  if (input.defaultChatbotId !== undefined) set.defaultChatbotId = input.defaultChatbotId;
 
   const row = await db.transaction(async (tx) => {
+    if (input.defaultChatbotId) {
+      const [bot] = await tx
+        .select({ id: chatbots.id })
+        .from(chatbots)
+        .where(eq(chatbots.id, input.defaultChatbotId));
+      if (!bot) throw new InboxValidationError('Chatbot mặc định không tồn tại');
+    }
     const [saved] = await tx
       .update(channelAccounts)
       .set({ ...set, updatedAt: new Date() })

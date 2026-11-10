@@ -9,6 +9,8 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { flattenMessages, isTempMessage, type ChatMessage } from '@/lib/inbox-cache';
 import { dayKey, formatDayLabel } from '@/lib/inbox-format';
 import { errorText, useMessages } from '@/lib/inbox-queries';
+import { useAiTyping } from '@/lib/realtime';
+import { AiTypingBubble } from './ai-typing';
 import { MessageBubble, senderName } from './message-bubble';
 import { countNewCustomerMessages } from './unseen-messages';
 
@@ -42,6 +44,7 @@ export function MessageList({
   const initialScrollDone = useRef(false);
   /** Số tin khách đến khi đang cuộn lên xem tin cũ (hiện nút "tin mới"). */
   const [unseen, setUnseen] = useState(0);
+  const aiTyping = !!useAiTyping(conversationId);
 
   const setAtBottom = useCallback(
     (value: boolean) => {
@@ -92,6 +95,12 @@ export function MessageList({
     }
     lastRef.current = last;
   }, [messages, isFetchingNextPage, setAtBottom]);
+
+  // Hiện "AI đang soạn tin…" ở cuối: giữ ở cuối nếu nhân viên đang xem tin mới nhất.
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (aiTyping && el && atBottomRef.current) el.scrollTop = el.scrollHeight;
+  }, [aiTyping]);
 
   const scrollToBottom = () => {
     const el = scrollRef.current;
@@ -148,7 +157,13 @@ export function MessageList({
           </div>
         )}
         {messages.length === 0 ? (
-          <EmptyState icon={MessageSquare} title="Chưa có tin nhắn" />
+          aiTyping ? (
+            <div className="mt-auto">
+              <AiTypingBubble conversationId={conversationId} />
+            </div>
+          ) : (
+            <EmptyState icon={MessageSquare} title="Chưa có tin nhắn" />
+          )
         ) : (
           <div className="mt-auto flex flex-col gap-2">
             {messages.map((m, i) => {
@@ -175,6 +190,7 @@ export function MessageList({
                 </Fragment>
               );
             })}
+            <AiTypingBubble conversationId={conversationId} />
           </div>
         )}
       </div>

@@ -34,7 +34,12 @@ import {
   type MessagesData,
 } from '@/lib/inbox-cache';
 import { channelsKey, directoryKey, inboxKeys } from '@/lib/inbox-keys';
-import { applyConversationUpdate, markReadLocally, renameContactLocally } from '@/lib/realtime-cache';
+import {
+  applyConversationUpdate,
+  markReadLocally,
+  renameContactLocally,
+  setContactTagsLocally,
+} from '@/lib/realtime-cache';
 
 /**
  * Chu kỳ làm mới dữ liệu chứa URL ký S3 (ảnh/tệp/avatar). URL do API ký sống MEDIA_SIGNED_URL_TTL_SEC
@@ -222,6 +227,10 @@ export function useUpdateContact(conversationId: string, contactId: string) {
   const toast = useToast();
   return useMutation({
     mutationFn: (body: UpdateContactRequest) => inboxApi.updateContact(contactId, body),
+    // Nhãn đổi ⇒ hiện ngay cạnh tên khách ở danh sách + đầu khung chat (không chờ realtime).
+    onMutate: (body) => ({
+      undoTags: body.tags ? setContactTagsLocally(qc, contactId, body.tags) : undefined,
+    }),
     onSuccess: (data, body) => {
       qc.setQueryData<ConversationDetail>(inboxKeys.detail(conversationId), (old) => {
         if (!old) return old;
@@ -240,8 +249,17 @@ export function useUpdateContact(conversationId: string, contactId: string) {
         };
       });
       if (body.displayName !== undefined) renameContactLocally(qc, contactId, body.displayName);
+      if (body.tags !== undefined) {
+        const saved = looksLikeContactDetail(data) && Array.isArray(data.tags) ? data.tags : body.tags;
+        setContactTagsLocally(qc, contactId, saved);
+      }
     },
-    onError: (err) =>
-      toast({ title: 'Không lưu được thông tin khách', description: errorText(err), variant: 'destructive' }),
+    onError: (err, _body, ctx) => {
+      if (ctx?.undoTags) {
+        ctx.undoTags();
+        void qc.invalidateQueries({ queryKey: inboxKeys.lists() });
+      }
+      toast({ title: 'Không lưu được thông tin khách', description: errorText(err), variant: 'destructive' });
+    },
   });
 }

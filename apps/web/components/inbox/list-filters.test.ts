@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  activeAiFilter,
   activeQuickTab,
+  applyAiFilter,
   applyQuickTab,
   channelFilterFor,
   channelFilterOptions,
@@ -130,5 +132,36 @@ describe('countPopoverFilters / clearPopoverFilters', () => {
     expect(
       clearPopoverFilters({ channelType: 'messenger', unread: true, status: 'open', assignee: 'none' }),
     ).toEqual({ channelType: 'messenger', unread: true, status: undefined, assignee: undefined });
+  });
+});
+
+describe('lọc "Cần người" / "AI đang lo"', () => {
+  it('activeAiFilter theo status / aiState', () => {
+    expect(activeAiFilter({})).toBe('all');
+    expect(activeAiFilter({ status: 'pending_human' })).toBe('needs_human');
+    expect(activeAiFilter({ aiState: 'handled' })).toBe('ai_handled');
+    expect(activeAiFilter({ status: 'resolved' })).toBe('all');
+  });
+
+  it('applyAiFilter: hai lựa chọn loại trừ nhau, bỏ chọn chỉ gỡ phần của nhóm AI', () => {
+    const base = { channelType: 'messenger' as const, assignee: 'me' as const };
+    expect(applyAiFilter(base, 'needs_human')).toEqual({ ...base, status: 'pending_human' });
+    expect(applyAiFilter({ ...base, status: 'pending_human' }, 'ai_handled')).toEqual({
+      ...base,
+      aiState: 'handled',
+    });
+    // Trạng thái khác (Đã xong) được giữ khi chọn "AI đang lo" hoặc "Tất cả".
+    expect(applyAiFilter({ status: 'resolved' }, 'ai_handled')).toEqual({
+      status: 'resolved',
+      aiState: 'handled',
+    });
+    expect(applyAiFilter({ status: 'resolved', aiState: 'handled' }, 'all')).toEqual({ status: 'resolved' });
+    expect(applyAiFilter({ status: 'pending_human' }, 'all')).toEqual({});
+  });
+
+  it('đếm và xóa bộ lọc tính cả aiState', () => {
+    expect(countPopoverFilters({ aiState: 'handled' })).toBe(1);
+    expect(countPopoverFilters({ aiState: 'handled', status: 'open' })).toBe(2);
+    expect(clearPopoverFilters({ aiState: 'handled', unread: true })).toEqual({ unread: true });
   });
 });

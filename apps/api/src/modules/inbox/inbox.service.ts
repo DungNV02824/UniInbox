@@ -7,7 +7,6 @@ import {
   OUTBOUND_JOB_NAME,
   type OutboundJobData,
   outboundJobId,
-  roomsForConversation,
   sendAgentMessage,
   updateContact,
   updateConversation,
@@ -33,10 +32,9 @@ import { withTimeout } from '../../common/with-timeout';
 import { DB } from '../../infra/db/db.constants';
 import { INBOX_CONTEXT } from '../../infra/inbox/inbox.constants';
 import { ENQUEUE_TIMEOUT_MS, OUTBOUND_QUEUE } from '../../infra/queue/queue.constants';
+import { ContactConversationsBroadcaster } from '../realtime/contact-conversations-broadcaster';
 import { RealtimeService } from '../realtime/realtime.service';
-
-const roomsOf = (conversation: ConversationSummary, previousAssigneeId?: string | null) =>
-  roomsForConversation({ assignedUserId: conversation.assignedUser?.id ?? null }, previousAssigneeId);
+import { roomsOfSummary as roomsOf } from '../realtime/rooms';
 
 /** Gọi lõi nghiệp vụ hộp thư rồi làm phần việc của API: đẩy job gửi tin, phát realtime. */
 @Injectable()
@@ -48,6 +46,7 @@ export class InboxService {
     @Inject(INBOX_CONTEXT) private readonly ctx: InboxContext,
     @Inject(OUTBOUND_QUEUE) private readonly outbound: Queue<OutboundJobData>,
     private readonly realtime: RealtimeService,
+    private readonly contactConversations: ContactConversationsBroadcaster,
   ) {}
 
   list(viewer: Viewer, query: ListConversationsQuery): Promise<Page<ConversationSummary>> {
@@ -106,8 +105,16 @@ export class InboxService {
     return conversation;
   }
 
-  updateContact(viewer: Viewer, id: string, input: UpdateContactRequest): Promise<ContactDetail> {
-    return updateContact(this.db, viewer, id, input, this.ctx);
+  /**
+   * Sửa khách; đổi tên hoặc tag ⇒ phát conversation.updated (summary có contact.displayName/tags mới) cho các
+   * hội thoại của khách để danh sách đang mở cập nhật ngay.
+   */
+  async updateContact(viewer: Viewer, id: string, input: UpdateContactRequest): Promise<ContactDetail> {
+    const detail = await updateContact(this.db, viewer, id, input, this.ctx);
+    if (input.tags !== undefined || input.displayName !== undefined) {
+      await this.contactConversations.emitForContacts([detail.id]);
+    }
+    return detail;
   }
 
   /** Mỗi message một job; jobId cố định để không gửi trùng. */

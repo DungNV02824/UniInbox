@@ -1,7 +1,9 @@
 // Truy vấn dùng chung cho phần đọc/ghi hộp thư: ghép summary, message, contact detail thành DTO.
 // Một truy vấn cho cả danh sách (tin cuối và tin đầu của khách lấy bằng subquery tương quan) — không N+1.
 import {
+  aiRuns,
   channelAccounts,
+  chatbots,
   contactIdentities,
   contacts,
   conversations,
@@ -12,7 +14,9 @@ import {
 import type {
   ChannelBadge,
   ContactDetail,
+  ConversationHandoff,
   ConversationSummary,
+  HandoffReasonCode,
   LastMessagePreview,
   MessageAttachment,
   MessageAttachmentDto,
@@ -53,6 +57,22 @@ const lastMessageSql = sql<unknown>`(
   limit 1
 )`;
 
+/** Handoff đang mở mới nhất (resolved_at null) kèm người đã "Nhận xử lý". */
+const openHandoffSql = sql<unknown>`(
+  select json_build_object(
+    'reasonCode', h.reason_code,
+    'summary', h.summary,
+    'at', h.created_at,
+    'ackId', h.acknowledged_by,
+    'ackName', u.name
+  )
+  from "handoffs" h
+  left join "users" u on u.id = h.acknowledged_by
+  where h.conversation_id = "conversations"."id" and h.resolved_at is null
+  order by h.created_at desc
+  limit 1
+)`;
+
 /** Chỉ tính cho hội thoại từ quảng cáo (chỉ ở đó cửa sổ phụ thuộc tin đầu tiên). */
 const firstCustomerMessageSql =
   sql`case when "conversations"."window_source" = 'ads' then ${firstCustomerMessageAtSql(
@@ -73,6 +93,7 @@ const summaryFields = {
   contactId: contacts.id,
   contactName: contacts.displayName,
   contactAvatar: contacts.avatarUrl,
+  contactTags: contacts.tags,
   channelId: channelAccounts.id,
   channelType: channelAccounts.type,
   channelName: channelAccounts.displayName,
@@ -80,6 +101,10 @@ const summaryFields = {
   channelStatus: channelAccounts.status,
   lastMessage: lastMessageSql,
   firstCustomerMessageAt: firstCustomerMessageSql,
+  aiPausedUntil: conversations.aiPausedUntil,
+  chatbotId: conversations.chatbotId,
+  chatbotName: chatbots.name,
+  handoff: openHandoffSql,
 };
 
 export interface SummaryQueryOptions {
@@ -94,6 +119,7 @@ export function selectSummaryRows(db: DbLike, where: SQL | undefined, opts: Summ
     .innerJoin(contacts, eq(contacts.id, conversations.contactId))
     .innerJoin(channelAccounts, eq(channelAccounts.id, conversations.channelAccountId))
     .leftJoin(users, eq(users.id, conversations.assignedUserId))
+    .leftJoin(chatbots, eq(chatbots.id, conversations.chatbotId))
     .where(where)
     .orderBy(...(opts.orderBy ?? []))
     .$dynamic();
@@ -130,6 +156,24 @@ function parseLastMessage(value: unknown): LastMessagePreview | null {
   };
 }
 
+function parseHandoff(value: unknown): ConversationHandoff | null {
+  const v = typeof value === 'string' ? (JSON.parse(value) as unknown) : value;
+  if (!v || typeof v !== 'object') return null;
+  const o = v as {
+    reasonCode: HandoffReasonCode;
+    summary: string;
+    at: string;
+    ackId: string | null;
+    ackName: string | null;
+  };
+  return {
+    reasonCode: o.reasonCode,
+    summary: o.summary,
+    at: new Date(o.at).toISOString(),
+    acknowledgedBy: o.ackId && o.ackName ? { id: o.ackId, name: o.ackName } : null,
+  };
+}
+
 export async function toSummary(row: SummaryRow, ctx: InboxContext): Promise<ConversationSummary> {
   const channel: ChannelBadge = {
     id: row.channelId,
@@ -153,6 +197,7 @@ export async function toSummary(row: SummaryRow, ctx: InboxContext): Promise<Con
       id: row.contactId,
       displayName: row.contactName,
       avatarUrl: await signAvatar(row.contactAvatar, ctx),
+      tags: row.contactTags ?? [],
     },
     channel,
     sendWindow: sendWindowInfo(
@@ -165,6 +210,10 @@ export async function toSummary(row: SummaryRow, ctx: InboxContext): Promise<Con
       ctx.now(),
       ctx.policy,
     ),
+    chatbot: row.chatbotId && row.chatbotName ? { id: row.chatbotId, name: row.chatbotName } : null,
+    aiPausedUntil:
+      row.aiPausedUntil && row.aiPausedUntil > ctx.now() ? row.aiPausedUntil.toISOString() : null,
+    handoff: parseHandoff(row.handoff),
   };
 }
 
@@ -193,6 +242,8 @@ const messageFields = {
   sentAt: messages.sentAt,
   createdAt: messages.createdAt,
   channelType: channelAccounts.type,
+  /** Tên bot của lần chạy AI đã tạo tin (sender_type 'bot'). */
+  botName: chatbots.name,
   /** Tin do hệ thống tạo khi nhân viên gửi (raw.outbound) — phân biệt với echo từ công cụ ngoài. */
   fromInbox: sql<boolean>`("messages"."raw" -> 'outbound') is not null`,
   cursorT: isoMicros(messages.sentAt),
@@ -204,6 +255,8 @@ export function selectMessageRows(db: DbLike, where: SQL | undefined, orderBy: S
     .from(messages)
     .innerJoin(channelAccounts, eq(channelAccounts.id, messages.channelAccountId))
     .leftJoin(users, eq(users.id, messages.senderUserId))
+    .leftJoin(aiRuns, eq(aiRuns.id, messages.aiRunId))
+    .leftJoin(chatbots, eq(chatbots.id, aiRuns.chatbotId))
     .where(where)
     .orderBy(...orderBy)
     .$dynamic();
@@ -223,7 +276,11 @@ async function toAttachmentDto(a: MessageAttachment, ctx: InboxContext): Promise
   };
 }
 
+/** Nhãn tin bot khi không biết tên bot (bot đã xóa / tin không gắn lần chạy). */
+export const BOT_FALLBACK_LABEL = 'AI';
+
 function senderLabel(row: MessageRow): string | null {
+  if (row.senderType === 'bot') return row.botName ?? BOT_FALLBACK_LABEL;
   if (row.senderType !== 'agent' || row.senderUserId || row.fromInbox) return null;
   return row.channelType === 'messenger' ? ECHO_SENDER_LABEL : null;
 }

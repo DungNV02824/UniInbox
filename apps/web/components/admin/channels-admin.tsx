@@ -37,6 +37,7 @@ import { safeColor } from '@/lib/inbox-format';
 import { errorText, useChannels } from '@/lib/inbox-queries';
 import { cn } from '@/lib/utils';
 import { ActionMenu, type ActionMenuItem } from './action-menu';
+import { ChannelChatbotSelect } from './channel-chatbot-select';
 import {
   ConnectMessengerDialog,
   DeleteChannelDialog,
@@ -222,13 +223,12 @@ function ChannelCard({ channel: ch, actions }: { channel: ChannelAccountDto; act
         </div>
       )}
 
-      {(by || stats || ch.sync) && (
-        <div className="flex flex-col gap-1.5 border-t px-4 py-3 text-xs text-muted-foreground">
-          {by && <InfoRow icon={UserRound}>{by}</InfoRow>}
-          {stats && <InfoRow icon={MessagesSquare}>{stats}</InfoRow>}
-          {isMessenger && ch.status === 'connected' && ch.sync && <ChannelSyncStatus channel={ch} />}
-        </div>
-      )}
+      <div className="flex flex-col gap-1.5 border-t px-4 py-3 text-xs text-muted-foreground">
+        {by && <InfoRow icon={UserRound}>{by}</InfoRow>}
+        {stats && <InfoRow icon={MessagesSquare}>{stats}</InfoRow>}
+        {isMessenger && ch.status === 'connected' && ch.sync && <ChannelSyncStatus channel={ch} />}
+        <ChannelChatbotSelect channel={ch} />
+      </div>
 
       <div className="mt-auto flex items-center gap-2 rounded-b-xl border-t bg-muted/30 px-3 py-2">
         {isMessenger && ch.status === 'connected' && (

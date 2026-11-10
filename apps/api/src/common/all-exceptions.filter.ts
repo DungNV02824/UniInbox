@@ -20,6 +20,36 @@ export interface ErrorBody {
 
 const INTERNAL_MESSAGE = 'Lỗi hệ thống, vui lòng thử lại sau';
 
+/**
+ * Fastify từ chối body vượt bodyLimit của route (413, FST_ERR_CTP_BODY_TOO_LARGE). Nest bọc lỗi này thành
+ * HttpException(413) giữ nguyên câu tiếng Anh của Fastify ⇒ nhận ra theo câu đó (hoặc theo `code` nếu lỗi
+ * Fastify tới thẳng) rồi thay bằng tiếng Việt.
+ */
+const BODY_TOO_LARGE_CODE = 'FST_ERR_CTP_BODY_TOO_LARGE';
+const FASTIFY_BODY_TOO_LARGE_TEXT = 'Request body is too large';
+const BODY_TOO_LARGE_MESSAGE = 'Dữ liệu gửi lên quá lớn';
+/**
+ * Khóa trong route config (Fastify) chứa thông điệp 413 riêng của route — gắn ở hook onRoute (app.factory),
+ * vd. "Chat thử" kèm ảnh. Không có ⇒ BODY_TOO_LARGE_MESSAGE.
+ */
+export const BODY_TOO_LARGE_MESSAGE_KEY = 'bodyTooLargeMessage';
+
+function bodyTooLargeMessage(request: HttpRequest): string {
+  const config = (request as { routeOptions?: { config?: Record<string, unknown> } }).routeOptions?.config;
+  const custom = config?.[BODY_TOO_LARGE_MESSAGE_KEY];
+  return typeof custom === 'string' ? custom : BODY_TOO_LARGE_MESSAGE;
+}
+
+function isBodyTooLarge(exception: unknown): boolean {
+  if (typeof exception !== 'object' || exception === null) return false;
+  if ((exception as { code?: unknown }).code === BODY_TOO_LARGE_CODE) return true;
+  return (
+    exception instanceof HttpException &&
+    exception.getStatus() === HttpStatus.PAYLOAD_TOO_LARGE &&
+    exception.getResponse() === FASTIFY_BODY_TOO_LARGE_TEXT
+  );
+}
+
 function fromHttpException(exception: HttpException): ErrorBody {
   const statusCode = exception.getStatus();
   const response = exception.getResponse();
@@ -61,6 +91,9 @@ export class AllExceptionsFilter implements ExceptionFilter {
   }
 
   private toBody(exception: unknown, request: HttpRequest): ErrorBody {
+    if (isBodyTooLarge(exception)) {
+      return { statusCode: HttpStatus.PAYLOAD_TOO_LARGE, message: bodyTooLargeMessage(request) };
+    }
     if (exception instanceof HttpException) {
       const body = fromHttpException(exception);
       if (body.statusCode >= 500) this.logError(exception, request);

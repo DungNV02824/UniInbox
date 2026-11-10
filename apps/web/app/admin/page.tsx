@@ -1,6 +1,6 @@
 import { redirect } from 'next/navigation';
 
-// Giai đoạn 1A mới có trang Kênh.
+// Trang mặc định của khu quản trị: Kênh (các mục khác: Chatbot AI, Cài đặt — xem AdminNav).
 export default function AdminIndexPage() {
   redirect('/admin/channels');
 }

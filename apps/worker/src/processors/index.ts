@@ -1,9 +1,15 @@
 // Danh sách processor đăng ký với worker: mỗi hàng đợi một file trong thư mục này.
-// Giai đoạn sau thêm ai-reply, memory-update... tại đây.
+// Giai đoạn sau thêm memory-update... tại đây.
 import type { Job, Processor, Queue } from 'bullmq';
 import type { QueueName } from '@dezon/shared';
 import type { Logger } from '../logger';
 import type { PipelineRuntime } from '../pipeline-runtime';
+import {
+  AI_REPLY_QUEUE,
+  aiReplyHandlers,
+  createAiReplyProcessor,
+  type AiReplyHandlers,
+} from './ai-reply.processor';
 import {
   CHANNEL_SYNC_QUEUE,
   channelSyncHandlers,
@@ -66,6 +72,10 @@ export function channelSyncProcessor(
   };
 }
 
+export function aiReplyProcessor(handlers: AiReplyHandlers): ProcessorDefinition {
+  return { queue: AI_REPLY_QUEUE, createProcessor: (logger) => createAiReplyProcessor(handlers, logger) };
+}
+
 export interface ProcessorsConfig {
   channelSync: ChannelSyncConfig;
 }
@@ -77,5 +87,6 @@ export function createProcessors(runtime: PipelineRuntime, config: ProcessorsCon
     inboundProcessor(runtime),
     outboundProcessor(outboundHandlers(runtime)),
     channelSyncProcessor(channelSyncHandlers(runtime), config.channelSync),
+    aiReplyProcessor(aiReplyHandlers(runtime)),
   ];
 }

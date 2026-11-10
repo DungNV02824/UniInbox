@@ -42,6 +42,11 @@ export function applyTestEnv(databaseUrl: string, redisUrl: string): void {
     S3_BUCKET: '',
     S3_ACCESS_KEY: '',
     S3_SECRET_KEY: '',
+    // Không gọi Gemini/Lark thật: test cần thì truyền LlmClient / fetch giả qua AppOverrides.
+    GEMINI_API_KEY: '',
+    GEMINI_MODEL: 'gemini-2.5-flash',
+    LARK_WEBHOOK_URL: '',
+    LARK_WEBHOOK_SECRET: '',
   });
 }
 

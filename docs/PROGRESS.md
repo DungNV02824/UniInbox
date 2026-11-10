@@ -9,7 +9,7 @@ Cập nhật cuối mỗi giai đoạn: đã xong gì, còn gì, nợ kỹ thu�
 | 1B        | Zalo OA                             | Chưa bắt đầu |
 | 1C        | Zalo cá nhân của nhân viên          | Chưa bắt đầu |
 | 1D        | Hoàn thiện để chạy thật             | Chưa bắt đầu |
-| 2         | AI tự trả lời + chuyển người thật   | Chưa bắt đầu |
+| 2         | AI tự trả lời + chuyển người thật   | Đã làm theo hướng mới: **Chatbot AI (Gemini)**, xem mục dưới |
 | 3         | AI đọc ảnh + nhớ khách hàng         | Chưa bắt đầu |
 | 4         | AI cho Zalo cá nhân + thống kê      | Chưa bắt đầu |
 
@@ -158,3 +158,34 @@ Nợ kỹ thuật mới:
 - Web chưa có jsdom/testing-library: huỷ ghi chú, nút "N tin mới", đánh dấu đọc khi ở cuối, ô lọc nhân viên chỉ được kiểm qua hàm phụ trợ hoặc trình duyệt thủ công.
 - Xoá tag chưa có toast hoàn tác; `useDirectory` vẫn được gọi cho agent (ô phân công); mark-as-read lỗi liên tục thì thử lại sau mỗi lần refetch.
 - `messages.client_id` không có unique index (chống trùng dựa vào khoá dòng hội thoại): code ghi tin agent khác ngoài `sendAgentMessage` phải tự kiểm.
+
+## Chatbot AI (Gemini) — thay cho Giai đoạn 2 của đặc tả (2026-11-09)
+
+Chủ sản phẩm đổi hướng: không tra catalog/giá dezon.vn, mà **tự viết chatbot** rồi bật bot cho từng hội thoại. LLM là Google Gemini (`GEMINI_MODEL` mặc định `gemini-3.5-flash`). Quyết định chi tiết ở `DECISIONS.md` (các mục "Chatbot AI").
+
+### Đã xong
+
+- **Dữ liệu** (migration `0004_chatbots`): bảng `chatbots`, `app_settings` (giờ làm việc, Lark, công tắc AI tổng); `conversations.chatbot_id`, `channel_accounts.default_chatbot_id`, `ai_runs.chatbot_id`.
+- **Luồng chạy (worker):** tin khách (webhook / đồng bộ định kỳ, không tính lịch sử kéo về) vào hội thoại có bot ⇒ gom tin (debounce) ⇒ kiểm điều kiện (AI tổng, bot bật, không chờ người, không tạm dừng, cửa sổ gửi, giới hạn/giờ) ⇒ lọc từ khóa chuyển người (không gọi model) ⇒ Gemini (hướng dẫn + kiến thức + câu mẫu + lịch sử 30 tin + ảnh khách) ⇒ trả lời 1–3 bong bóng (gửi giãn 0,8–1,5 s) hoặc chuyển người thật (tin hệ thống, âm thanh + thông báo trên web, thẻ Lark, nhắc lại sau 15 phút nếu chưa ai nhận). Chống đua khi khách nhắn thêm lúc bot đang nghĩ; nhân viên nhắn ⇒ bot tạm dừng 30 phút. Mỗi lượt ghi `ai_runs` (model, token, thời gian, quyết định).
+- **API:** CRUD chatbot + "Chat thử"; bật/tắt bot trên hội thoại, "Tiếp tục AI", "Nhận xử lý", "Đã xong, trả lại cho AI", nhật ký AI; Cài đặt giờ làm việc / Lark / công tắc AI tổng; bot mặc định của kênh.
+- **Web:** Quản trị › Chatbot AI (trình soạn bot theo tab + khung Chat thử), Quản trị › Cài đặt, ô "Chatbot mặc định" ở trang Kênh; trong hộp thư: ô chọn bot ở đầu khung chat, dòng "AI tạm dừng — Tiếp tục AI", banner đỏ "Cần người", tin bot nền tím "AI · <tên bot>", bộ lọc "Cần người" / "AI đang lo", mục "Nhật ký AI" (admin).
+
+### Cách dùng (cho chủ sản phẩm)
+
+1. **Tạo bot:** Quản trị › **Chatbot AI** › Thêm chatbot. Tab *Hướng dẫn*: viết giọng văn và quy tắc (ví dụ "xưng em, gọi anh/chị, trả lời ngắn"). Tab *Kiến thức*: dán bảng giá, câu hỏi thường gặp, địa chỉ… — bot chỉ được dùng những gì ghi ở đây, không tự bịa giá. Tab *Câu trả lời mẫu*: vài cặp khách hỏi / bot đáp đúng ý anh/chị. Tab *Chuyển người thật*: từ khóa (giảm giá, khiếu nại, gặp nhân viên…) — khách nhắn trúng là chuyển ngay cho nhân viên, không qua AI. Tab *Nâng cao*: độ trễ gom tin (mặc định 10 giây), giới hạn lượt trả lời mỗi giờ.
+2. **Thử trước khi dùng:** gõ như khách ở khung **Chat thử** bên phải; xem bot trả lời hay chuyển người, mất bao lâu. Chat thử không gửi gì cho khách.
+3. **Bật cho khách:** trong hộp thư, bấm ô **"🤖 Chatbot"** ở đầu khung chat và chọn bot (chọn "Tắt" để tắt). Nếu khách đang chờ, bot trả lời luôn. Muốn mọi hội thoại MỚI của một Fanpage tự có bot: Quản trị › Kênh › "Chatbot mặc định".
+4. **Khi bot chuyển cho người thật:** hộp thư kêu chuông + hiện thông báo, hội thoại có banner đỏ "Cần người" (lý do + tóm tắt) và vào bộ lọc "Cần người"; nhóm Lark nhận thẻ có nút "Mở hội thoại". Bấm **"Nhận xử lý"**, trả lời khách, xong thì bấm **"Đã xong, trả lại cho AI"** để bot lo tiếp. Bấm "Xong" (đóng hội thoại) thì bot vẫn tắt cho tới khi bấm **"Bật lại"**.
+5. **Nhân viên tự nhắn** vào hội thoại có bot ⇒ bot tạm dừng 30 phút ("AI tạm dừng đến hh:mm — Tiếp tục AI").
+6. **Cài đặt** (Quản trị › Cài đặt): giờ làm việc (bot vẫn trả lời ngoài giờ nhưng biết là ngoài giờ để nói với khách), webhook Lark (+ nút Gửi thử), công tắc **tắt toàn bộ AI** khi cần.
+
+### Kiểm thử
+
+- Unit/integration (vitest, Testcontainers, Gemini giả) ở shared/db/core/api/worker/web; typecheck + lint toàn repo xanh.
+- **E2E với Gemini thật + mock Facebook** trên stack cô lập: `scripts/e2e-chatbot.ts` (cách dựng stack ở đầu file; Redis phải là instance riêng). Lần chạy 2026-11-09 trên code sau review: **22/22 PASS** (9 lượt Gemini, Lark qua server bắt thẻ): khách mới ⇒ bot trả lời sau ~8 s (Gemini 2–5 s, ~1.700 token vào), 2 bong bóng gửi giãn ~1,2 s; 3 tin cách 1 s ⇒ đúng 1 lượt AI; "giảm giá" ⇒ chuyển người lý do giảm giá, không gọi model, có thẻ Lark; "trả lại cho AI" không nhắn gì ⇒ câu hỏi khác vẫn được trả lời (không chuyển lại); "Xong" ⇒ bot tắt, "Bật lại" ⇒ auto; nhân viên nhắn ⇒ tạm dừng 30 phút, "Tiếp tục AI" ⇒ trả lời; tắt AI tổng ⇒ im lặng; ngoài giờ vẫn trả lời; giới hạn/giờ; chống đua (khách nhắn thêm lúc Gemini đang chạy ⇒ hủy + gom); bật bot cho khách đang chờ ⇒ tự trả lời; Chat thử trả tiếng Việt. Trước đó đã gửi 1 thẻ Lark thật vào nhóm demo (tên khách "[TEST] …").
+
+### Nợ kỹ thuật / rủi ro
+
+- Lựa chọn trả lời hay chuyển người của Gemini không cố định: câu hỏi ngoài kiến thức thường bị chuyển người (`out_of_scope`) — muốn bot tự trả lời thì bổ sung kiến thức.
+- Chưa kiểm e2e: thẻ nhắc lại sau 15 phút, ảnh khách gửi cho Gemini, bot có "tin giữ chỗ" khi chuyển người.
+- Thẻ Lark escape ký tự đặc biệt của tên/tóm tắt bằng HTML entity (`&#91;`…): nên xem một thẻ thật để chắc hiển thị đúng.

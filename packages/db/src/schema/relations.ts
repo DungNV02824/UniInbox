@@ -1,6 +1,8 @@
 import { relations } from 'drizzle-orm';
 import { aiRuns, aiSuggestions } from './ai';
+import { appSettings } from './app-settings';
 import { channelAccounts } from './channel-accounts';
+import { chatbots } from './chatbots';
 import { contactIdentities, contacts } from './contacts';
 import { conversations } from './conversations';
 import { customerMemories } from './customer-memories';
@@ -18,6 +20,7 @@ export const usersRelations = relations(users, ({ many }) => ({
 
 export const channelAccountsRelations = relations(channelAccounts, ({ one, many }) => ({
   owner: one(users, { fields: [channelAccounts.ownerUserId], references: [users.id] }),
+  defaultChatbot: one(chatbots, { fields: [channelAccounts.defaultChatbotId], references: [chatbots.id] }),
   identities: many(contactIdentities),
   conversations: many(conversations),
 }));
@@ -47,6 +50,7 @@ export const conversationsRelations = relations(conversations, ({ one, many }) =
     references: [contactIdentities.id],
   }),
   assignedUser: one(users, { fields: [conversations.assignedUserId], references: [users.id] }),
+  chatbot: one(chatbots, { fields: [conversations.chatbotId], references: [chatbots.id] }),
   messages: many(messages),
   aiRuns: many(aiRuns),
   aiSuggestions: many(aiSuggestions),
@@ -61,6 +65,7 @@ export const messagesRelations = relations(messages, ({ one }) => ({
 
 export const aiRunsRelations = relations(aiRuns, ({ one, many }) => ({
   conversation: one(conversations, { fields: [aiRuns.conversationId], references: [conversations.id] }),
+  chatbot: one(chatbots, { fields: [aiRuns.chatbotId], references: [chatbots.id] }),
   suggestions: many(aiSuggestions),
 }));
 
@@ -89,4 +94,15 @@ export const knowledgeChunksRelations = relations(knowledgeChunks, ({ one }) => 
     fields: [knowledgeChunks.documentId],
     references: [knowledgeDocuments.id],
   }),
+}));
+
+export const chatbotsRelations = relations(chatbots, ({ one, many }) => ({
+  creator: one(users, { fields: [chatbots.createdBy], references: [users.id] }),
+  conversations: many(conversations),
+  defaultForChannels: many(channelAccounts),
+  aiRuns: many(aiRuns),
+}));
+
+export const appSettingsRelations = relations(appSettings, ({ one }) => ({
+  updater: one(users, { fields: [appSettings.updatedBy], references: [users.id] }),
 }));

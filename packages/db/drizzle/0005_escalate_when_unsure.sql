@@ -1,0 +1,1 @@
+ALTER TABLE "chatbots" ADD COLUMN "escalate_when_unsure" boolean DEFAULT true NOT NULL;

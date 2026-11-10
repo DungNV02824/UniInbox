@@ -23,6 +23,25 @@ const CHANNEL_SYNC_BACKFILL_OPTIONS: DefaultJobOptions = {
 };
 
 /**
+ * Job "reply" của ai-reply: jobId cố định aiReplyJobId(conv) nên xóa khi xong (lần lên lịch sau mới thêm
+ * được); job lỗi giữ lại để điều tra (scheduler tự xóa trước khi thêm lại).
+ */
+export const AI_REPLY_JOB_OPTIONS: DefaultJobOptions = {
+  attempts: 2,
+  backoff: { type: 'exponential', delay: 5_000 },
+  removeOnComplete: true,
+  removeOnFail: { count: 1_000, age: 7 * 24 * 3600 },
+};
+
+/** Job "handoff-reminder" (nhắc Lark một lần): thử 3 lần vì chỉ là gọi webhook. */
+export const HANDOFF_REMINDER_JOB_OPTIONS: DefaultJobOptions = {
+  attempts: 3,
+  backoff: { type: 'exponential', delay: 10_000 },
+  removeOnComplete: true,
+  removeOnFail: { count: 1_000, age: 7 * 24 * 3600 },
+};
+
+/**
  * Tùy chọn job theo hàng đợi (6.6): outbound thử 3 lần, inbound 5 lần, backoff mũ.
  * Áp cho job thêm qua Queue của worker; API cũng phải đẩy job với cùng tùy chọn.
  */
@@ -37,6 +56,8 @@ export const QUEUE_JOB_OPTIONS: Partial<Record<QueueName, DefaultJobOptions>> = 
     attempts: 3,
     backoff: { type: 'exponential', delay: 5_000 },
   },
+  // ai-reply: job "reply" thử 2 lần (lỗi hạ tầng tạm thời; lỗi LLM core tự xử lý thành decision 'error').
+  [QUEUE_NAMES.aiReply]: AI_REPLY_JOB_OPTIONS,
   // Mặc định của hàng đợi = tùy chọn backfill (job do API đẩy khi kết nối Page / admin bấm đồng bộ).
   [QUEUE_NAMES.channelSync]: CHANNEL_SYNC_BACKFILL_OPTIONS,
 };
