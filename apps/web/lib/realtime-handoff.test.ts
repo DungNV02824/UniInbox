@@ -26,7 +26,22 @@ describe('handoffToastText', () => {
     expect(handoffToastText(payload)).toEqual({
       title: 'Cần người: Chị Lan (Dezon Nội Thất) — Khách muốn gặp nhân viên',
       description: 'Khách muốn gọi điện tư vấn',
+      botContinues: false,
     });
+  });
+
+  it('chỉ báo (botContinues): "Khách cần nhân viên — bot vẫn đang trả lời", không phải "Cần người"', () => {
+    const text = handoffToastText({ ...payload, botContinues: true });
+    expect(text).toEqual({
+      title: 'Khách cần nhân viên: Chị Lan (Dezon Nội Thất) — bot vẫn đang trả lời',
+      description: 'Khách muốn gọi điện tư vấn',
+      botContinues: true,
+    });
+    expect(text.title).not.toMatch(/Cần người/);
+    expect(handoffToastText({ ...payload, botContinues: true, reminder: true }).title).toMatch(
+      /^Nhắc lại · /,
+    );
+    expect(handoffToastText({ ...payload, botContinues: false }).botContinues).toBe(false);
   });
 
   it('sự kiện nhắc lại có tiền tố "Nhắc lại"', () => {

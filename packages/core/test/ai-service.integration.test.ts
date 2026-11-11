@@ -210,6 +210,101 @@ describe('CRUD chatbot', () => {
     }
   });
 
+  it('notifyKeywords + khi nhân viên nhắn + nhắc lại: mặc định, bỏ trùng, sửa giữ nguyên trường khác', async () => {
+    const plain = await createChatbot(t.db, t.admin.id, { name: 'Bot Cài Đặt Mặc Định' });
+    expect(plain).toMatchObject({
+      notifyKeywords: [],
+      agentReplyMode: 'pause',
+      agentPauseMinutes: null,
+      handoffReminderMin: 0,
+      handoffAckMessage: null,
+      handoffResolveMessage: null,
+    });
+    // Tin gửi khách khi bấm nút Cần người: trim, rỗng ⇒ null.
+    expect(
+      await updateChatbot(t.db, t.admin.id, plain.id, {
+        handoffAckMessage: ' Dạ {ten_khach} ơi ',
+        handoffResolveMessage: ' ',
+      }),
+    ).toMatchObject({ handoffAckMessage: 'Dạ {ten_khach} ơi', handoffResolveMessage: null });
+
+    const bot = await createChatbot(t.db, t.admin.id, {
+      name: 'Bot Báo Nhân Viên',
+      handoffKeywords: ['khiếu nại'],
+      notifyKeywords: [' Bảo hành ', 'bao hanh', 'đổi trả'],
+      agentReplyMode: 'stop',
+      agentPauseMinutes: 45,
+      handoffReminderMin: 15,
+    });
+    expect(bot).toMatchObject({
+      notifyKeywords: ['Bảo hành', 'đổi trả'],
+      agentReplyMode: 'stop',
+      agentPauseMinutes: 45,
+      handoffReminderMin: 15,
+    });
+
+    const upd = await updateChatbot(t.db, t.admin.id, bot.id, {
+      agentReplyMode: 'continue',
+      agentPauseMinutes: null,
+    });
+    expect(upd).toMatchObject({
+      notifyKeywords: ['Bảo hành', 'đổi trả'],
+      agentReplyMode: 'continue',
+      agentPauseMinutes: null,
+      handoffReminderMin: 15,
+    });
+    const [row] = await t.db.select().from(chatbots).where(eq(chatbots.id, bot.id));
+    expect(row).toMatchObject({
+      agentReplyMode: 'continue',
+      agentPauseMinutes: null,
+      handoffReminderMin: 15,
+    });
+
+    const [log] = await t.db
+      .select()
+      .from(auditLogs)
+      .where(and(eq(auditLogs.action, 'chatbot.update'), eq(auditLogs.entityId, bot.id)));
+    expect(log!.data).toEqual({ fields: ['agentReplyMode', 'agentPauseMinutes'] });
+  });
+
+  it('từ khóa ở cả hai danh sách ⇒ InboxValidationError; PATCH kiểm trên giá trị đang lưu + patch', async () => {
+    await expect(
+      createChatbot(t.db, t.admin.id, {
+        name: 'Bot Trùng Từ Khóa',
+        handoffKeywords: ['Gặp NV'],
+        notifyKeywords: ['gap nv'],
+      }),
+    ).rejects.toThrow(new InboxValidationError('Từ khóa "gap nv" đang nằm ở cả hai danh sách'));
+    expect(await t.db.select().from(chatbots).where(eq(chatbots.name, 'Bot Trùng Từ Khóa'))).toHaveLength(0);
+
+    const bot = await createChatbot(t.db, t.admin.id, {
+      name: 'Bot Gộp Từ Khóa',
+      handoffKeywords: ['gặp nv'],
+      notifyKeywords: ['bảo hành'],
+    });
+    await expect(
+      updateChatbot(t.db, t.admin.id, bot.id, { notifyKeywords: ['GẶP NV'] }),
+    ).rejects.toBeInstanceOf(InboxValidationError);
+    await expect(updateChatbot(t.db, t.admin.id, bot.id, { handoffKeywords: ['bao hanh'] })).rejects.toThrow(
+      'Từ khóa "bảo hành" đang nằm ở cả hai danh sách',
+    );
+    // Không có gì bị ghi.
+    expect(await getChatbot(t.db, bot.id)).toMatchObject({
+      handoffKeywords: ['gặp nv'],
+      notifyKeywords: ['bảo hành'],
+    });
+    // Sửa cả hai cùng lúc (đổi chỗ) ⇒ hợp lệ.
+    expect(
+      await updateChatbot(t.db, t.admin.id, bot.id, {
+        handoffKeywords: ['bảo hành'],
+        notifyKeywords: ['gặp nv'],
+      }),
+    ).toMatchObject({ handoffKeywords: ['bảo hành'], notifyKeywords: ['gặp nv'] });
+    await expect(
+      updateChatbot(t.db, t.admin.id, '7f1c2a9e-3b4d-4c5e-8f60-112233445566', { notifyKeywords: ['x'] }),
+    ).rejects.toBeInstanceOf(InboxNotFoundError);
+  });
+
   it('xóa bot gỡ khỏi hội thoại (ai_mode off) và kênh', async () => {
     const bot = await createChatbot(t.db, t.admin.id, { name: 'Bot Sẽ Xóa' });
     const ch = await createChannel(t.db, { defaultChatbotId: bot.id });

@@ -121,6 +121,8 @@ describe('migrations', () => {
   it('migration ngược xóa sạch, sau đó chạy xuôi lại được', async () => {
     const files = await rollbackMigrations(url);
     expect(files).toEqual([
+      '0010_handoff_action_messages.sql',
+      '0009_bot_notify_agent_reply.sql',
       '0008_handoff_buttons.sql',
       '0007_contact_tags.sql',
       '0006_response_speed.sql',
@@ -143,12 +145,102 @@ describe('migrations', () => {
     expect(await vectorInstalled()).toBe(true);
   });
 
+  it('0010: rollback gỡ 2 cột tin gửi khách khi bấm nút Cần người, giữ bot; chạy lại ⇒ null', async () => {
+    const cols = `select column_name, data_type, is_nullable from information_schema.columns where table_name = 'chatbots'
+       and column_name in ('handoff_ack_message', 'handoff_resolve_message') order by column_name`;
+    expect(await query(cols)).toEqual([
+      { column_name: 'handoff_ack_message', data_type: 'text', is_nullable: 'YES' },
+      { column_name: 'handoff_resolve_message', data_type: 'text', is_nullable: 'YES' },
+    ]);
+    await query(
+      "insert into chatbots (name, handoff_ack_message) values ('Bot tin nút', 'Dạ {ten_khach} chờ em chút ạ')",
+    );
+    expect(await rollbackMigrations(url, 1)).toEqual(['0010_handoff_action_messages.sql']);
+    expect(await query(cols)).toEqual([]);
+    expect(await query("select name from chatbots where name = 'Bot tin nút'")).toHaveLength(1);
+    await runMigrations(url);
+    expect(
+      await query(
+        "select handoff_ack_message, handoff_resolve_message from chatbots where name = 'Bot tin nút'",
+      ),
+    ).toEqual([{ handoff_ack_message: null, handoff_resolve_message: null }]);
+    await query("delete from chatbots where name = 'Bot tin nút'");
+  });
+
+  it('0009: cột từ khóa báo nhân viên / khi nhân viên nhắn / nhắc lại + CHECK; rollback gỡ, giữ bot; chạy lại ⇒ mặc định', async () => {
+    const cols = `select column_name, data_type, is_nullable, column_default from information_schema.columns
+       where table_name = 'chatbots'
+         and column_name in ('notify_keywords', 'agent_reply_mode', 'agent_pause_minutes', 'handoff_reminder_min')
+       order by column_name`;
+    const checks = `select conname from pg_constraint where conname in
+       ('chatbots_agent_reply_mode_check', 'chatbots_agent_pause_minutes_check', 'chatbots_handoff_reminder_min_check')
+       order by conname`;
+    expect(
+      (await query<{ column_name: string; data_type: string; is_nullable: string }>(cols)).map((c) => [
+        c.column_name,
+        c.data_type,
+        c.is_nullable,
+      ]),
+    ).toEqual([
+      ['agent_pause_minutes', 'integer', 'YES'],
+      ['agent_reply_mode', 'text', 'NO'],
+      ['handoff_reminder_min', 'integer', 'NO'],
+      ['notify_keywords', 'ARRAY', 'NO'],
+    ]);
+    expect(await query(checks)).toHaveLength(3);
+
+    // CHECK: mode ngoài danh sách, phút tạm nghỉ ngoài 1..1440, phút nhắc lại ngoài 0..1440 ⇒ lỗi.
+    for (const [col, value, conname] of [
+      ['agent_reply_mode', "'nghi'", 'chatbots_agent_reply_mode_check'],
+      ['agent_pause_minutes', '0', 'chatbots_agent_pause_minutes_check'],
+      ['agent_pause_minutes', '1441', 'chatbots_agent_pause_minutes_check'],
+      ['handoff_reminder_min', '-1', 'chatbots_handoff_reminder_min_check'],
+      ['handoff_reminder_min', '1441', 'chatbots_handoff_reminder_min_check'],
+    ] as const) {
+      await expect(
+        query(`insert into chatbots (name, ${col}) values ('Bot sai ${col}', ${value})`),
+      ).rejects.toThrow(new RegExp(conname));
+    }
+    // Biên hợp lệ.
+    await query(
+      `insert into chatbots (name, notify_keywords, agent_reply_mode, agent_pause_minutes, handoff_reminder_min)
+       values ('Bot biên 1', '{bảo hành}', 'continue', 1, 1440), ('Bot biên 2', '{}', 'stop', 1440, 0)`,
+    );
+    await query("delete from chatbots where name in ('Bot biên 1', 'Bot biên 2')");
+
+    await query(
+      `insert into chatbots (name, notify_keywords, agent_reply_mode, agent_pause_minutes, handoff_reminder_min)
+       values ('Bot 0009', '{bảo hành}', 'stop', 15, 30)`,
+    );
+    expect(await rollbackMigrations(url, 2)).toEqual([
+      '0010_handoff_action_messages.sql',
+      '0009_bot_notify_agent_reply.sql',
+    ]);
+    expect(await query(cols)).toEqual([]);
+    expect(await query(checks)).toEqual([]);
+    expect(await query("select name from chatbots where name = 'Bot 0009'")).toHaveLength(1);
+    await runMigrations(url);
+    expect(
+      await query(
+        "select notify_keywords, agent_reply_mode, agent_pause_minutes, handoff_reminder_min from chatbots where name = 'Bot 0009'",
+      ),
+    ).toEqual([
+      { notify_keywords: [], agent_reply_mode: 'pause', agent_pause_minutes: null, handoff_reminder_min: 0 },
+    ]);
+    expect(await query(checks)).toHaveLength(3);
+    await query("delete from chatbots where name = 'Bot 0009'");
+  });
+
   it('0008: rollback gỡ 3 cột nút Cần người, giữ bot; chạy lại ⇒ mặc định null/false', async () => {
     const cols = `select column_name from information_schema.columns where table_name = 'chatbots'
        and column_name in ('handoff_ack_label', 'handoff_resolve_label', 'handoff_action_lark') order by column_name`;
     await query("insert into chatbots (name, handoff_ack_label) values ('Bot nút', 'Nghiệm thu')");
     expect(await query(cols)).toHaveLength(3);
-    expect(await rollbackMigrations(url, 1)).toEqual(['0008_handoff_buttons.sql']);
+    expect(await rollbackMigrations(url, 3)).toEqual([
+      '0010_handoff_action_messages.sql',
+      '0009_bot_notify_agent_reply.sql',
+      '0008_handoff_buttons.sql',
+    ]);
     expect(await query(cols)).toEqual([]);
     expect(await query("select name from chatbots where name = 'Bot nút'")).toHaveLength(1);
     await runMigrations(url);
@@ -161,7 +253,12 @@ describe('migrations', () => {
   });
 
   it('0007: rollback gỡ contact_tags, giữ contacts.tags; chạy lại seed nhãn sẵn có (bỏ trùng hoa thường)', async () => {
-    expect(await rollbackMigrations(url, 2)).toEqual(['0008_handoff_buttons.sql', '0007_contact_tags.sql']);
+    expect(await rollbackMigrations(url, 4)).toEqual([
+      '0010_handoff_action_messages.sql',
+      '0009_bot_notify_agent_reply.sql',
+      '0008_handoff_buttons.sql',
+      '0007_contact_tags.sql',
+    ]);
     expect(await publicTables()).toEqual(EXPECTED_TABLES.filter((t) => t !== 'contact_tags'));
     await query(
       `insert into contacts (display_name, tags, created_at) values
@@ -197,7 +294,9 @@ describe('migrations', () => {
     await query("insert into chatbots (name) values ('Bot tốc độ')");
     expect((await query<{ n: number }>(col))[0]?.n).toBe(1);
     expect((await query<{ n: number }>(chk))[0]?.n).toBe(1);
-    expect(await rollbackMigrations(url, 3)).toEqual([
+    expect(await rollbackMigrations(url, 5)).toEqual([
+      '0010_handoff_action_messages.sql',
+      '0009_bot_notify_agent_reply.sql',
       '0008_handoff_buttons.sql',
       '0007_contact_tags.sql',
       '0006_response_speed.sql',
@@ -218,7 +317,9 @@ describe('migrations', () => {
       "select count(*)::int as n from information_schema.columns where table_name = 'chatbots' and column_name = 'escalate_when_unsure'";
     await query("insert into chatbots (name) values ('Bot giữ lại')");
     expect((await query<{ n: number }>(col))[0]?.n).toBe(1);
-    expect(await rollbackMigrations(url, 4)).toEqual([
+    expect(await rollbackMigrations(url, 6)).toEqual([
+      '0010_handoff_action_messages.sql',
+      '0009_bot_notify_agent_reply.sql',
       '0008_handoff_buttons.sql',
       '0007_contact_tags.sql',
       '0006_response_speed.sql',
@@ -258,7 +359,9 @@ describe('migrations', () => {
       { conname: 'conversations_chatbot_id_chatbots_id_fk', confdeltype: 'n' },
     ]);
 
-    expect(await rollbackMigrations(url, 5)).toEqual([
+    expect(await rollbackMigrations(url, 7)).toEqual([
+      '0010_handoff_action_messages.sql',
+      '0009_bot_notify_agent_reply.sql',
       '0008_handoff_buttons.sql',
       '0007_contact_tags.sql',
       '0006_response_speed.sql',
@@ -285,9 +388,16 @@ describe('migrations', () => {
       response_speed: string;
       examples: unknown;
       handoff_keywords: string[];
+      notify_keywords: string[];
+      agent_reply_mode: string;
+      agent_pause_minutes: number | null;
+      handoff_reminder_min: number;
+      handoff_ack_message: string | null;
+      handoff_resolve_message: string | null;
     }>(
       `insert into chatbots (name) values ('Bot mặc định')
-       returning is_active, temperature, reply_delay_sec, max_wait_sec, max_replies_per_hour, escalate_when_unsure, response_speed, examples, handoff_keywords`,
+       returning is_active, temperature, reply_delay_sec, max_wait_sec, max_replies_per_hour, escalate_when_unsure, response_speed, examples, handoff_keywords,
+         notify_keywords, agent_reply_mode, agent_pause_minutes, handoff_reminder_min, handoff_ack_message, handoff_resolve_message`,
     );
     expect(rows[0]).toEqual({
       is_active: true,
@@ -299,6 +409,12 @@ describe('migrations', () => {
       response_speed: 'fast',
       examples: [],
       handoff_keywords: [],
+      notify_keywords: [],
+      agent_reply_mode: 'pause',
+      agent_pause_minutes: null,
+      handoff_reminder_min: 0,
+      handoff_ack_message: null,
+      handoff_resolve_message: null,
     });
     await expect(query("insert into chatbots (name) values ('Bot mặc định')")).rejects.toThrow();
     await expect(
@@ -311,7 +427,9 @@ describe('migrations', () => {
     const col =
       "select count(*)::int as n from information_schema.columns where table_name = 'messages' and column_name = 'client_id'";
     expect((await query<{ n: number }>(col))[0]?.n).toBe(1);
-    expect(await rollbackMigrations(url, 6)).toEqual([
+    expect(await rollbackMigrations(url, 8)).toEqual([
+      '0010_handoff_action_messages.sql',
+      '0009_bot_notify_agent_reply.sql',
       '0008_handoff_buttons.sql',
       '0007_contact_tags.sql',
       '0006_response_speed.sql',
@@ -329,7 +447,9 @@ describe('migrations', () => {
     const fk =
       "select count(*)::int as n from pg_constraint where conname = 'messages_conversation_channel_account_fk'";
     expect((await query<{ n: number }>(fk))[0]?.n).toBe(1);
-    expect(await rollbackMigrations(url, 7)).toEqual([
+    expect(await rollbackMigrations(url, 9)).toEqual([
+      '0010_handoff_action_messages.sql',
+      '0009_bot_notify_agent_reply.sql',
       '0008_handoff_buttons.sql',
       '0007_contact_tags.sql',
       '0006_response_speed.sql',
@@ -344,8 +464,8 @@ describe('migrations', () => {
     expect(await publicTables()).toEqual(EXPECTED_TABLES);
   });
 
-  it('rollback tám bước giữ extension và cho phép chạy lại 0001', async () => {
-    await rollbackMigrations(url, 8);
+  it('rollback mười bước giữ extension và cho phép chạy lại 0001', async () => {
+    await rollbackMigrations(url, 10);
     expect(await publicTables()).toEqual([]);
     expect(await vectorInstalled()).toBe(true);
     await runMigrations(url);

@@ -296,6 +296,19 @@ export function describeOutcome(result: ChatbotTestResult): OutcomeView {
   }
 }
 
+/**
+ * Lượt khớp từ khóa "Báo nhân viên, bot VẪN trả lời": chạy thật sẽ báo nhân viên (Chat thử không gửi thật).
+ * Không khớp => null.
+ */
+export function notifiedKeywordNote(
+  result: Pick<ChatbotTestResult, 'notifiedKeyword' | 'decision'>,
+): string | null {
+  const keyword = result.notifiedKeyword?.trim();
+  if (!keyword) return null;
+  const base = `🔔 Chạy thật sẽ báo nhân viên (từ khóa "${keyword}")`;
+  return result.decision === 'reply' ? `${base} — bot vẫn trả lời` : base;
+}
+
 /** 850 => "850 ms"; 1234 => "1,2 giây". */
 export function formatLatency(ms: number): string {
   if (!Number.isFinite(ms) || ms < 0) return '';

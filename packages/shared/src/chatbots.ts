@@ -24,6 +24,11 @@ export const CHATBOT_LIMITS = {
   testImagesMax: 10,
   /** "Chat thử": dung lượng tối đa một ảnh (byte sau khi giải mã base64). */
   testImageMaxBytes: 4 * 1024 * 1024,
+  /** "Khi nhân viên nhắn" = 'pause': số phút bot tạm nghỉ. */
+  agentPauseMinutesMin: 1,
+  agentPauseMinutesMax: 1440,
+  /** Nhắc lại "chưa ai nhận hội thoại": 0 = tắt. */
+  handoffReminderMinMax: 1440,
 } as const;
 
 /** Mặc định khi tạo bot (khớp DEFAULT của bảng chatbots). */
@@ -35,11 +40,48 @@ export const CHATBOT_DEFAULTS = {
   escalateWhenUnsure: true,
   responseSpeed: 'fast',
   handoffActionLark: false,
+  agentReplyMode: 'pause',
+  /** 0 = không nhắc lại "chưa ai nhận hội thoại". */
+  handoffReminderMin: 0,
 } as const;
+
+// ---------- Khi nhân viên vào nhắn tin ----------
+
+/**
+ * Bot làm gì khi nhân viên tự nhắn cho khách (gửi từ hộp thư hoặc echo Business Suite không phải tự động):
+ * - 'continue': bot vẫn trả lời song song với nhân viên (không tạm dừng).
+ * - 'pause'   : bot tạm nghỉ `agentPauseMinutes` phút (null ⇒ AI_PAUSE_AFTER_AGENT_MIN của server, mặc định 30)
+ *               rồi tự trả lời lại — như trước đây.
+ * - 'stop'    : bot dừng hẳn ở hội thoại đó cho tới khi nhân viên bấm "Tiếp tục AI" / bật lại bot.
+ */
+export const AGENT_REPLY_MODES = ['continue', 'pause', 'stop'] as const;
+export type AgentReplyMode = (typeof AGENT_REPLY_MODES)[number];
+export const agentReplyModeSchema = z.enum(AGENT_REPLY_MODES);
+
+/**
+ * agentReplyMode 'stop' ⇒ conversations.ai_paused_until = mốc này ("tạm dừng vô thời hạn"): tái dùng đường
+ * "Tiếp tục AI" (xóa pause) / bật lại bot sẵn có. Web hiện "Bot đã dừng vì nhân viên nhắn" thay cho giờ.
+ */
+export const AI_PAUSED_INDEFINITELY_ISO = '9999-12-31T00:00:00.000Z';
+
+/** aiPausedUntil (ISO) là "dừng hẳn" (năm ≥ 9000) chứ không phải tạm nghỉ có giờ. */
+export function isAiPausedIndefinitely(aiPausedUntil: string | null | undefined): boolean {
+  if (!aiPausedUntil) return false;
+  const t = Date.parse(aiPausedUntil);
+  return Number.isFinite(t) && new Date(t).getUTCFullYear() >= 9000;
+}
+
+export const AGENT_REPLY_MODE_LABELS: Record<AgentReplyMode, string> = {
+  continue: 'Bot vẫn trả lời cùng nhân viên',
+  pause: 'Bot tạm nghỉ một lúc rồi tự trả lời lại',
+  stop: 'Bot dừng hẳn cho tới khi bật lại',
+};
 
 /** Tên mặc định hai nút trên banner "Cần người" khi bot không đặt tên riêng. */
 export const DEFAULT_HANDOFF_ACK_LABEL = 'Nhận xử lý';
 export const DEFAULT_HANDOFF_RESOLVE_LABEL = 'Đã xong, trả lại cho AI';
+/** Chỗ thay tên khách trong handoffAckMessage / handoffResolveMessage (thiếu tên ⇒ "anh/chị"). */
+export const HANDOFF_MESSAGE_CONTACT_PLACEHOLDER = '{ten_khach}';
 
 // ---------- Tốc độ trả lời ----------
 
@@ -93,7 +135,14 @@ export interface ChatbotDto {
   instructions: string;
   knowledge: string;
   examples: ChatbotExampleDto[];
+  /** Từ khóa "Báo nhân viên + DỪNG bot": khớp ⇒ chuyển người thật (pending_human, bot tắt) như trước. */
   handoffKeywords: string[];
+  /**
+   * Từ khóa "Báo nhân viên, bot VẪN trả lời": khớp ⇒ báo nhân viên (tin system trong hội thoại, realtime
+   * handoff.created với botContinues = true, Lark) nhưng KHÔNG chuyển trạng thái, bot vẫn trả lời lượt đó.
+   * Không trùng (sau chuẩn hóa không dấu) với handoffKeywords; trùng thì handoffKeywords thắng.
+   */
+  notifyKeywords: string[];
   /** null = im lặng khi chuyển người. */
   handoffMessage: string | null;
   /** null = dùng GEMINI_MODEL của server. */
@@ -115,6 +164,23 @@ export interface ChatbotDto {
   handoffResolveLabel: string | null;
   /** true = bấm hai nút trên thì gửi thông báo Lark. */
   handoffActionLark: boolean;
+  /**
+   * Tin bot gửi cho khách khi nhân viên bấm nút "nhận" (handoffAckLabel, vd. "Nghiệm thu") / nút "xong"
+   * (handoffResolveLabel, vd. "Đã chuyển tiền"); null = không gửi. Chỉ gửi khi lần bấm thật sự đổi trạng thái
+   * (bấm lại không gửi trùng) và kênh còn gửi được (cửa sổ 24 giờ). `{ten_khach}` ⇒ tên khách
+   * (HANDOFF_MESSAGE_CONTACT_PLACEHOLDER).
+   */
+  handoffAckMessage: string | null;
+  handoffResolveMessage: string | null;
+  /** "Khi nhân viên vào nhắn tin" (xem AGENT_REPLY_MODES). Mặc định 'pause'. */
+  agentReplyMode: AgentReplyMode;
+  /** Số phút tạm nghỉ khi agentReplyMode = 'pause'; null = AI_PAUSE_AFTER_AGENT_MIN của server (30). */
+  agentPauseMinutes: number | null;
+  /**
+   * Nhắc lại "chưa ai nhận hội thoại" (Lark + trong app) sau N phút kể từ khi bot chuyển người mà chưa ai bấm nút
+   * nhận; 0 = tắt (mặc định). Thay cho HANDOFF_ESCALATE_AFTER_MIN của server với hội thoại có bot.
+   */
+  handoffReminderMin: number;
   /** Số hội thoại đang gắn bot này. */
   conversationCount: number;
   createdAt: string;
@@ -159,6 +225,10 @@ const chatbotFields = {
     .array(z.string().trim().min(1).max(CHATBOT_LIMITS.keywordMax))
     .max(CHATBOT_LIMITS.keywordsMax)
     .optional(),
+  notifyKeywords: z
+    .array(z.string().trim().min(1).max(CHATBOT_LIMITS.keywordMax))
+    .max(CHATBOT_LIMITS.keywordsMax)
+    .optional(),
   handoffMessage: z.string().trim().max(CHATBOT_LIMITS.handoffMessageMax).nullable().optional(),
   model: z.string().trim().min(1).max(CHATBOT_LIMITS.modelMax).nullable().optional(),
   temperature: z.number().min(0).max(1).optional(),
@@ -173,6 +243,21 @@ const chatbotFields = {
   handoffAckLabel: z.string().trim().max(CHATBOT_LIMITS.handoffButtonLabelMax).nullable().optional(),
   handoffResolveLabel: z.string().trim().max(CHATBOT_LIMITS.handoffButtonLabelMax).nullable().optional(),
   handoffActionLark: z.boolean().optional(),
+  /** Chuỗi rỗng / null ⇒ không gửi tin khi bấm nút. */
+  handoffAckMessage: z.string().trim().max(CHATBOT_LIMITS.handoffMessageMax).nullable().optional(),
+  handoffResolveMessage: z.string().trim().max(CHATBOT_LIMITS.handoffMessageMax).nullable().optional(),
+  /** Bỏ trống khi tạo ⇒ DB mặc định 'pause'. */
+  agentReplyMode: agentReplyModeSchema.optional(),
+  /** null ⇒ AI_PAUSE_AFTER_AGENT_MIN của server. Chỉ dùng khi agentReplyMode = 'pause' (giữ nguyên khi đổi mode). */
+  agentPauseMinutes: z
+    .number()
+    .int()
+    .min(CHATBOT_LIMITS.agentPauseMinutesMin)
+    .max(CHATBOT_LIMITS.agentPauseMinutesMax)
+    .nullable()
+    .optional(),
+  /** 0 = tắt nhắc lại. Bỏ trống khi tạo ⇒ DB mặc định 0. */
+  handoffReminderMin: z.number().int().min(0).max(CHATBOT_LIMITS.handoffReminderMinMax).optional(),
 };
 
 /** POST /chatbots (admin). Trường bỏ trống dùng mặc định của DB. */
@@ -286,6 +371,11 @@ export interface ChatbotTestResult {
   summary?: string;
   /** Lý do no_reply hoặc thông điệp lỗi (tiếng Việt). */
   reason?: string;
+  /**
+   * Lượt này khớp từ khóa "Báo nhân viên, bot VẪN trả lời" (notifyKeywords) ⇒ chạy thật sẽ báo nhân viên rồi
+   * bot vẫn trả lời (decision là kết quả của bot). Chat thử KHÔNG gửi thông báo thật.
+   */
+  notifiedKeyword?: string;
   latencyMs: number;
   model: string;
   usage?: LlmUsage;

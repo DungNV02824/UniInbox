@@ -53,6 +53,19 @@ describe('buildHandoffLarkCard', () => {
     expect(test.template).toBe('green');
   });
 
+  it('thẻ "bot vẫn trả lời" màu vàng, có ghi chú; nhắc lại vẫn ưu tiên màu cam', () => {
+    const card = buildHandoffLarkCard({ ...input, botContinues: true });
+    expect(card.card.header).toEqual({
+      title: { tag: 'plain_text', content: '🔔 Khách cần nhân viên — bot vẫn đang trả lời' },
+      template: 'yellow',
+    });
+    expect(JSON.stringify(card)).toContain('Bot vẫn tiếp tục trả lời khách');
+    const reminder = buildHandoffLarkCard({ ...input, botContinues: true, reminder: true }).card.header as {
+      template: string;
+    };
+    expect(reminder.template).toBe('orange');
+  });
+
   it('escapeLarkMd', () => {
     expect(escapeLarkMd('a*b_c~[d]<e>&')).toBe('a&#42;b&#95;c&#126;&#91;d&#93;&lt;e&gt;&amp;');
   });

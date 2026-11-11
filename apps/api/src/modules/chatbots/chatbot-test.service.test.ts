@@ -1,3 +1,4 @@
+import type { LlmClient, LlmRequest } from '@dezon/core';
 import type { Db } from '@dezon/db';
 import { HttpException, ServiceUnavailableException } from '@nestjs/common';
 import { describe, expect, it } from 'vitest';
@@ -127,6 +128,71 @@ describe('ChatbotTestService', () => {
     await expect(limited).rejects.toBeInstanceOf(HttpException);
     await expect(limited).rejects.toMatchObject({ status: 429 });
     await expect(service.testDraft('u2', draft, bad)).rejects.toMatchObject({ status: 400 });
+  });
+
+  /** Db giả: select…limit ⇒ [] (getBusinessHours dùng mặc định; testSaved trả `savedRow`). */
+  function fakeDb(rows: unknown[] = []): Db {
+    const chain = { from: () => chain, where: () => chain, limit: async () => rows };
+    return { select: () => chain } as unknown as Db;
+  }
+  const replyLlm = (messages: string[]) => {
+    const requests: LlmRequest[] = [];
+    const llm: LlmClient = {
+      async generate(req) {
+        requests.push(req);
+        return {
+          functionCall: { name: 'reply', args: { messages, confidence: 0.9 } },
+          text: null,
+          usage: { inputTokens: 10, outputTokens: 5 },
+          model: 'gemini-2.5-flash',
+        };
+      },
+    };
+    return { llm, requests };
+  };
+
+  it('bản nháp có notifyKeywords khớp ⇒ notifiedKeyword, bot VẪN trả lời (lời "đã báo nhân viên" không bị đổi)', async () => {
+    const said = ['Dạ em đã báo nhân viên rồi ạ, bên em bảo hành 5 năm.'];
+    const { llm, requests } = replyLlm(said);
+    const service = new ChatbotTestService(fakeDb(), config, llm);
+    const r = await service.testDraft('u-notify', { name: 'Nháp', notifyKeywords: ['bảo hành'] }, [
+      { role: 'customer', text: 'Cho hỏi bảo hành bao lâu?' },
+    ]);
+    expect(requests).toHaveLength(1);
+    expect(r).toMatchObject({ decision: 'reply', messages: said, notifiedKeyword: 'bảo hành' });
+  });
+
+  it('không khớp notifyKeywords ⇒ không có notifiedKeyword; bot đã lưu + draft ghi đè notifyKeywords', async () => {
+    const { llm } = replyLlm(['Dạ']);
+    const service = new ChatbotTestService(fakeDb(), config, llm);
+    const plain = await service.testDraft('u-plain', { name: 'Nháp', notifyKeywords: ['đơn gấp'] }, [
+      { role: 'customer', text: 'Chào' },
+    ]);
+    expect(plain).not.toHaveProperty('notifiedKeyword');
+    const savedRow = {
+      id: 'bot-1',
+      name: 'Bot',
+      instructions: '',
+      knowledge: '',
+      examples: [],
+      handoffKeywords: [],
+      notifyKeywords: ['đơn gấp'],
+      handoffMessage: null,
+      model: null,
+      temperature: 0.3,
+      escalateWhenUnsure: true,
+      responseSpeed: 'fast',
+    };
+    const saved = new ChatbotTestService(fakeDb([savedRow]), config, replyLlm(['Dạ']).llm);
+    const msgs = [{ role: 'customer' as const, text: 'đơn gấp nha' }];
+    await expect(saved.testSaved('u-saved', 'bot-1', { messages: msgs })).resolves.toMatchObject({
+      notifiedKeyword: 'đơn gấp',
+    });
+    const overridden = await saved.testSaved('u-saved', 'bot-1', {
+      messages: msgs,
+      draft: { notifyKeywords: [] },
+    });
+    expect(overridden).not.toHaveProperty('notifiedKeyword');
   });
 });
 

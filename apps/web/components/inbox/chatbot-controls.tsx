@@ -1,10 +1,11 @@
 'use client';
 
 import { AlertTriangle, CheckCircle2, Hand, Loader2, PauseCircle, Play, Siren } from 'lucide-react';
-import type { ConversationSummary } from '@dezon/shared';
+import { isAiPausedIndefinitely, type ConversationSummary } from '@dezon/shared';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/lib/auth';
 import {
+  aiPausedText,
   chatbotControlState,
   chatbotLockedHint,
   chatbotSelectOptions,
@@ -20,7 +21,6 @@ import {
   useResumeAi,
   useSetConversationChatbot,
 } from '@/lib/inbox-ai-queries';
-import { formatClock } from '@/lib/inbox-format';
 import { useNow } from '@/lib/use-now';
 import { cn } from '@/lib/utils';
 
@@ -46,6 +46,8 @@ export function ChatbotSelect({ conversation: c }: { conversation: ConversationS
 
   let title = 'Chưa bật chatbot';
   if (locked) title = chatbotLockedHint(current);
+  else if (on && current && isAiPausedIndefinitely(c.aiPausedUntil))
+    title = `Chatbot "${current.name}" đã dừng vì nhân viên nhắn tin — bấm "Tiếp tục AI" để bot trả lời tiếp`;
   else if (on && current) title = `Chatbot "${current.name}" đang trả lời khách trong hội thoại này`;
   else if (botOff)
     title = `Chatbot "${current.name}" đang tắt cho hội thoại này — bấm "Bật lại" để bot trả lời tiếp`;
@@ -125,7 +127,10 @@ export function ChatbotSelect({ conversation: c }: { conversation: ConversationS
   );
 }
 
-/** Dòng "AI tạm dừng đến HH:mm vì nhân viên vừa nhắn" + nút "Tiếp tục AI". */
+/**
+ * Dòng "AI tạm dừng đến HH:mm[ ngày mai | dd/MM] vì nhân viên vừa nhắn" (hoặc "Bot đã dừng vì nhân viên nhắn tin" khi bot dừng
+ * hẳn) + nút "Tiếp tục AI".
+ */
 function AiPausedNotice({ conversation: c }: { conversation: ConversationSummary }) {
   const now = useNow(30_000);
   const resume = useResumeAi(c.id);
@@ -134,7 +139,7 @@ function AiPausedNotice({ conversation: c }: { conversation: ConversationSummary
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-violet-200 bg-violet-50 px-3 py-1.5 text-xs text-violet-900 sm:px-4">
       <span className="flex min-w-0 items-center gap-1.5">
         <PauseCircle className="size-3.5 shrink-0" aria-hidden />
-        AI tạm dừng đến {formatClock(c.aiPausedUntil!)} vì nhân viên vừa nhắn
+        {aiPausedText(c.aiPausedUntil!, now)}
       </span>
       <Button
         variant="outline"

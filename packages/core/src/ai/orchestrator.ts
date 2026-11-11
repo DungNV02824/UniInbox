@@ -229,8 +229,40 @@ function convertClaimToEscalate(bubbles: string[], confidence: number | undefine
   };
 }
 
-const isClaimingReply = (d: Decided): boolean =>
-  d.decision === 'reply' && claimsHandoffInReply(d.messages ?? []);
+const isClaimingReply = (d: Decided, allowStaffNotified: boolean): boolean =>
+  d.decision === 'reply' && claimsHandoffInReply(d.messages ?? [], { allowStaffNotified });
+
+/**
+ * Lịch sử của lượt có dòng [Hệ thống] "Đã báo nhân viên …" THẬT (loadTurnHistory: tin system của notifyStaffKeyword,
+ * staffNotified) ⇒ nhân viên đã thật sự được báo ở lượt trước: bot nói "em đã báo nhân viên rồi ạ" là đúng sự thật.
+ */
+export function historyHasStaffNotified(history: readonly ChatHistoryItem[]): boolean {
+  return history.some((h) => h.role === 'system' && h.staffNotified === true);
+}
+
+/**
+ * Tên mục ghi vào ai_runs.tool_calls (đứng ĐẦU danh sách) khi tin khách mới khớp từ khóa "Báo nhân viên, bot VẪN
+ * trả lời" (chatbot.notifyKeywords): args.keyword = từ khóa gốc. Lượt vẫn gọi LLM như thường.
+ */
+export const NOTIFY_PREFILTER = 'notify_prefilter';
+
+/**
+ * Từ khóa "Báo nhân viên, bot VẪN trả lời" ĐẦU TIÊN khớp với text một tin khách mới (cùng cách so khớp với
+ * matchHandoffKeyword: không dấu, theo ranh giới từ). Không khớp / không có notifyKeywords ⇒ null.
+ */
+export function matchNotifyKeyword(
+  newMessages: readonly ChatHistoryItem[],
+  notifyKeywords: readonly string[] | undefined,
+): string | null {
+  const keywords = notifyKeywords ?? [];
+  if (keywords.length === 0) return null;
+  for (const msg of newMessages) {
+    if (msg.role !== 'customer' || !msg.text) continue;
+    const keyword = matchHandoffKeyword(msg.text, keywords);
+    if (keyword) return keyword;
+  }
+  return null;
+}
 
 /** Mục toolCalls cho một phản hồi của model (giới hạn kích thước; `llm` = meta cache/thinking nếu client có). */
 function toolCallEntries(response: LlmResponse): unknown[] {
@@ -256,7 +288,14 @@ function toolCallEntries(response: LlmResponse): unknown[] {
  *    keywordHandoffReason(kw) (giảm giá ⇒ discount, khiếu nại ⇒ complaint, chốt đơn ⇒ closing, còn lại
  *    human_request), summary 'Khách nhắn từ khóa chuyển người "<kw>" (<nhãn lý do>)', matchedKeyword, usage 0/0,
  *    latencyMs 0, model = chatbot.model ?? defaultModel, toolCalls [{ name: 'prefilter', args: { keyword,
- *    reason_code } }] } — KHÔNG gọi LLM.
+ *    reason_code } }] } — KHÔNG gọi LLM. Từ khóa chuyển người LUÔN thắng từ khóa báo nhân viên (bước 1b).
+ * 1b. Không khớp từ khóa chuyển người mà một tin khách mới khớp chatbot.notifyKeywords (matchNotifyKeyword) ⇒ nhớ
+ *    từ khóa, VẪN chạy LLM như thường; kết quả (reply / no_reply / escalate / error) mang `notifiedKeyword`,
+ *    toolCalls mở đầu bằng { name: NOTIFY_PREFILTER, args: { keyword } }; prompt có ghi chú "hệ thống ĐÃ báo
+ *    nhân viên" (buildChatbotPrompt notifiedKeyword) và bộ chặn "tự nói đã chuyển" (3b) TẮT ở lượt này — nhân
+ *    viên thật sự được báo nên bot nói "em đã báo nhân viên" là đúng sự thật. Runtime lo việc báo thật. Các lượt
+ *    sau: lịch sử có dòng [Hệ thống] "Đã báo nhân viên …" thật (historyHasStaffNotified) ⇒ bộ chặn 3b bỏ qua RIÊNG
+ *    lời "đã báo (lại) nhân viên" thuần (claimsHandoffInReply allowStaffNotified); lời chuyển khác vẫn bị chặn.
  * 2. buildChatbotPrompt({ ..., now: deps.now() }) rồi llm.generate({ model: chatbot.model ?? defaultModel,
  *    tools: buildChatbotTools(chatbot) (escalateWhenUnsure=false ⇒ escalate không có out_of_scope /
  *    low_confidence), temperature: chatbot.temperature, timeoutMs (+ llmTimeoutExtraMsForImages(images)), thinking:
@@ -296,6 +335,8 @@ export async function runChatbotTurn(
   const model = chatbot.model?.trim() || deps.defaultModel;
   const usage: LlmUsage = { inputTokens: 0, outputTokens: 0 };
   let startedAt = 0;
+  let turnNotified: { notifiedKeyword?: string } = {};
+  let turnNotifyCalls: unknown[] = [];
   const elapsed = () => {
     try {
       return Math.max(0, deps.now().getTime() - startedAt);
@@ -324,6 +365,16 @@ export async function runChatbotTurn(
       }
     }
 
+    // 1b. Từ khóa "Báo nhân viên, bot VẪN trả lời": nhớ lại rồi vẫn gọi LLM.
+    const notifiedKeyword = matchNotifyKeyword(input.newMessages, chatbot.notifyKeywords);
+    const notified = notifiedKeyword ? { notifiedKeyword } : {};
+    const notifyCalls: unknown[] = notifiedKeyword
+      ? [{ name: NOTIFY_PREFILTER, args: { keyword: notifiedKeyword } }]
+      : [];
+    // Phòng hờ ở catch cuối hàm (lỗi bất ngờ sau bước này vẫn giữ notifiedKeyword).
+    turnNotified = notified;
+    turnNotifyCalls = notifyCalls;
+
     // 2. Gọi LLM có retry.
     const now = deps.now();
     startedAt = now.getTime();
@@ -335,6 +386,7 @@ export async function runChatbotTurn(
       businessHours: input.businessHours,
       now,
       images: input.images,
+      ...(notifiedKeyword ? { notifiedKeyword } : {}),
     });
     const sleep = deps.sleep ?? defaultSleep;
     const request: LlmRequest = {
@@ -373,16 +425,17 @@ export async function runChatbotTurn(
     if (!('response' in first)) {
       return {
         ...errorDecision(`Lỗi gọi AI: ${errorMessage(first.error)}`),
+        ...notified,
         usage,
         model,
         latencyMs: elapsed(),
-        toolCalls: [],
+        toolCalls: notifyCalls,
       };
     }
     const response = first.response;
     // Ghi log có giới hạn kích thước (model có thể trả args rất dài). `llm` (khi client có meta) = token lấy từ
     // cache ngầm của Gemini, token suy nghĩ, hedge — để kiểm tra độ trễ trong ai_runs.tool_calls.
-    const toolCalls: unknown[] = toolCallEntries(response);
+    const toolCalls: unknown[] = [...notifyCalls, ...toolCallEntries(response)];
 
     // 3. Quyết định.
     const minConfidence = chatbot.escalateWhenUnsure ? (deps.minConfidence ?? DEFAULT_MIN_CONFIDENCE) : null;
@@ -390,7 +443,10 @@ export async function runChatbotTurn(
     let finalModel = response.model || model;
 
     // 3b. reply tự nói đã chuyển cho người thật mà không gọi escalate ⇒ gọi lại một lần; vẫn vậy ⇒ tự chuyển.
-    if (isClaimingReply(decided)) {
+    // Lượt khớp từ khóa báo nhân viên: nhân viên ĐÃ được báo thật ⇒ không chặn. Lượt sau (lịch sử có dòng [Hệ thống]
+    // "Đã báo nhân viên" thật) ⇒ chỉ bỏ qua lời "đã báo nhân viên" thuần; lời chuyển khác vẫn chặn.
+    const staffNotified = historyHasStaffNotified(input.history);
+    if (!notifiedKeyword && isClaimingReply(decided, staffNotified)) {
       toolCalls.push({ name: HANDOFF_CLAIM_GUARD, args: { action: 'retry' } });
       let claim = decided;
       const second = await call({
@@ -408,10 +464,10 @@ export async function runChatbotTurn(
           args: { action: 'retry_failed', error: truncateAtWord(errorMessage(second.error), 300) },
         });
       }
-      if (retried && isClaimingReply(retried)) claim = retried;
+      if (retried && isClaimingReply(retried, staffNotified)) claim = retried;
       const acceptable =
         retried !== null &&
-        !isClaimingReply(retried) &&
+        !isClaimingReply(retried, staffNotified) &&
         (retried.decision === 'escalate' || retried.decision === 'reply' || retried.decision === 'no_reply');
       if (acceptable) {
         decided = retried!;
@@ -425,6 +481,7 @@ export async function runChatbotTurn(
     }
     return {
       ...decided,
+      ...notified,
       usage,
       model: finalModel,
       latencyMs: elapsed(),
@@ -433,6 +490,13 @@ export async function runChatbotTurn(
   } catch (err) {
     // Phòng hờ (prompt/now lỗi bất ngờ): không bao giờ ném ra ngoài.
     const message = err instanceof Error ? err.message : String(err);
-    return { ...errorDecision(`Lỗi chatbot: ${message}`), usage, model, latencyMs: elapsed(), toolCalls: [] };
+    return {
+      ...errorDecision(`Lỗi chatbot: ${message}`),
+      ...turnNotified,
+      usage,
+      model,
+      latencyMs: elapsed(),
+      toolCalls: turnNotifyCalls,
+    };
   }
 }

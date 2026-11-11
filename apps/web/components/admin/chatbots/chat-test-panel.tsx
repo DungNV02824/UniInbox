@@ -34,6 +34,7 @@ import {
   imageSrc,
   lastTurnImageStats,
   newEntryId,
+  notifiedKeywordNote,
   outcomeMeta,
   tooManyImagesMessage,
   transcriptIsLong,
@@ -75,11 +76,32 @@ const OUTCOME_STYLE = {
   },
 } as const;
 
+/** "🔔 Chạy thật sẽ báo nhân viên (từ khóa "…") — bot vẫn trả lời" (chỉ nhân viên thấy). */
+function NotifiedNote({ result, className }: { result: ChatbotTestResult; className?: string }) {
+  const note = notifiedKeywordNote(result);
+  if (!note) return null;
+  return (
+    <p
+      className={cn(
+        'w-fit max-w-[95%] rounded-md border border-dashed border-amber-300 bg-amber-50/70 px-2 py-1 text-[11px] text-amber-900 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-100',
+        className,
+      )}
+    >
+      {note}
+    </p>
+  );
+}
+
 function OutcomeRow({ result }: { result: ChatbotTestResult }) {
   const view = describeOutcome(result);
   const meta = outcomeMeta(result);
   if (view.tone === 'reply' && !view.title) {
-    return <p className="-mt-1 pr-1 text-right text-[11px] text-muted-foreground">{meta}</p>;
+    return (
+      <div className="-mt-1 flex flex-col items-end gap-1 pr-1">
+        <NotifiedNote result={result} />
+        <p className="text-right text-[11px] text-muted-foreground">{meta}</p>
+      </div>
+    );
   }
   const style = view.tone === 'reply' ? OUTCOME_STYLE.silent : OUTCOME_STYLE[view.tone];
   const Icon = style.icon;
@@ -106,6 +128,7 @@ function OutcomeRow({ result }: { result: ChatbotTestResult }) {
         </div>
       </div>
       {view.note && <p className="max-w-[95%] text-center text-[11px] text-muted-foreground">{view.note}</p>}
+      <NotifiedNote result={result} />
       {meta && <p className="text-[11px] text-muted-foreground">{meta}</p>}
     </div>
   );

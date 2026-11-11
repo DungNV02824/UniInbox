@@ -40,7 +40,7 @@ import { cn } from '@/lib/utils';
 import { UNSAVED_MESSAGE, useUnsavedGuard } from '../use-unsaved-guard';
 import { ChatTestPanel, DraftInvalidError, type RunTest } from './chat-test-panel';
 import { CharCounter, Field } from './fields';
-import { AdvancedTab, HandoffTab } from './tab-behavior';
+import { AdvancedTab, HandoffTab, StaffTab } from './tab-behavior';
 import { ExamplesTab, InstructionsTab, KnowledgeTab } from './tab-content';
 
 const TAB_LABELS: Record<EditorTab, string> = {
@@ -48,6 +48,7 @@ const TAB_LABELS: Record<EditorTab, string> = {
   knowledge: 'Kiến thức',
   examples: 'Câu trả lời mẫu',
   handoff: 'Chuyển người thật',
+  staff: 'Phối hợp nhân viên',
   advanced: 'Nâng cao',
 };
 
@@ -164,7 +165,10 @@ function ChatbotEditor({
 
   const update = useCallback((patch: Partial<ChatbotFormValues>) => {
     setForm((f) => ({ ...f, ...patch }));
-    setErrors((e) => clearErrorsFor(e, Object.keys(patch)));
+    // Sửa danh sách "DỪNG bot" cũng gỡ lỗi trùng từ khóa ở danh sách "bot VẪN trả lời".
+    const keys = Object.keys(patch);
+    if ('handoffKeywords' in patch) keys.push('notifyKeywords');
+    setErrors((e) => clearErrorsFor(e, keys));
     setFormMessage(null);
   }, []);
 
@@ -378,7 +382,10 @@ function ChatbotEditor({
                 onChange={setTab}
                 errorTabs={errorTabs}
                 idPrefix={idPrefix}
-                counts={{ examples: form.examples.length, handoff: form.handoffKeywords.length }}
+                counts={{
+                  examples: form.examples.length,
+                  handoff: form.handoffKeywords.length + form.notifyKeywords.length,
+                }}
               />
             </div>
             <div
@@ -391,6 +398,7 @@ function ChatbotEditor({
               {tab === 'knowledge' && <KnowledgeTab form={form} update={update} errors={errors} />}
               {tab === 'examples' && <ExamplesTab form={form} update={update} errors={errors} />}
               {tab === 'handoff' && <HandoffTab form={form} update={update} errors={errors} />}
+              {tab === 'staff' && <StaffTab form={form} update={update} errors={errors} />}
               {tab === 'advanced' && (
                 <AdvancedTab
                   form={form}

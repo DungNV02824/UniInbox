@@ -63,6 +63,7 @@ function toDto(row: ChatbotRow, conversationCount: number): ChatbotDto {
     knowledge: row.knowledge,
     examples: row.examples,
     handoffKeywords: row.handoffKeywords,
+    notifyKeywords: row.notifyKeywords,
     handoffMessage: row.handoffMessage,
     model: row.model,
     temperature: row.temperature,
@@ -74,6 +75,11 @@ function toDto(row: ChatbotRow, conversationCount: number): ChatbotDto {
     handoffAckLabel: row.handoffAckLabel,
     handoffResolveLabel: row.handoffResolveLabel,
     handoffActionLark: row.handoffActionLark,
+    handoffAckMessage: row.handoffAckMessage,
+    handoffResolveMessage: row.handoffResolveMessage,
+    agentReplyMode: row.agentReplyMode,
+    agentPauseMinutes: row.agentPauseMinutes,
+    handoffReminderMin: row.handoffReminderMin,
     conversationCount,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -94,7 +100,19 @@ function cleanKeywords(keywords: readonly string[]): string[] {
   return out;
 }
 
-/** Chuỗi rỗng sau trim ⇒ null (description / handoffMessage). */
+/**
+ * Một từ khóa không được nằm ở cả "Báo nhân viên + DỪNG bot" (handoffKeywords) lẫn "Báo nhân viên, bot VẪN trả
+ * lời" (notifyKeywords) — so theo dạng không dấu (normalizeForMatch). Trùng ⇒ InboxValidationError (HTTP 400).
+ */
+function assertNoKeywordOverlap(handoffKeywords: readonly string[], notifyKeywords: readonly string[]): void {
+  const handoff = new Set(handoffKeywords.map((kw) => normalizeForMatch(kw)));
+  const dup = notifyKeywords.find((kw) => handoff.has(normalizeForMatch(kw)));
+  if (dup !== undefined) {
+    throw new InboxValidationError(`Từ khóa "${dup}" đang nằm ở cả hai danh sách`);
+  }
+}
+
+/** Chuỗi rỗng sau trim ⇒ null (description / handoffMessage / tên nút / tin khi bấm nút). */
 const nullIfBlank = (v: string | null | undefined) => (v == null || v.trim() === '' ? null : v.trim());
 
 function toSet(input: Partial<CreateChatbotRequest>): ChatbotSet {
@@ -106,6 +124,7 @@ function toSet(input: Partial<CreateChatbotRequest>): ChatbotSet {
   if (input.knowledge !== undefined) set.knowledge = input.knowledge;
   if (input.examples !== undefined) set.examples = input.examples;
   if (input.handoffKeywords !== undefined) set.handoffKeywords = cleanKeywords(input.handoffKeywords);
+  if (input.notifyKeywords !== undefined) set.notifyKeywords = cleanKeywords(input.notifyKeywords);
   if (input.handoffMessage !== undefined) set.handoffMessage = nullIfBlank(input.handoffMessage);
   if (input.model !== undefined) set.model = nullIfBlank(input.model);
   if (input.temperature !== undefined) set.temperature = input.temperature;
@@ -118,6 +137,12 @@ function toSet(input: Partial<CreateChatbotRequest>): ChatbotSet {
   if (input.handoffResolveLabel !== undefined)
     set.handoffResolveLabel = nullIfBlank(input.handoffResolveLabel);
   if (input.handoffActionLark !== undefined) set.handoffActionLark = input.handoffActionLark;
+  if (input.handoffAckMessage !== undefined) set.handoffAckMessage = nullIfBlank(input.handoffAckMessage);
+  if (input.handoffResolveMessage !== undefined)
+    set.handoffResolveMessage = nullIfBlank(input.handoffResolveMessage);
+  if (input.agentReplyMode !== undefined) set.agentReplyMode = input.agentReplyMode;
+  if (input.agentPauseMinutes !== undefined) set.agentPauseMinutes = input.agentPauseMinutes;
+  if (input.handoffReminderMin !== undefined) set.handoffReminderMin = input.handoffReminderMin;
   return set;
 }
 
@@ -159,8 +184,9 @@ export async function getChatbot(db: Db, id: string): Promise<ChatbotDto> {
 }
 
 /**
- * POST /chatbots (admin). Trường thiếu dùng DEFAULT của DB; handoffKeywords trim + bỏ trùng (không dấu);
- * created_by = actorUserId. Trùng tên ⇒ ChatbotNameConflictError. Audit 'chatbot.create'.
+ * POST /chatbots (admin). Trường thiếu dùng DEFAULT của DB; handoffKeywords / notifyKeywords trim + bỏ trùng
+ * (không dấu); từ khóa nằm ở cả hai danh sách ⇒ InboxValidationError. created_by = actorUserId. Trùng tên ⇒
+ * ChatbotNameConflictError. Audit 'chatbot.create'.
  */
 export async function createChatbot(
   db: Db,
@@ -168,6 +194,7 @@ export async function createChatbot(
   input: CreateChatbotRequest,
 ): Promise<ChatbotDto> {
   const set = toSet(input);
+  assertNoKeywordOverlap(set.handoffKeywords ?? [], set.notifyKeywords ?? []);
   const row = await mapConflict(() =>
     db.transaction(async (tx) => {
       const [saved] = await tx
@@ -188,7 +215,11 @@ export async function createChatbot(
   return toDto(row, 0);
 }
 
-/** PATCH /chatbots/:id (admin). Không có ⇒ InboxNotFoundError; trùng tên ⇒ ChatbotNameConflictError. Audit 'chatbot.update'. */
+/**
+ * PATCH /chatbots/:id (admin). Không có ⇒ InboxNotFoundError; trùng tên ⇒ ChatbotNameConflictError. Sửa một
+ * trong hai danh sách từ khóa ⇒ kiểm trùng trên kết quả sau khi gộp (giá trị đang lưu + patch), trùng ⇒
+ * InboxValidationError. Audit 'chatbot.update'.
+ */
 export async function updateChatbot(
   db: Db,
   actorUserId: string,
@@ -198,6 +229,19 @@ export async function updateChatbot(
   const set = toSet(input);
   await mapConflict(() =>
     db.transaction(async (tx) => {
+      if (set.handoffKeywords !== undefined || set.notifyKeywords !== undefined) {
+        // Khóa dòng để hai PATCH song song (mỗi bên sửa một danh sách) không cùng lọt kiểm trùng.
+        const [stored] = await tx
+          .select({ handoffKeywords: chatbots.handoffKeywords, notifyKeywords: chatbots.notifyKeywords })
+          .from(chatbots)
+          .where(eq(chatbots.id, id))
+          .for('update');
+        if (!stored) throw new InboxNotFoundError(CHATBOT_NOT_FOUND);
+        assertNoKeywordOverlap(
+          set.handoffKeywords ?? stored.handoffKeywords,
+          set.notifyKeywords ?? stored.notifyKeywords,
+        );
+      }
       const [saved] = await tx
         .update(chatbots)
         .set({ ...set, updatedAt: new Date() })

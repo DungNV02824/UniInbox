@@ -7,7 +7,9 @@
 // Hai thứ tự đến đều xử lý được (hàng đợi inbound chạy song song nên echo có thể được lưu TRƯỚC tin khách):
 // - echo đến sau tin khách: phân loại ngay khi lưu echo;
 // - echo đến trước: khi lưu tin khách, đánh dấu lại các echo trong cửa sổ và gỡ pause mà echo đó đã đặt
-//   (raw.aiPauseUntil, chỉ khi pause hiện tại vẫn đúng bằng giá trị echo đặt — không có ai kéo dài sau đó).
+//   (raw.aiPauseUntil, chỉ khi pause hiện tại vẫn đúng bằng giá trị echo đặt — không có ai kéo dài sau đó — và
+//   không có tin nhân viên thật nào sau echo). Giá trị có thể là mốc "dừng hẳn" (AI_PAUSED_INDEFINITELY_ISO) khi
+//   bot đặt agent_reply_mode 'stop'; 'continue' không đặt pause nên không có gì để gỡ.
 import { conversations, messages } from '@dezon/db';
 import { and, eq, sql, type SQLWrapper } from 'drizzle-orm';
 import type { DbLike } from '../inbox/read-model';
@@ -97,9 +99,15 @@ export async function reclassifyEchoesAfterCustomer(
         sql`${messages.sentAt} between ${iso(customerSentAt)}::timestamptz and ${iso(to)}::timestamptz`,
       ),
     )
-    .returning({ pauseUntil: sql<string | null>`${messages.raw} ->> ${ECHO_PAUSE_RAW_KEY}::text` });
-  for (const { pauseUntil } of marked) {
+    .returning({
+      pauseUntil: sql<string | null>`${messages.raw} ->> ${ECHO_PAUSE_RAW_KEY}::text`,
+      sentAt: messages.sentAt,
+    });
+  for (const { pauseUntil, sentAt } of marked) {
     if (!pauseUntil) continue;
+    // Gỡ khi pause vẫn đúng bằng giá trị echo đặt VÀ không có tin nhân viên thật nào (không phải echo tự động) từ
+    // lúc echo gửi: mốc "dừng hẳn" (agent_reply_mode 'stop') luôn cùng một giá trị nên so bằng nhau chưa đủ để
+    // biết echo còn "sở hữu" nó — nhân viên khác nhắn sau đó cũng muốn bot dừng.
     await db
       .update(conversations)
       .set({ aiPausedUntil: null })
@@ -107,6 +115,9 @@ export async function reclassifyEchoesAfterCustomer(
         and(
           eq(conversations.id, conversationId),
           sql`${conversations.aiPausedUntil} = ${pauseUntil}::timestamptz`,
+          sql`not exists (select 1 from ${messages} a
+            where a.conversation_id = ${conversationId} and a.sender_type = 'agent'
+              and ${notAutomatedEcho(sql`a.raw`)} and a.sent_at >= ${iso(sentAt)}::timestamptz)`,
         ),
       );
   }

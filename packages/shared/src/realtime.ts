@@ -53,6 +53,11 @@ export interface HandoffCreatedPayload {
   channelName: string;
   /** true = sự kiện nhắc lại (chưa ai "Nhận xử lý"). */
   reminder?: boolean;
+  /**
+   * true = chỉ BÁO nhân viên (khách nhắn từ khóa "Báo nhân viên, bot VẪN trả lời"): hội thoại KHÔNG chuyển sang
+   * Cần người, bot vẫn trả lời. reasonCode khi đó suy từ từ khóa như keywordHandoffReason.
+   */
+  botContinues?: boolean;
 }
 
 /**

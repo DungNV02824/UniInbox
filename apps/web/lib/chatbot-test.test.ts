@@ -6,12 +6,26 @@ import {
   describeOutcome,
   formatLatency,
   HANDOFF_NO_MESSAGE_NOTE,
+  notifiedKeywordNote,
   outcomeMeta,
   transcriptIsLong,
   type TestEntry,
 } from './chatbot-test';
 
 const base: Omit<ChatbotTestResult, 'decision'> = { latencyMs: 1234, model: 'gemini-2.5-flash' };
+
+describe('notifiedKeywordNote', () => {
+  it('khớp từ khóa "bot VẪN trả lời" ⇒ ghi chú báo nhân viên; không khớp ⇒ null', () => {
+    expect(notifiedKeywordNote({ decision: 'reply', notifiedKeyword: 'gửi công trình' })).toBe(
+      '🔔 Chạy thật sẽ báo nhân viên (từ khóa "gửi công trình") — bot vẫn trả lời',
+    );
+    expect(notifiedKeywordNote({ decision: 'no_reply', notifiedKeyword: 'nghiệm thu' })).toBe(
+      '🔔 Chạy thật sẽ báo nhân viên (từ khóa "nghiệm thu")',
+    );
+    expect(notifiedKeywordNote({ decision: 'reply' })).toBeNull();
+    expect(notifiedKeywordNote({ decision: 'reply', notifiedKeyword: '  ' })).toBeNull();
+  });
+});
 
 describe('buildTestMessages', () => {
   it('chỉ lấy tin khách/bot, bỏ dòng trống, trim', () => {

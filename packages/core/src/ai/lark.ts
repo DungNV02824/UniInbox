@@ -11,8 +11,13 @@ export interface HandoffCardInput {
   summary: string;
   /** `${APP_URL}/inbox/<conversationId>` */
   conversationUrl: string;
-  /** Thẻ nhắc lại (chưa ai nhận sau HANDOFF_ESCALATE_AFTER_MIN). */
+  /** Thẻ nhắc lại (chưa ai nhận sau handoffReminderMin phút của bot / HANDOFF_ESCALATE_AFTER_MIN). */
   reminder?: boolean;
+  /**
+   * Thẻ "chỉ báo nhân viên" (khách nhắn từ khóa notifyKeywords): hội thoại KHÔNG chuyển sang Cần người, bot vẫn
+   * trả lời. Header vàng "🔔 Khách cần nhân viên — bot vẫn đang trả lời" + dòng ghi chú.
+   */
+  botContinues?: boolean;
   /** Thẻ thử từ POST /settings/lark/test. */
   test?: boolean;
 }
@@ -44,16 +49,22 @@ function mdField(label: string, value: string, short: boolean) {
   return { is_short: short, text: { tag: 'lark_md', content: `**${label}:**\n${escapeLarkMd(v)}` } };
 }
 
+/** Tiêu đề thẻ Lark khi chỉ báo nhân viên (bot vẫn trả lời). */
+export const LARK_BOT_CONTINUES_TITLE = '🔔 Khách cần nhân viên — bot vẫn đang trả lời';
+
 /**
- * Thẻ Lark: header (đỏ "🔔 Cần người xử lý" / cam "⏰ Nhắc lại: chưa ai nhận" / xanh "Thử kết nối Lark"),
- * các dòng Khách, Kênh, Lý do, Tóm tắt (lark_md, đã escape), nút "Mở hội thoại" (url = conversationUrl).
+ * Thẻ Lark: header (đỏ "🔔 Cần người xử lý" / vàng "🔔 Khách cần nhân viên — bot vẫn đang trả lời" (botContinues) /
+ * cam "⏰ Nhắc lại: chưa ai nhận" / xanh "Thử kết nối Lark"), các dòng Khách, Kênh, Lý do, Tóm tắt (lark_md,
+ * đã escape), nút "Mở hội thoại" (url = conversationUrl).
  */
 export function buildHandoffLarkCard(input: HandoffCardInput): LarkCardMessage {
   const header = input.test
     ? { title: '✅ Thử kết nối Lark — Dezon Inbox', template: 'green' }
     : input.reminder
       ? { title: '⏰ Nhắc lại: chưa ai nhận hội thoại', template: 'orange' }
-      : { title: '🔔 Cần người xử lý', template: 'red' };
+      : input.botContinues
+        ? { title: LARK_BOT_CONTINUES_TITLE, template: 'yellow' }
+        : { title: '🔔 Cần người xử lý', template: 'red' };
   const elements: Record<string, unknown>[] = [
     {
       tag: 'div',
@@ -69,6 +80,16 @@ export function buildHandoffLarkCard(input: HandoffCardInput): LarkCardMessage {
     elements.push({
       tag: 'note',
       elements: [{ tag: 'plain_text', content: 'Đây là thẻ thử — cấu hình Lark đang hoạt động.' }],
+    });
+  } else if (input.botContinues && !input.reminder) {
+    elements.push({
+      tag: 'note',
+      elements: [
+        {
+          tag: 'plain_text',
+          content: 'Bot vẫn tiếp tục trả lời khách — hội thoại không chuyển sang "Cần người".',
+        },
+      ],
     });
   }
   elements.push({

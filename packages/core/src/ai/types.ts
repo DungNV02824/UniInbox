@@ -32,6 +32,11 @@ export interface ChatbotConfig {
    * hợp lệ; thiếu ⇒ CHATBOT_DEFAULTS.responseSpeed ('fast'). toChatbotConfig PHẢI điền (draft ghi đè).
    */
   responseSpeed?: ResponseSpeed;
+  /**
+   * Từ khóa "Báo nhân viên, bot VẪN trả lời" — khớp (và không khớp handoffKeywords) ⇒ orchestrator đặt
+   * ChatbotTurnResult.notifiedKeyword rồi vẫn chạy LLM bình thường. Tùy chọn để fixture cũ hợp lệ (thiếu ⇒ []).
+   */
+  notifyKeywords?: string[];
 }
 
 /** Một tin trong lịch sử/tin mới, đã rút gọn cho prompt. */
@@ -50,6 +55,13 @@ export interface ChatHistoryItem {
    */
   imageRange?: { first: number; last: number };
   sentAt?: Date;
+  /**
+   * Dòng role 'system' là tin "Đã báo nhân viên …" THẬT do notifyStaffKeyword ghi (từ khóa "Báo nhân viên, bot VẪN
+   * trả lời"; loadTurnHistory nhận diện qua messages.raw.notifyStaff). Lượt sau có dòng này ⇒ bot được nói "em đã
+   * báo nhân viên" (quy tắc 7) và bộ chặn "tự nói đã chuyển" bỏ qua đúng lời đó (claimsHandoffInReply
+   * allowStaffNotified).
+   */
+  staffNotified?: boolean;
 }
 
 /**
@@ -101,6 +113,11 @@ export interface ChatbotTurnResult {
   reason?: string;
   /** Từ khóa chuyển người đã khớp (pre-filter, không gọi LLM). */
   matchedKeyword?: string;
+  /**
+   * Từ khóa "Báo nhân viên, bot VẪN trả lời" đã khớp ở lượt này (decision vẫn là kết quả LLM). Runtime báo nhân
+   * viên (tin system + handoff.created botContinues + Lark) đúng một lần; Chat thử chỉ trả về cho giao diện.
+   */
+  notifiedKeyword?: string;
   /** Độ tự tin model báo trong reply (nếu có). */
   confidence?: number;
   usage: LlmUsage;

@@ -18,6 +18,7 @@ export function toChatbotConfig(
     | 'temperature'
     | 'escalateWhenUnsure'
     | 'responseSpeed'
+    | 'notifyKeywords'
   >,
   draft?: Partial<CreateChatbotRequest>,
 ): ChatbotConfig {
@@ -33,5 +34,6 @@ export function toChatbotConfig(
     temperature: draft?.temperature ?? row.temperature,
     escalateWhenUnsure: draft?.escalateWhenUnsure ?? row.escalateWhenUnsure,
     responseSpeed: draft?.responseSpeed ?? row.responseSpeed,
+    notifyKeywords: draft?.notifyKeywords ?? row.notifyKeywords,
   };
 }

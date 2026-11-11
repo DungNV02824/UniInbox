@@ -4,6 +4,7 @@ import { cosineDistance, eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   channelAccounts,
+  chatbots,
   contactIdentities,
   contacts,
   conversations,
@@ -121,6 +122,42 @@ describe('schema constraints', () => {
       db.insert(customerMemories).values({ contactId: contact!.id, summary: 'a'.repeat(1201) }),
     ).rejects.toMatchObject({ cause: { code: '23514' } });
     await db.insert(customerMemories).values({ contactId: contact!.id, summary: 'ả'.repeat(1200) });
+  });
+
+  it('chatbots: notifyKeywords / agentReplyMode / agentPauseMinutes / handoffReminderMin mặc định + CHECK', async () => {
+    const [bot] = await db.insert(chatbots).values({ name: 'Bot dữ liệu 0009' }).returning();
+    expect(bot).toMatchObject({
+      notifyKeywords: [],
+      agentReplyMode: 'pause',
+      agentPauseMinutes: null,
+      handoffReminderMin: 0,
+    });
+    const [upd] = await db
+      .update(chatbots)
+      .set({
+        notifyKeywords: ['bảo hành'],
+        agentReplyMode: 'stop',
+        agentPauseMinutes: 1440,
+        handoffReminderMin: 1440,
+      })
+      .where(eq(chatbots.id, bot!.id))
+      .returning();
+    expect(upd).toMatchObject({
+      notifyKeywords: ['bảo hành'],
+      agentReplyMode: 'stop',
+      agentPauseMinutes: 1440,
+      handoffReminderMin: 1440,
+    });
+    for (const bad of [
+      { agentPauseMinutes: 0 },
+      { handoffReminderMin: 1441 },
+      { agentReplyMode: 'nghi' as 'pause' },
+    ]) {
+      await expect(db.update(chatbots).set(bad).where(eq(chatbots.id, bot!.id))).rejects.toMatchObject({
+        cause: { code: '23514' },
+      });
+    }
+    await db.delete(chatbots).where(eq(chatbots.id, bot!.id));
   });
 
   it('zalo_personal bắt buộc owner_user_id', async () => {

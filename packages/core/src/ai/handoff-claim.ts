@@ -26,7 +26,15 @@ const STAFF_WILL = `${B}${STAFF}(?:\\s+[a-z0-9/]+){0,4}?\\s+(?:se|dang)\\s+(?:so
  * Mẫu lời khẳng định (chuỗi đã bỏ dấu). `subject: true` ⇒ chủ ngữ ngay trước động từ không được là người nhắn
  * ("anh/chị đã chuyển…", "cảm ơn anh đã gửi hồ sơ cho…") và không bị phủ định ("em chưa chuyển được…").
  */
-const CLAIM_PATTERNS: { re: RegExp; subject: boolean; unlessAnywhere?: RegExp }[] = [
+interface ClaimPattern {
+  re: RegExp;
+  subject: boolean;
+  unlessAnywhere?: RegExp;
+  /** Khớp "báo nhân viên" thuần của mẫu này được bỏ qua khi allowStaffNotified (STAFF_NOTIFIED_RE). */
+  notifyTolerant?: boolean;
+}
+
+const CLAIM_PATTERNS: ClaimPattern[] = [
   // "em (đã) chuyển/gửi/báo [≤ 5 từ đệm] cho/sang… nhân viên/bộ phận…"; không từ đệm thì giới từ tùy chọn
   // ("chuyển bộ phận duyệt", "báo người phụ trách"). "Chuyện này bộ phận…" (có từ đệm, không giới từ) không khớp.
   {
@@ -34,6 +42,7 @@ const CLAIM_PATTERNS: { re: RegExp; subject: boolean; unlessAnywhere?: RegExp }[
       `${B}${VERB}(?:${FILLER}{1,5}?\\s+${PREP}|(?:\\s+${PREP})?)\\s+(?:ben\\s+|phia\\s+|cac\\s+)?${STAFF}${E}`,
     ),
     subject: true,
+    notifyTolerant: true,
   },
   // "chuyển hồ sơ", "đã chuyển cho/sang …" (nơi nhận không phải người nhắn), "gửi hồ sơ sang/cho …" (không phải
   // gửi cho em/bên em).
@@ -64,6 +73,13 @@ const CLAIM_PATTERNS: { re: RegExp; subject: boolean; unlessAnywhere?: RegExp }[
       /(?<![a-z0-9])(?:sau khi|khi|neu|thuong|thong thuong|trong vong|trong \d|ngay lam viec|moi ho so|hang ngay|hang tuan)(?![a-z0-9])/,
   },
 ];
+
+/**
+ * Lời "đã báo nhân viên" thuần (động từ báo / báo lại, nơi nhận đúng là "nhân viên") — một khớp của mẫu đầu tiên.
+ * Được bỏ qua khi hệ thống đã THẬT SỰ báo nhân viên (allowStaffNotified); "chuyển/gửi … cho bộ phận …", "nhân viên
+ * sẽ liên hệ" vẫn bị chặn.
+ */
+const STAFF_NOTIFIED_RE = /^bao(?: lai)?(?![a-z0-9]).*(?<![a-z0-9])nhan vien$/;
 
 /** Câu điều kiện / đề nghị: dấu hiệu nằm TRƯỚC lời chuyển ("nếu cần, em chuyển…", "khi đủ ảnh em sẽ chuyển…"). */
 const CONDITIONAL_RE =
@@ -116,16 +132,24 @@ function subjectBlocks(prefix: string): boolean {
   return negated || (i >= 0 && CUSTOMER_SUBJECTS.has(words[i]!));
 }
 
-/** Một câu (đã bỏ dấu) có lời khẳng định chuyển cho người thật không. */
-function sentenceClaims(sentence: string): boolean {
+/**
+ * Một câu (đã bỏ dấu) có lời khẳng định chuyển cho người thật không. Mặc định chỉ xét khớp ĐẦU TIÊN của mỗi mẫu;
+ * allowStaffNotified ⇒ mẫu notifyTolerant xét MỌI khớp và bỏ qua khớp "báo nhân viên" thuần (STAFF_NOTIFIED_RE).
+ */
+function sentenceClaims(sentence: string, allowStaffNotified: boolean): boolean {
   if (sentence.includes('?') || TRAILING_QUESTION_RE.test(sentence)) return false;
-  for (const { re, subject, unlessAnywhere } of CLAIM_PATTERNS) {
-    const m = re.exec(sentence);
-    if (!m || unlessAnywhere?.test(sentence)) continue;
-    const prefix = sentence.slice(0, m.index);
-    if (CONDITIONAL_RE.test(prefix)) continue;
-    if (subject && subjectBlocks(prefix)) continue;
-    return true;
+  for (const { re, subject, unlessAnywhere, notifyTolerant } of CLAIM_PATTERNS) {
+    if (unlessAnywhere?.test(sentence)) continue;
+    const tolerant = allowStaffNotified && notifyTolerant === true;
+    const found = tolerant ? [...sentence.matchAll(new RegExp(re.source, 'g'))] : [re.exec(sentence)];
+    for (const m of found) {
+      if (!m) continue;
+      if (tolerant && STAFF_NOTIFIED_RE.test(m[0])) continue;
+      const prefix = sentence.slice(0, m.index);
+      if (CONDITIONAL_RE.test(prefix)) continue;
+      if (subject && subjectBlocks(prefix)) continue;
+      return true;
+    }
   }
   return false;
 }
@@ -142,23 +166,37 @@ function splitSentences(text: string): string[] {
  * Bong bóng reply có câu KHẲNG ĐỊNH bot đã/đang/sẽ chuyển (gửi hồ sơ, báo) cho nhân viên/bộ phận/người phụ trách,
  * hoặc hứa "nhân viên sẽ liên hệ", "bộ phận … sẽ duyệt" không. Bỏ qua câu hỏi ('?' hoặc kết thúc bằng "không/chưa ạ"),
  * câu điều kiện/đề nghị (nếu/khi/muốn… đứng trước), phủ định (chưa/không chuyển) và câu có chủ ngữ là người nhắn.
+ * `allowStaffNotified` ⇒ bỏ qua lời "đã báo nhân viên" thuần (xem HandoffClaimOptions).
  */
-export function claimsHandoffInReply(messages: readonly string[]): boolean {
+export function claimsHandoffInReply(
+  messages: readonly string[],
+  options: HandoffClaimOptions = {},
+): boolean {
+  const allow = options.allowStaffNotified === true;
   return messages.some((bubble) =>
     splitSentences(bubble).some((sentence) =>
       // Mỗi mệnh đề sau dấu phẩy/chấm phẩy xét riêng (chủ ngữ/điều kiện của mệnh đề trước không áp sang).
       // Riêng dấu hiệu điều kiện ở mệnh đề trước ("Nếu anh/chị cần, em chuyển…") vẫn áp: xét cả câu trước.
-      sentenceClaimsWithClauses(normalizeForMatch(sentence)),
+      sentenceClaimsWithClauses(normalizeForMatch(sentence), allow),
     ),
   );
 }
 
-function sentenceClaimsWithClauses(sentence: string): boolean {
+export interface HandoffClaimOptions {
+  /**
+   * Hệ thống ĐÃ báo nhân viên thật (dòng [Hệ thống] "Đã báo nhân viên …" trong lịch sử gần đây — từ khóa "Báo nhân
+   * viên, bot VẪN trả lời") ⇒ lời "em đã báo (lại) nhân viên" là đúng sự thật, không tính là tự nói đã chuyển. Các
+   * lời chuyển khác ("đã chuyển hồ sơ cho bộ phận duyệt", "nhân viên sẽ liên hệ") vẫn bị chặn.
+   */
+  allowStaffNotified?: boolean;
+}
+
+function sentenceClaimsWithClauses(sentence: string, allowStaffNotified: boolean): boolean {
   if (sentence.includes('?') || TRAILING_QUESTION_RE.test(sentence)) return false;
   const clauses = sentence.split(/\s*[,;:]\s*/);
   let conditionalBefore = false;
   for (const clause of clauses) {
-    if (!conditionalBefore && sentenceClaims(clause)) return true;
+    if (!conditionalBefore && sentenceClaims(clause, allowStaffNotified)) return true;
     if (CONDITIONAL_RE.test(clause)) conditionalBefore = true;
   }
   return false;

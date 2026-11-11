@@ -1,6 +1,6 @@
 import Link from 'next/link';
 import { PauseCircle, TriangleAlert, UserRound } from 'lucide-react';
-import type { ConversationSummary } from '@dezon/shared';
+import { isAiPausedIndefinitely, type ConversationSummary } from '@dezon/shared';
 import { Avatar } from '@/components/ui/avatar';
 import { contactTagsOf } from '@/lib/contact-tags';
 import { conversationAiState, handoffReasonLabel } from '@/lib/inbox-ai';
@@ -106,7 +106,9 @@ export function ConversationRow({
               )}
               title={
                 aiState === 'paused'
-                  ? `Chatbot ${c.chatbot.name} · tạm dừng vì nhân viên vừa nhắn`
+                  ? isAiPausedIndefinitely(c.aiPausedUntil)
+                    ? `Chatbot ${c.chatbot.name} · đã dừng vì nhân viên nhắn tin`
+                    : `Chatbot ${c.chatbot.name} · tạm dừng vì nhân viên vừa nhắn`
                   : aiState === 'active'
                     ? `Chatbot ${c.chatbot.name} đang trả lời`
                     : `Chatbot ${c.chatbot.name} · đang tắt cho hội thoại này`

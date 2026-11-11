@@ -14,11 +14,15 @@ import {
   isFastReplySetup,
   slowReplyWarning,
   isFormDirty,
+  keywordOverlap,
   moveItem,
   NAME_CONFLICT_MESSAGE,
+  normalizeAgentReplyMode,
   normalizeResponseSpeed,
+  overlapMessage,
   tabsWithErrors,
   templateNeedsConfirm,
+  toggleHandoffReminder,
   usageText,
   validateChatbotForm,
   type ChatbotFormValues,
@@ -33,12 +37,18 @@ const dto: ChatbotDto = {
   knowledge: 'Giá thiết kế: 150.000đ/m2',
   examples: [{ customer: 'Giá bao nhiêu?', reply: 'Dạ 150.000đ/m2 ạ.' }],
   handoffKeywords: ['giảm giá'],
+  notifyKeywords: ['gửi công trình'],
   handoffMessage: null,
   escalateWhenUnsure: false,
   responseSpeed: 'fast',
   handoffAckLabel: null,
   handoffResolveLabel: null,
   handoffActionLark: false,
+  handoffAckMessage: null,
+  handoffResolveMessage: null,
+  agentReplyMode: 'pause',
+  agentPauseMinutes: null,
+  handoffReminderMin: 0,
   model: null,
   temperature: 0.4,
   replyDelaySec: 10,
@@ -67,12 +77,18 @@ describe('chatbotToForm / formToRequest', () => {
       knowledge: 'Giá thiết kế: 150.000đ/m2',
       examples: [{ customer: 'Giá bao nhiêu?', reply: 'Dạ 150.000đ/m2 ạ.' }],
       handoffKeywords: ['giảm giá'],
+      notifyKeywords: ['gửi công trình'],
       handoffMessage: null,
       escalateWhenUnsure: false,
       handoffAckLabel: null,
       handoffResolveLabel: null,
       handoffActionLark: false,
+      handoffAckMessage: null,
+      handoffResolveMessage: null,
       responseSpeed: 'fast',
+      agentReplyMode: 'pause',
+      agentPauseMinutes: null,
+      handoffReminderMin: 0,
       model: null,
       temperature: 0.4,
       replyDelaySec: 10,
@@ -208,6 +224,158 @@ describe('chatbotToForm / formToRequest', () => {
       'Đang đặt 2 giây: khách sẽ chờ khoảng 4 giây trở lên mới thấy bot trả lời.',
     );
     expect(slowReplyWarning({ replyDelaySec: '10' })).toMatch(/khoảng 12 giây/);
+  });
+});
+
+describe('từ khóa "bot VẪN trả lời" + phối hợp nhân viên', () => {
+  it('form mới: không từ khóa báo, khi nhân viên nhắn = tạm nghỉ (mặc định hệ thống), tắt nhắc lại', () => {
+    const f = emptyChatbotForm();
+    expect(f.notifyKeywords).toEqual([]);
+    expect(f.agentReplyMode).toBe('pause');
+    expect(f.agentPauseMinutes).toBe('');
+    expect(f.handoffReminderEnabled).toBe(false);
+    expect(formToRequest(f)).toMatchObject({
+      notifyKeywords: [],
+      agentReplyMode: 'pause',
+      agentPauseMinutes: null,
+      handoffReminderMin: 0,
+    });
+  });
+
+  it('DTO → form → body giữ 4 trường mới (gồm bản nháp chat thử)', () => {
+    const custom: ChatbotDto = {
+      ...dto,
+      notifyKeywords: ['nghiệm thu', 'gửi công trình'],
+      agentReplyMode: 'pause',
+      agentPauseMinutes: 45,
+      handoffReminderMin: 20,
+    };
+    const f = chatbotToForm(custom);
+    expect(f).toMatchObject({
+      notifyKeywords: ['nghiệm thu', 'gửi công trình'],
+      agentPauseMinutes: '45',
+      handoffReminderEnabled: true,
+      handoffReminderMin: '20',
+    });
+    const res = validateChatbotForm(f);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.data).toMatchObject({
+      notifyKeywords: ['nghiệm thu', 'gửi công trình'],
+      agentReplyMode: 'pause',
+      agentPauseMinutes: 45,
+      handoffReminderMin: 20,
+    });
+    expect(duplicateRequest(custom, [])).toMatchObject({
+      notifyKeywords: ['nghiệm thu', 'gửi công trình'],
+      agentPauseMinutes: 45,
+      handoffReminderMin: 20,
+    });
+    expect(chatbotToForm({ ...custom, agentReplyMode: 'stop' }).agentReplyMode).toBe('stop');
+  });
+
+  it('API cũ thiếu trường ⇒ mặc định (không từ khóa báo, pause, tắt nhắc lại)', () => {
+    const legacy = { ...dto } as Partial<ChatbotDto>;
+    delete legacy.notifyKeywords;
+    delete legacy.agentReplyMode;
+    delete legacy.agentPauseMinutes;
+    delete legacy.handoffReminderMin;
+    const f = chatbotToForm(legacy as ChatbotDto);
+    expect(f.notifyKeywords).toEqual([]);
+    expect(f.agentReplyMode).toBe('pause');
+    expect(f.agentPauseMinutes).toBe('');
+    expect(f.handoffReminderEnabled).toBe(false);
+    expect(normalizeAgentReplyMode('xyz')).toBe('pause');
+  });
+
+  it('từ khóa nằm ở cả hai danh sách (so không dấu, đ→d) ⇒ lỗi tiếng Việt ở tab Chuyển người', () => {
+    expect(keywordOverlap(['Đổi trả', 'giảm giá'], ['doi tra', 'nghiệm thu', 'GIAM GIA'])).toEqual([
+      'doi tra',
+      'GIAM GIA',
+    ]);
+    const res = validateChatbotForm(
+      form({ handoffKeywords: ['Nghiệm thu'], notifyKeywords: ['x', 'nghiem thu'] }),
+    );
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.errors.notifyKeywords).toBe(overlapMessage(['nghiem thu']));
+    expect(res.errors.notifyKeywords).toMatch(/“nghiem thu” đã có ở danh sách “Báo nhân viên \+ DỪNG bot”/);
+    expect(res.errors['notifyKeywords.1']).toBeDefined();
+    expect(res.errors['notifyKeywords.0']).toBeUndefined();
+    expect(tabsWithErrors(res.errors)).toEqual(new Set(['handoff']));
+    expect(overlapMessage(['a', 'b'])).toMatch(/^Các từ khóa “a”, “b”/);
+  });
+
+  it('thời gian tạm nghỉ: trống = null, 1–1440, ô ẩn (không phải pause) không chặn lưu', () => {
+    expect(formToRequest(form({ agentPauseMinutes: ' ' })).agentPauseMinutes).toBeNull();
+    expect(validateChatbotForm(form({ agentPauseMinutes: '1440' })).ok).toBe(true);
+    for (const bad of ['0', '1441', '2.5', 'abc']) {
+      const res = validateChatbotForm(form({ agentPauseMinutes: bad }));
+      expect(!res.ok && res.errors.agentPauseMinutes).toMatch(/1 đến 1\.440 phút/);
+      if (!res.ok) expect(tabsWithErrors(res.errors)).toEqual(new Set(['staff']));
+    }
+    // Đổi sang 'stop' mà ô (đang ẩn) còn số sai ⇒ gửi null thay vì báo lỗi ô ẩn; số hợp lệ thì giữ.
+    const hidden = validateChatbotForm(form({ agentReplyMode: 'stop', agentPauseMinutes: '0' }));
+    expect(hidden.ok && hidden.data.agentPauseMinutes).toBeNull();
+    expect(
+      formToRequest(form({ agentReplyMode: 'continue', agentPauseMinutes: '10' })).agentPauseMinutes,
+    ).toBe(10);
+  });
+
+  it('nhắc lại chưa ai nhận: tắt = 0; bật điền sẵn 15; bật phải 1–1440', () => {
+    expect(toggleHandoffReminder({ handoffReminderMin: '' }, true)).toEqual({
+      handoffReminderEnabled: true,
+      handoffReminderMin: '15',
+    });
+    expect(toggleHandoffReminder({ handoffReminderMin: '40' }, true).handoffReminderMin).toBe('40');
+    expect(toggleHandoffReminder({ handoffReminderMin: '40' }, false).handoffReminderEnabled).toBe(false);
+
+    const on = form({ handoffReminderEnabled: true, handoffReminderMin: '15' });
+    expect(formToRequest(on).handoffReminderMin).toBe(15);
+    expect(formToRequest({ ...on, handoffReminderEnabled: false }).handoffReminderMin).toBe(0);
+    for (const bad of ['0', '', '1441', '1,5']) {
+      const res = validateChatbotForm({ ...on, handoffReminderMin: bad });
+      expect(!res.ok && res.errors.handoffReminderMin).toBe('Nhập số nguyên từ 1 đến 1.440 phút');
+    }
+    // Tắt thì số phút (không gửi đi) không chặn lưu.
+    expect(validateChatbotForm({ ...on, handoffReminderEnabled: false, handoffReminderMin: 'abc' }).ok).toBe(
+      true,
+    );
+  });
+
+  it('isFormDirty nhận ra 4 trường mới; số phút nhắc lại khi đang tắt không tính', () => {
+    const base = chatbotToForm(dto);
+    expect(isFormDirty({ ...base, notifyKeywords: [] }, base)).toBe(true);
+    expect(isFormDirty({ ...base, agentReplyMode: 'continue' }, base)).toBe(true);
+    expect(isFormDirty({ ...base, agentPauseMinutes: '10' }, base)).toBe(true);
+    expect(isFormDirty({ ...base, ...toggleHandoffReminder(base, true) }, base)).toBe(true);
+    expect(isFormDirty({ ...base, handoffReminderMin: '99' }, base)).toBe(false);
+  });
+
+  it('tin gửi khách khi bấm nút: rỗng ⇔ null, trim, giới hạn ký tự, đi qua form ↔ body', () => {
+    const empty = emptyChatbotForm();
+    expect(empty.handoffAckMessage).toBe('');
+    expect(formToRequest(empty)).toMatchObject({ handoffAckMessage: null, handoffResolveMessage: null });
+    const custom: ChatbotDto = {
+      ...dto,
+      handoffAckMessage: 'Công trình của {ten_khach} đã được nghiệm thu ạ.',
+      handoffResolveMessage: 'Dezon đã chuyển tiền cho {ten_khach} ạ.',
+    };
+    const f = chatbotToForm(custom);
+    expect(f.handoffAckMessage).toBe('Công trình của {ten_khach} đã được nghiệm thu ạ.');
+    expect(formToRequest({ ...f, handoffResolveMessage: '   ' })).toMatchObject({
+      handoffAckMessage: 'Công trình của {ten_khach} đã được nghiệm thu ạ.',
+      handoffResolveMessage: null,
+    });
+    expect(formToRequest({ ...f, handoffAckMessage: '  Xong ạ  ' }).handoffAckMessage).toBe('Xong ạ');
+    expect(duplicateRequest(custom, [])).toMatchObject({
+      handoffAckMessage: custom.handoffAckMessage,
+      handoffResolveMessage: custom.handoffResolveMessage,
+    });
+    expect(isFormDirty({ ...f, handoffAckMessage: '' }, chatbotToForm(custom))).toBe(true);
+    const bad = validateChatbotForm(form({ handoffResolveMessage: 'x'.repeat(1001) }));
+    expect(!bad.ok && bad.errors.handoffResolveMessage).toBe('Tin gửi khách tối đa 1.000 ký tự');
+    if (!bad.ok) expect(tabsWithErrors(bad.errors)).toEqual(new Set(['handoff']));
   });
 });
 

@@ -3,7 +3,7 @@
 import { chatbots, conversations, handoffs, type ChannelAccount, type Chatbot } from '@dezon/db';
 import { and, eq, isNull } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { escalateConversation } from '../src/ai/escalate';
+import { escalateConversation, processHandoffReminderJob } from '../src/ai/escalate';
 import { deleteChatbot, needsChatbotKick, setConversationChatbot } from '../src/ai/service';
 import { updateConversation } from '../src/inbox/commands';
 import { createAiKit } from './helpers/ai-fakes';
@@ -234,5 +234,81 @@ describe('xóa bot', () => {
     });
     const res = await deleteChatbot(t.db, t.admin.id, bot.id);
     expect(res.detachedConversationIds).toEqual([recent.id, mid.id, old.id]);
+  });
+});
+
+describe('nhắc lại "chưa ai nhận hội thoại" theo từng bot (handoffReminderMin)', () => {
+  const escalate = (kit: ReturnType<typeof createAiKit>, conversationId: string) =>
+    escalateConversation(t.db, kit.deps, conversationId, {
+      reasonCode: 'human_request',
+      summary: 'Khách muốn gặp nhân viên',
+      createdBy: 'ai',
+    });
+
+  it('bot để 0 (mặc định) ⇒ không lên lịch nhắc dù env > 0; job đã xếp sẵn cũng không nhắc', async () => {
+    const bot = await createBot();
+    expect(bot.handoffReminderMin).toBe(0);
+    const conv = await createConversation(t.db, { channel, chatbotId: bot.id, aiMode: 'auto' });
+    const kit = createAiKit(ctx);
+    expect(kit.deps.config.handoffReminderMin).toBe(15);
+    const res = await escalate(kit, conv.id);
+    expect(res.created).toBe(true);
+    expect(kit.scheduler.reminders).toEqual([]);
+
+    const before = kit.lark.calls.length;
+    expect(
+      await processHandoffReminderJob(t.db, kit.deps, { conversationId: conv.id, handoffId: res.handoffId }),
+    ).toBe(false);
+    expect(kit.lark.calls).toHaveLength(before);
+  });
+
+  it('bot > 0 ⇒ lên lịch theo số phút của bot; tắt (0) trước giờ nhắc ⇒ job không nhắc', async () => {
+    const bot = await createBot({ handoffReminderMin: 20 });
+    const conv = await createConversation(t.db, { channel, chatbotId: bot.id, aiMode: 'auto' });
+    const kit = createAiKit(ctx);
+    const res = await escalate(kit, conv.id);
+    expect(kit.scheduler.reminders).toEqual([
+      { data: { conversationId: conv.id, handoffId: res.handoffId }, delayMs: 20 * MIN },
+    ]);
+    const data = { conversationId: conv.id, handoffId: res.handoffId };
+
+    expect(await processHandoffReminderJob(t.db, kit.deps, data)).toBe(true);
+    expect(kit.lark.calls).toHaveLength(2);
+    const reminder = kit.publisher.events.filter((e) => e.event === 'handoff.created').at(-1)!;
+    expect(reminder.payload).toMatchObject({ conversationId: conv.id, reminder: true });
+
+    await t.db.update(chatbots).set({ handoffReminderMin: 0 }).where(eq(chatbots.id, bot.id));
+    expect(await processHandoffReminderJob(t.db, kit.deps, data)).toBe(false);
+    expect(kit.lark.calls).toHaveLength(2);
+  });
+
+  it('hội thoại không có bot ⇒ dùng env (HANDOFF_ESCALATE_AFTER_MIN); env 0 ⇒ không nhắc', async () => {
+    const conv = await createConversation(t.db, { channel });
+    const kit = createAiKit(ctx);
+    const res = await escalateConversation(t.db, kit.deps, conv.id, {
+      reasonCode: 'other',
+      summary: 'Nhân viên chuyển tay',
+      createdBy: 'user',
+      createdByUserId: t.agent.id,
+    });
+    expect(kit.scheduler.reminders).toEqual([
+      { data: { conversationId: conv.id, handoffId: res.handoffId }, delayMs: 15 * MIN },
+    ]);
+    const data = { conversationId: conv.id, handoffId: res.handoffId };
+    expect(await processHandoffReminderJob(t.db, kit.deps, data)).toBe(true);
+
+    const off = createAiKit(ctx);
+    off.deps.config.handoffReminderMin = 0;
+    expect(await processHandoffReminderJob(t.db, off.deps, data)).toBe(false);
+    expect(off.lark.calls).toHaveLength(0);
+
+    const conv2 = await createConversation(t.db, { channel });
+    await escalateConversation(t.db, off.deps, conv2.id, {
+      reasonCode: 'other',
+      summary: 'x',
+      createdBy: 'user',
+      createdByUserId: t.agent.id,
+    });
+    expect(off.scheduler.reminders).toEqual([]);
   });
 });

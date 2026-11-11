@@ -1,7 +1,10 @@
+import { AI_PAUSED_INDEFINITELY_ISO } from '@dezon/shared';
 import { describe, expect, it } from 'vitest';
 import { conv, msg } from './__fixtures__/inbox';
 import {
   AI_RUN_DECISION_LABELS,
+  AI_STOPPED_BY_AGENT_TEXT,
+  aiPausedText,
   CHATBOT_LOCKED_HINT,
   botSenderLabel,
   chatbotControlState,
@@ -38,6 +41,57 @@ describe('trạng thái AI của hội thoại', () => {
     expect(isAiPaused(conv({ aiPausedUntil: null }), NOW)).toBe(false);
     expect(isAiPaused(conv(), NOW)).toBe(false);
     expect(isAiPaused(conv({ aiPausedUntil: 'không phải ngày' }), NOW)).toBe(false);
+    // Bot "dừng hẳn" (agentReplyMode 'stop') vẫn là tạm dừng ⇒ hiện dòng báo + "Tiếp tục AI".
+    expect(isAiPaused(conv({ aiPausedUntil: AI_PAUSED_INDEFINITELY_ISO }), NOW)).toBe(true);
+  });
+
+  it('aiPausedText: dừng hẳn ⇒ "Bot đã dừng vì nhân viên nhắn tin", có giờ ⇒ "AI tạm dừng đến HH:mm"', () => {
+    expect(aiPausedText(AI_PAUSED_INDEFINITELY_ISO)).toBe(AI_STOPPED_BY_AGENT_TEXT);
+    expect(AI_STOPPED_BY_AGENT_TEXT).toBe('Bot đã dừng vì nhân viên nhắn tin');
+    expect(aiPausedText('2026-11-09T08:30:00.000Z', NOW)).toMatch(
+      /^AI tạm dừng đến \d{2}:\d{2} vì nhân viên vừa nhắn$/,
+    );
+    expect(
+      conversationAiState(
+        conv({ chatbot: BOT, aiMode: 'auto', aiPausedUntil: AI_PAUSED_INDEFINITELY_ISO }),
+        NOW,
+      ),
+    ).toBe('paused');
+  });
+
+  describe('aiPausedText: thêm ngày khi mốc hết tạm dừng không phải hôm nay (giờ địa phương)', () => {
+    // Dựng mốc theo giờ địa phương để test không phụ thuộc múi giờ máy chạy.
+    const now = new Date(2026, 10, 9, 22, 0);
+    const at = (d: number, h: number, m: number, month = 10, year = 2026) =>
+      new Date(year, month, d, h, m).toISOString();
+
+    it('hôm nay ⇒ chỉ HH:mm', () => {
+      expect(aiPausedText(at(9, 23, 30), now)).toBe('AI tạm dừng đến 23:30 vì nhân viên vừa nhắn');
+      expect(aiPausedText(at(9, 23, 30), now.getTime())).toBe('AI tạm dừng đến 23:30 vì nhân viên vừa nhắn');
+    });
+
+    it('ngày mai ⇒ "HH:mm ngày mai" (vd. tạm dừng 1440 phút)', () => {
+      expect(aiPausedText(at(10, 22, 0), now)).toBe('AI tạm dừng đến 22:00 ngày mai vì nhân viên vừa nhắn');
+      expect(aiPausedText(at(10, 0, 5), now)).toBe('AI tạm dừng đến 00:05 ngày mai vì nhân viên vừa nhắn');
+      // Qua tháng / qua năm vẫn là "ngày mai".
+      expect(aiPausedText(at(1, 8, 0, 11), new Date(2026, 10, 30, 20, 0))).toBe(
+        'AI tạm dừng đến 08:00 ngày mai vì nhân viên vừa nhắn',
+      );
+      expect(aiPausedText(at(1, 8, 0, 0, 2027), new Date(2026, 11, 31, 20, 0))).toBe(
+        'AI tạm dừng đến 08:00 ngày mai vì nhân viên vừa nhắn',
+      );
+    });
+
+    it('ngày sau đó ⇒ "HH:mm dd/MM" (khác năm ⇒ dd/MM/yyyy)', () => {
+      expect(aiPausedText(at(11, 9, 15), now)).toBe('AI tạm dừng đến 09:15 11/11 vì nhân viên vừa nhắn');
+      expect(aiPausedText(at(2, 9, 15, 0, 2027), now)).toBe(
+        'AI tạm dừng đến 09:15 02/01/2027 vì nhân viên vừa nhắn',
+      );
+    });
+
+    it('dừng hẳn ⇒ "Bot đã dừng vì nhân viên nhắn tin" bất kể now', () => {
+      expect(aiPausedText(AI_PAUSED_INDEFINITELY_ISO, now)).toBe('Bot đã dừng vì nhân viên nhắn tin');
+    });
   });
 
   it('conversationAiState: handoff > none > paused > active', () => {

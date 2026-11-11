@@ -24,10 +24,12 @@ import {
   type ChannelAccountDto,
   type ChatbotDto,
   type ChatbotSummary,
+  CHATBOT_DEFAULTS,
   CHATBOT_LIMITS,
   type ChatbotTestResult,
   type ConversationSummary,
   DEFAULT_BUSINESS_HOURS,
+  HANDOFF_MESSAGE_CONTACT_PLACEHOLDER,
   type LarkSettingsDto,
   type LoginResponse,
   REALTIME_EVENTS,
@@ -328,6 +330,166 @@ describe('CRUD chatbot', () => {
     expect((await asAdmin('PATCH', `/chatbots/${slow.id}`, { responseSpeed: 'turbo' })).statusCode).toBe(400);
     expect((await asAdmin('POST', '/chatbots', { name: 'Bot lạ', responseSpeed: 'turbo' })).statusCode).toBe(
       400,
+    );
+  });
+
+  it('notifyKeywords / agentReplyMode / agentPauseMinutes / handoffReminderMin: mặc định, tạo, sửa, đọc lại', async () => {
+    const plain = await createBot({ name: 'Bot cài đặt mặc định' });
+    expect(plain).toMatchObject({
+      notifyKeywords: [],
+      agentReplyMode: CHATBOT_DEFAULTS.agentReplyMode,
+      agentPauseMinutes: null,
+      handoffReminderMin: CHATBOT_DEFAULTS.handoffReminderMin,
+    });
+    expect(plain.agentReplyMode).toBe('pause');
+    expect(plain.handoffReminderMin).toBe(0);
+
+    // Trim + bỏ trùng theo dạng không dấu (giữ bản viết đầu tiên) như handoffKeywords.
+    const bot = await createBot({
+      name: 'Bot báo nhân viên',
+      handoffKeywords: ['gặp quản lý'],
+      notifyKeywords: ['  bảo hành ', 'BAO HANH', 'đổi trả'],
+      agentReplyMode: 'continue',
+      agentPauseMinutes: 15,
+      handoffReminderMin: 10,
+    });
+    expect(bot).toMatchObject({
+      handoffKeywords: ['gặp quản lý'],
+      notifyKeywords: ['bảo hành', 'đổi trả'],
+      agentReplyMode: 'continue',
+      agentPauseMinutes: 15,
+      handoffReminderMin: 10,
+    });
+
+    const patched = await asAdmin('PATCH', `/chatbots/${bot.id}`, {
+      notifyKeywords: ['giao hàng'],
+      agentReplyMode: 'stop',
+      agentPauseMinutes: null,
+      handoffReminderMin: 0,
+    });
+    expect(patched.statusCode).toBe(200);
+    const expected = {
+      handoffKeywords: ['gặp quản lý'],
+      notifyKeywords: ['giao hàng'],
+      agentReplyMode: 'stop',
+      agentPauseMinutes: null,
+      handoffReminderMin: 0,
+    };
+    expect(patched.json<ChatbotDto>()).toMatchObject(expected);
+    expect((await asAdmin('GET', `/chatbots/${bot.id}`)).json<ChatbotDto>()).toMatchObject(expected);
+
+    // PATCH trường khác giữ nguyên các cài đặt mới.
+    const other = await asAdmin('PATCH', `/chatbots/${bot.id}`, {
+      agentPauseMinutes: CHATBOT_LIMITS.agentPauseMinutesMax,
+    });
+    expect(other.json<ChatbotDto>()).toMatchObject({ ...expected, agentPauseMinutes: 1440 });
+  });
+
+  it('cài đặt mới: giá trị ngoài khoảng / lạ => 400', async () => {
+    const bot = await createBot({ name: 'Bot kiểm giới hạn' });
+    const BAD: Record<string, unknown>[] = [
+      { agentReplyMode: 'nghi' },
+      { agentPauseMinutes: 0 },
+      { agentPauseMinutes: CHATBOT_LIMITS.agentPauseMinutesMax + 1 },
+      { agentPauseMinutes: 1.5 },
+      { handoffReminderMin: -1 },
+      { handoffReminderMin: CHATBOT_LIMITS.handoffReminderMinMax + 1 },
+      { notifyKeywords: [''] },
+      { notifyKeywords: ['x'.repeat(CHATBOT_LIMITS.keywordMax + 1)] },
+      { handoffAckMessage: 'x'.repeat(CHATBOT_LIMITS.handoffMessageMax + 1) },
+      { handoffResolveMessage: 123 },
+    ];
+    for (const payload of BAD) {
+      const patched = await asAdmin('PATCH', `/chatbots/${bot.id}`, payload);
+      expect(patched.statusCode, JSON.stringify(payload)).toBe(400);
+      const created = await asAdmin('POST', '/chatbots', { name: 'Bot sai giới hạn', ...payload });
+      expect(created.statusCode, JSON.stringify(payload)).toBe(400);
+    }
+    // Không có gì bị ghi.
+    expect((await asAdmin('GET', `/chatbots/${bot.id}`)).json<ChatbotDto>()).toMatchObject({
+      agentReplyMode: 'pause',
+      agentPauseMinutes: null,
+      handoffReminderMin: 0,
+      notifyKeywords: [],
+      handoffAckMessage: null,
+      handoffResolveMessage: null,
+    });
+  });
+
+  it('tin gửi khách khi bấm nút Cần người: mặc định null, tạo/sửa/đọc lại, trim, rỗng ⇒ null', async () => {
+    const plain = await createBot({ name: 'Bot tin nút mặc định' });
+    expect(plain).toMatchObject({ handoffAckMessage: null, handoffResolveMessage: null });
+
+    const ack = `Dạ ${HANDOFF_MESSAGE_CONTACT_PLACEHOLDER} chờ em kiểm tra chút ạ`;
+    const bot = await createBot({
+      name: 'Bot tin nút',
+      handoffAckMessage: `  ${ack}  `,
+      handoffResolveMessage: '   ',
+    });
+    expect(bot).toMatchObject({ handoffAckMessage: ack, handoffResolveMessage: null });
+
+    const patched = await asAdmin('PATCH', `/chatbots/${bot.id}`, {
+      handoffResolveMessage: 'Dạ em đã xử lý xong ạ',
+    });
+    expect(patched.statusCode).toBe(200);
+    expect(patched.json<ChatbotDto>()).toMatchObject({
+      handoffAckMessage: ack,
+      handoffResolveMessage: 'Dạ em đã xử lý xong ạ',
+    });
+
+    const cleared = await asAdmin('PATCH', `/chatbots/${bot.id}`, {
+      handoffAckMessage: '',
+      handoffResolveMessage: null,
+    });
+    expect(cleared.statusCode).toBe(200);
+    expect((await asAdmin('GET', `/chatbots/${bot.id}`)).json<ChatbotDto>()).toMatchObject({
+      handoffAckMessage: null,
+      handoffResolveMessage: null,
+    });
+  });
+
+  it('từ khóa nằm ở cả hai danh sách (so không dấu) => 400; PATCH kiểm trên kết quả sau khi gộp', async () => {
+    const overlap = await asAdmin('POST', '/chatbots', {
+      name: 'Bot trùng từ khóa',
+      handoffKeywords: ['Gặp quản lý'],
+      notifyKeywords: ['bảo hành', 'GAP QUAN LY'],
+    });
+    expect(overlap.statusCode).toBe(400);
+    expect(overlap.json<{ message: string }>().message).toBe(
+      'Từ khóa "GAP QUAN LY" đang nằm ở cả hai danh sách',
+    );
+
+    const bot = await createBot({
+      name: 'Bot gộp từ khóa',
+      handoffKeywords: ['gặp quản lý'],
+      notifyKeywords: ['bảo hành'],
+    });
+
+    // Chỉ gửi notifyKeywords: trùng với handoffKeywords đang lưu.
+    const viaNotify = await asAdmin('PATCH', `/chatbots/${bot.id}`, { notifyKeywords: ['gap quan ly'] });
+    expect(viaNotify.statusCode).toBe(400);
+    expect(viaNotify.json<{ message: string }>().message).toContain('đang nằm ở cả hai danh sách');
+
+    // Chỉ gửi handoffKeywords: trùng với notifyKeywords đang lưu.
+    const viaHandoff = await asAdmin('PATCH', `/chatbots/${bot.id}`, { handoffKeywords: ['Bảo Hành'] });
+    expect(viaHandoff.statusCode).toBe(400);
+    expect(viaHandoff.json<{ message: string }>().message).toBe(
+      'Từ khóa "bảo hành" đang nằm ở cả hai danh sách',
+    );
+
+    // Đổi chỗ cả hai danh sách trong cùng một PATCH: hợp lệ.
+    const swapped = await asAdmin('PATCH', `/chatbots/${bot.id}`, {
+      handoffKeywords: ['bảo hành'],
+      notifyKeywords: ['gặp quản lý'],
+    });
+    expect(swapped.statusCode).toBe(200);
+    expect(swapped.json<ChatbotDto>()).toMatchObject({
+      handoffKeywords: ['bảo hành'],
+      notifyKeywords: ['gặp quản lý'],
+    });
+
+    expect((await asAdmin('PATCH', `/chatbots/${RANDOM_ID}`, { notifyKeywords: ['a'] })).statusCode).toBe(
+      404,
     );
   });
 });

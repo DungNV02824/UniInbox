@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
-import { Siren, X } from 'lucide-react';
+import { BellRing, Siren, X } from 'lucide-react';
 import type { HandoffCreatedPayload } from '@dezon/shared';
 import { useHandoffEvents } from '@/lib/realtime';
 import {
@@ -54,7 +54,8 @@ function useTitleCounter() {
 
 /**
  * Thông báo "Cần người" khi AI chuyển hội thoại cho người thật (`handoff.created`):
- * tiếng bíp + thẻ thông báo có link mở hội thoại + bộ đếm trên tiêu đề tab.
+ * tiếng bíp + thẻ thông báo có link mở hội thoại + bộ đếm trên tiêu đề tab. `botContinues` (từ khóa "bot VẪN
+ * trả lời") chỉ là thông báo: hội thoại không đổi trạng thái (trạng thái luôn đến qua `conversation.updated`).
  */
 export function HandoffNotifier() {
   const [toasts, setToasts] = useState<HandoffToast[]>([]);
@@ -92,17 +93,26 @@ export function HandoffNotifier() {
     >
       {toasts.map(({ id, payload }) => {
         const text = handoffToastText(payload);
+        // Chỉ báo (bot vẫn trả lời): tông vàng "thông báo", không phải đỏ "Cần người".
+        const Icon = text.botContinues ? BellRing : Siren;
         return (
           <div
             key={id}
             className={cn(
-              'pointer-events-auto flex w-full max-w-sm items-start gap-3 rounded-lg border border-red-200 bg-background p-3 text-sm shadow-lg',
-              'border-l-4 border-l-red-500',
+              'pointer-events-auto flex w-full max-w-sm items-start gap-3 rounded-lg border bg-background p-3 text-sm shadow-lg',
+              text.botContinues
+                ? 'border-amber-200 border-l-4 border-l-amber-500'
+                : 'border-red-200 border-l-4 border-l-red-500',
             )}
           >
-            <Siren className="mt-0.5 size-4 shrink-0 text-red-600" aria-hidden />
+            <Icon
+              className={cn('mt-0.5 size-4 shrink-0', text.botContinues ? 'text-amber-600' : 'text-red-600')}
+              aria-hidden
+            />
             <div className="flex min-w-0 flex-1 flex-col gap-1">
-              <p className="font-medium text-red-700">{text.title}</p>
+              <p className={cn('font-medium', text.botContinues ? 'text-amber-800' : 'text-red-700')}>
+                {text.title}
+              </p>
               {text.description && (
                 <p className="line-clamp-3 text-xs text-muted-foreground">{text.description}</p>
               )}

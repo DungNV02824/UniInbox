@@ -22,7 +22,7 @@ import type {
   UpdateConversationRequest,
 } from '@dezon/shared';
 import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
-import { DEFAULT_AI_PAUSE_AFTER_AGENT_MIN, pauseAiAfterAgentMessage } from '../ai/runtime';
+import { DEFAULT_AI_PAUSE_AFTER_AGENT_MIN, pauseAiAfterAgentMessage } from '../ai/agent-pause';
 import { normalizeContactTags } from '../contact-tags/service';
 import { firstCustomerMessageAt } from '../pipeline/window-anchor';
 import { canSend } from '../policy';
@@ -81,7 +81,8 @@ function toStoredAttachment(a: OutboundAttachmentInput): MessageAttachment {
  * sender_user_id = viewer), cập nhật last_message_at. Caller đẩy job outbound cho từng message.
  * Idempotent theo `clientId`: gửi lại cùng clientId trả các tin đã tạo (duplicate = true). An toàn khi
  * hai request chạy đồng thời vì kiểm tra nằm sau khóa FOR UPDATE của dòng hội thoại.
- * Hội thoại có chatbot ⇒ ai_paused_until = now + ctx.aiPauseAfterAgentMin (mặc định 30) phút.
+ * Hội thoại có chatbot ⇒ theo agent_reply_mode của bot: 'pause' ⇒ ai_paused_until = now + agent_pause_minutes
+ * (null ⇒ ctx.aiPauseAfterAgentMin, mặc định 30) phút; 'stop' ⇒ dừng hẳn; 'continue' ⇒ không tạm dừng.
  */
 export async function sendAgentMessage(
   db: Db,
@@ -168,7 +169,8 @@ export async function sendAgentMessage(
         updatedAt: now,
       })
       .where(eq(conversations.id, conv.id));
-    // Nhân viên vừa nhắn ⇒ tạm dừng chatbot của hội thoại (nếu có).
+    // Nhân viên vừa nhắn ⇒ áp "Khi nhân viên vào nhắn tin" của chatbot đang gắn (nếu có): tiếp tục / tạm nghỉ /
+    // dừng hẳn.
     await pauseAiAfterAgentMessage(
       tx,
       conv.id,

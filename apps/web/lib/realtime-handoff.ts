@@ -18,16 +18,32 @@ export function titleWithCounter(title: string, count: number): string {
 }
 
 export interface HandoffToastText {
-  /** "Cần người: Chị Lan (Dezon Nội Thất) — Khách muốn gặp nhân viên"; nhắc lại thêm "Nhắc lại · ". */
+  /**
+   * "Cần người: Chị Lan (Dezon Nội Thất) — Khách muốn gặp nhân viên"; nhắc lại thêm "Nhắc lại · ";
+   * chỉ báo (bot vẫn trả lời) ⇒ "Khách cần nhân viên: Chị Lan (Dezon Nội Thất) — bot vẫn đang trả lời".
+   */
   title: string;
   /** Tóm tắt cho nhân viên (có thể rỗng). */
   description: string;
+  /**
+   * true = chỉ báo nhân viên (từ khóa "bot VẪN trả lời"): hội thoại KHÔNG sang Cần người — toast dùng tông
+   * "thông báo" thay cho tông "khẩn".
+   */
+  botContinues: boolean;
 }
 
 export function handoffToastText(p: HandoffCreatedPayload): HandoffToastText {
   const who = p.channelName ? `${p.contactName} (${p.channelName})` : p.contactName;
+  const description = p.summary?.trim() ?? '';
+  if (p.botContinues) {
+    return {
+      title: `${p.reminder ? 'Nhắc lại · ' : ''}Khách cần nhân viên: ${who} — bot vẫn đang trả lời`,
+      description,
+      botContinues: true,
+    };
+  }
   const title = `${p.reminder ? 'Nhắc lại · ' : ''}Cần người: ${who} — ${handoffReasonLabel(p.reasonCode)}`;
-  return { title, description: p.summary?.trim() ?? '' };
+  return { title, description, botContinues: false };
 }
 
 // ---------- Âm thanh ----------

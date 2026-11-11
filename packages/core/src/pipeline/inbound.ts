@@ -10,7 +10,7 @@ import {
 } from '@dezon/db';
 import type { MessageAttachment, NormalizedInboundMessage } from '@dezon/shared';
 import { and, eq, ne, sql } from 'drizzle-orm';
-import { DEFAULT_AI_PAUSE_AFTER_AGENT_MIN, pauseAiAfterAgentMessage } from '../ai/runtime';
+import { DEFAULT_AI_PAUSE_AFTER_AGENT_MIN, pauseAiAfterAgentMessage } from '../ai/agent-pause';
 import type { AccountResolver, InboundEvent } from '../connectors/types';
 import type { InboundJobData } from '../jobs';
 import { DEFAULT_MIME } from '../media/mime';
@@ -234,16 +234,16 @@ async function storeInboundMessage(
       .set(conversationUpdate(isCustomer, backfill, msg.sentAt))
       .where(eq(conversations.id, conversation.id))
       .returning({ id: conversations.id, assignedUserId: conversations.assignedUserId });
-    // Nhân viên trả lời từ công cụ của nền tảng (Business Suite) ⇒ tạm dừng chatbot như tin từ hệ thống.
-    // Đồng bộ định kỳ tính từ lúc tin được gửi (tin cũ không kéo dài pause). Echo tự động thì không.
+    // Nhân viên trả lời từ công cụ của nền tảng (Business Suite) ⇒ áp "Khi nhân viên vào nhắn tin" của bot như
+    // tin từ hệ thống (tiếp tục / tạm nghỉ / dừng hẳn). Đồng bộ định kỳ tính từ lúc tin được gửi (tin cũ không
+    // kéo dài pause). Echo tự động thì không.
     if (updated && isPlatformEcho && !automatedEcho && !backfill) {
       const pauseMin = deps.ctx.aiPauseAfterAgentMin ?? DEFAULT_AI_PAUSE_AFTER_AGENT_MIN;
       const from = source === 'webhook' ? deps.ctx.now() : msg.sentAt;
-      const until = new Date(from.getTime() + pauseMin * 60_000);
-      const after = await pauseAiAfterAgentMessage(tx, conversation.id, from, pauseMin);
-      // Echo này "sở hữu" pause hiện tại ⇒ ghi lại để gỡ nếu tin khách (đến sau, do chạy song song) cho thấy
-      // đây là tin tự động.
-      if (after && after.getTime() === until.getTime()) await recordEchoPause(tx, row.id, until);
+      const pause = await pauseAiAfterAgentMessage(tx, conversation.id, from, pauseMin);
+      // Echo này "sở hữu" pause hiện tại (chính nó vừa đặt, kể cả mốc "dừng hẳn") ⇒ ghi lại để gỡ nếu tin khách
+      // (đến sau, do chạy song song) cho thấy đây là tin tự động. 'continue' không đặt gì ⇒ không ghi.
+      if (pause?.applied && pause.requestedUntil) await recordEchoPause(tx, row.id, pause.requestedUntil);
     }
     // Tin khách đến sau echo tự động (thứ tự xử lý đảo) ⇒ đánh dấu lại echo, gỡ pause echo đã đặt.
     if (updated && isCustomer) await reclassifyEchoesAfterCustomer(tx, conversation.id, msg.sentAt);

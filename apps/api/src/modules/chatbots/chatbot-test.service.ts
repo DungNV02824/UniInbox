@@ -113,6 +113,7 @@ function draftConfig(draft: CreateChatbotRequest): ChatbotConfig {
     knowledge: '',
     examples: [],
     handoffKeywords: [],
+    notifyKeywords: [],
     handoffMessage: null,
     model: null,
     temperature: CHATBOT_DEFAULTS.temperature,
@@ -122,7 +123,10 @@ function draftConfig(draft: CreateChatbotRequest): ChatbotConfig {
   return { ...toChatbotConfig(base, draft), id: null };
 }
 
-/** "Chat thử": chạy đúng orchestrator/prompt thật nhưng KHÔNG gửi tin và KHÔNG ghi DB hội thoại. */
+/**
+ * "Chat thử": chạy đúng orchestrator/prompt thật nhưng KHÔNG gửi tin và KHÔNG ghi DB hội thoại. Lượt khớp từ khóa
+ * "Báo nhân viên, bot VẪN trả lời" ⇒ kết quả có `notifiedKeyword` (không báo nhân viên thật).
+ */
 @Injectable()
 export class ChatbotTestService {
   private readonly limiter = new SlidingWindowLimiter(TEST_RATE_LIMIT.limit, TEST_RATE_LIMIT.windowMs);
@@ -191,6 +195,8 @@ export class ChatbotTestService {
       ...(result.reasonCode !== undefined ? { reasonCode: result.reasonCode } : {}),
       ...(result.summary !== undefined ? { summary: result.summary } : {}),
       ...(result.reason !== undefined ? { reason: result.reason } : {}),
+      // Khớp từ khóa "Báo nhân viên, bot VẪN trả lời": chỉ báo cho giao diện, KHÔNG gửi thông báo thật.
+      ...(result.notifiedKeyword !== undefined ? { notifiedKeyword: result.notifiedKeyword } : {}),
       latencyMs: result.latencyMs,
       model: result.model,
       usage: result.usage,

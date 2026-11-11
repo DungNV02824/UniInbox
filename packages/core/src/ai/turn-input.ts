@@ -12,13 +12,14 @@
 // hoàn toàn trong SQL, không qua Date của JS (mất micro giây).
 import { aiRuns, handoffs, messages, users } from '@dezon/db';
 import { HANDOFF_REASON_LABELS, type HandoffReasonCode, type MessageAttachment } from '@dezon/shared';
-import { and, asc, desc, eq, ne, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, sql } from 'drizzle-orm';
 import type { DbLike } from '../inbox/read-model';
 import { readObjectLimited } from '../media/storage';
 import type { MediaStorage } from '../media/types';
 import { notAutomatedEcho } from '../pipeline/automation-echo';
 import type { PipelineLogger } from '../pipeline/types';
 import { errorText } from './delivery';
+import { NOTIFY_STAFF_SYSTEM_PREFIX } from './notify-staff';
 import {
   CHATBOT_HISTORY_LIMIT,
   CHATBOT_MAX_IMAGE_BYTES,
@@ -128,7 +129,15 @@ export const HANDOFF_RESOLVED_MARKER =
 const HISTORY_HANDOFF_LIMIT = 5;
 
 /**
- * CHATBOT_HISTORY_LIMIT tin cuối (bỏ tin system), chia thành lịch sử + tin mới (thuộc `pendingIds`).
+ * Tin system "Đã báo nhân viên …" THẬT do notifyStaffKeyword ghi: có dấu raw.notifyStaff, hoặc (tin cũ trước khi có
+ * dấu) text bắt đầu bằng NOTIFY_STAFF_SYSTEM_PREFIX. Chỉ tin sender_type 'system' (hệ thống ghi, khách không giả được).
+ */
+const isNotifyStaffSystem = sql`(${messages.raw} -> 'notifyStaff' is not null or starts_with(${messages.text}, ${NOTIFY_STAFF_SYSTEM_PREFIX}))`;
+
+/**
+ * CHATBOT_HISTORY_LIMIT tin cuối (bỏ tin system, TRỪ tin "Đã báo nhân viên …" của notifyStaffKeyword), chia thành
+ * lịch sử + tin mới (thuộc `pendingIds`). Tin "Đã báo nhân viên" thành dòng role 'system' (staffNotified: true) ⇒
+ * lượt sau model biết nhân viên ĐÃ được báo thật (được nói "em đã báo nhân viên", quy tắc 7) mà không chuyển người.
  * Lịch sử chèn thêm dòng role 'system' theo thời gian từ bảng handoffs (lúc chuyển người + lúc "trả lại cho
  * AI") để model biết yêu cầu cũ đã được nhân viên xử lý (không escalate lại vì yêu cầu cũ).
  */
@@ -153,7 +162,12 @@ export async function loadTurnHistory(
     })
     .from(messages)
     .leftJoin(users, eq(users.id, messages.senderUserId))
-    .where(and(eq(messages.conversationId, conversationId), ne(messages.senderType, 'system')))
+    .where(
+      and(
+        eq(messages.conversationId, conversationId),
+        sql`(${messages.senderType} <> 'system' or ${isNotifyStaffSystem})`,
+      ),
+    )
     // Cùng khóa với orderPendingBySentAt (sent_at, created_at, id) ⇒ "Ảnh k/N" khớp thứ tự dòng tin.
     .orderBy(desc(messages.sentAt), desc(messages.createdAt), desc(messages.id))
     .limit(CHATBOT_HISTORY_LIMIT);
@@ -192,6 +206,11 @@ export async function loadTurnHistory(
   for (const r of rows) {
     while (mi < markers.length && markers[mi]!.sentAt! <= r.sentAt && !pendingIds.has(r.id)) {
       out.history.push(markers[mi++]!);
+    }
+    if (r.senderType === 'system') {
+      // Chỉ còn tin "Đã báo nhân viên" (lọc ở truy vấn); không bao giờ là tin mới của lượt.
+      out.history.push({ role: 'system', text: r.text, sentAt: r.sentAt, staffNotified: true });
+      continue;
     }
     const role = r.senderType === 'customer' ? 'customer' : r.senderType === 'bot' ? 'bot' : 'agent';
     const imageRange = pendingIds.has(r.id) ? imageRanges?.get(r.id) : undefined;

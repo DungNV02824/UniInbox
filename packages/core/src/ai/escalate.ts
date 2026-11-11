@@ -63,6 +63,9 @@ async function loadConversationInfo(db: Db, conversationId: string) {
       channelName: channelAccounts.displayName,
       contactName: contacts.displayName,
       handoffMessage: chatbots.handoffMessage,
+      /** null khi hội thoại không gắn bot (leftJoin). */
+      botId: chatbots.id,
+      botReminderMin: chatbots.handoffReminderMin,
     })
     .from(conversations)
     .innerJoin(channelAccounts, eq(channelAccounts.id, conversations.channelAccountId))
@@ -75,8 +78,20 @@ async function loadConversationInfo(db: Db, conversationId: string) {
 const conversationUrl = (appUrl: string, conversationId: string) =>
   `${appUrl.replace(/\/+$/, '')}/inbox/${conversationId}`;
 
+/**
+ * Số phút nhắc lại "chưa ai nhận hội thoại": hội thoại có bot ⇒ chatbots.handoff_reminder_min của bot đó
+ * (0 = tắt, mặc định); không có bot (đã gỡ, chuyển tay) ⇒ HANDOFF_ESCALATE_AFTER_MIN (env, 0 = tắt).
+ */
+export function handoffReminderMinutes(
+  bot: { id: string | null; handoffReminderMin: number | null } | null,
+  envMinutes: number,
+): number {
+  if (bot?.id) return Math.max(0, bot.handoffReminderMin ?? 0);
+  return Math.max(0, envMinutes);
+}
+
 /** Gửi thẻ Lark nếu đã cấu hình webhook. Lỗi (kể cả đọc cấu hình) chỉ log warn — không làm hỏng escalate. */
-async function notifyLarkSafe(
+export async function notifyLarkSafe(
   db: Db,
   deps: AiRuntimeDeps,
   input: {
@@ -86,6 +101,8 @@ async function notifyLarkSafe(
     reasonCode: HandoffReasonCode;
     summary: string;
     reminder?: boolean;
+    /** Thẻ "chỉ báo nhân viên — bot vẫn trả lời" (notifyKeywords). */
+    botContinues?: boolean;
   },
 ): Promise<void> {
   try {
@@ -98,6 +115,7 @@ async function notifyLarkSafe(
       summary: input.summary,
       conversationUrl: conversationUrl(deps.config.appUrl, input.conversationId),
       ...(input.reminder ? { reminder: true } : {}),
+      ...(input.botContinues ? { botContinues: true } : {}),
     });
     await notifyLark(config, card, { ...(deps.fetch ? { fetch: deps.fetch } : {}), now: deps.ctx.now });
   } catch (error) {
@@ -115,7 +133,8 @@ async function notifyLarkSafe(
  * Sau commit: phát message.created (tin system) + conversation.updated + handoff.created
  * { conversationId, reasonCode, summary, contactName, channelName } tới roomsForConversation;
  * Lark (getLarkConfig có webhookUrl) ⇒ notifyLark(buildHandoffLarkCard(...)) — lỗi Lark chỉ log warn;
- * scheduler.scheduleHandoffReminder({ conversationId, handoffId }, handoffReminderMin phút).
+ * scheduler.scheduleHandoffReminder({ conversationId, handoffId }, N phút) với N = handoffReminderMinutes: bot của
+ * hội thoại (chatbots.handoff_reminder_min) hoặc env khi không có bot; N = 0 ⇒ không lên lịch nhắc.
  */
 export async function escalateConversation(
   db: Db,
@@ -261,13 +280,20 @@ export async function escalateConversation(
     reasonCode: input.reasonCode,
     summary: input.summary,
   });
-  try {
-    await deps.scheduler.scheduleHandoffReminder(
-      { conversationId, handoffId: tx.handoffId },
-      deps.config.handoffReminderMin * 60_000,
-    );
-  } catch (error) {
-    deps.logger.warn({ conversationId, err: errorText(error) }, 'Không lên lịch nhắc handoff được');
+  // Cài đặt nhắc lại theo bot (0 = tắt); không có bot ⇒ HANDOFF_ESCALATE_AFTER_MIN (0 = tắt).
+  const reminderMin = handoffReminderMinutes(
+    { id: info.botId, handoffReminderMin: info.botReminderMin },
+    deps.config.handoffReminderMin,
+  );
+  if (reminderMin > 0) {
+    try {
+      await deps.scheduler.scheduleHandoffReminder(
+        { conversationId, handoffId: tx.handoffId },
+        reminderMin * 60_000,
+      );
+    } catch (error) {
+      deps.logger.warn({ conversationId, err: errorText(error) }, 'Không lên lịch nhắc handoff được');
+    }
   }
   return { handoffId: tx.handoffId, created: true, botMessagesQueued: queued };
 }
@@ -275,6 +301,8 @@ export async function escalateConversation(
 /**
  * Job "handoff-reminder": handoff còn mở (resolved_at null) và chưa ack ⇒ notifyLark thẻ reminder +
  * phát handoff.created { ..., reminder: true }. Ngược lại không làm gì. Trả true nếu đã nhắc.
+ * Kiểm lại cài đặt LÚC CHẠY: bot hiện tại của hội thoại tắt nhắc lại (handoff_reminder_min = 0) — hoặc không có bot
+ * và env = 0 — ⇒ không nhắc (job đã xếp từ trước khi đổi cài đặt).
  */
 export async function processHandoffReminderJob(
   db: Db,
@@ -291,13 +319,21 @@ export async function processHandoffReminderJob(
       assignedUserId: conversations.assignedUserId,
       contactName: contacts.displayName,
       channelName: channelAccounts.displayName,
+      botId: chatbots.id,
+      botReminderMin: chatbots.handoffReminderMin,
     })
     .from(handoffs)
     .innerJoin(conversations, eq(conversations.id, handoffs.conversationId))
     .innerJoin(contacts, eq(contacts.id, conversations.contactId))
     .innerJoin(channelAccounts, eq(channelAccounts.id, conversations.channelAccountId))
+    .leftJoin(chatbots, eq(chatbots.id, conversations.chatbotId))
     .where(and(eq(handoffs.id, data.handoffId), eq(handoffs.conversationId, data.conversationId)));
   if (!row || row.resolvedAt || row.acknowledgedAt || row.status !== 'pending_human') return false;
+  const reminderMin = handoffReminderMinutes(
+    { id: row.botId, handoffReminderMin: row.botReminderMin },
+    deps.config.handoffReminderMin,
+  );
+  if (reminderMin <= 0) return false;
 
   await notifyLarkSafe(db, deps, {
     conversationId: data.conversationId,

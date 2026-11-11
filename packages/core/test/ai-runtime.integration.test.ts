@@ -16,6 +16,7 @@ import { asc, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { putAiSettings } from '../src/ai/settings';
 import {
+  AI_BLOCKED_PAUSED,
   aiDirtyKey,
   debounceKeys,
   escalateConversation,
@@ -27,7 +28,9 @@ import {
   scheduleChatbotReply,
 } from '../src/ai/runtime';
 import { loadPendingMessages } from '../src/ai/turn-input';
-import { ackHandoff, resolveHandoff } from '../src/ai/service';
+import { notifyStaffDedupeKey, notifyStaffKeyword, notifyStaffSystemText } from '../src/ai/notify-staff';
+import { ackHandoff, needsChatbotKick, resolveHandoff, resumeConversationAi } from '../src/ai/service';
+import { sendAgentMessage } from '../src/inbox/commands';
 import { getConversationSummary, getMessageDto } from '../src/inbox/queries';
 import {
   createAiKit,
@@ -221,16 +224,25 @@ describe('processAiReplyJob — điều kiện 6.3', () => {
     expect(runs[0]!.error).toContain(reasonPart);
     expect(kit.llm.calls).toHaveLength(0);
     expect((await messagesOf(conv.id)).some((m) => m.senderType === 'bot')).toBe(false);
+    return runs[0]!;
   }
 
-  it('đang tạm dừng vì nhân viên vừa nhắn', () =>
-    expectBlocked(
+  // Đang pause ⇒ KHÔNG coi tin là đã xử lý (trigger rỗng) để "Tiếp tục AI" còn trả lời; lý do khác ⇒ coi như đã xử lý.
+  it('đang tạm dừng vì nhân viên vừa nhắn ⇒ không coi tin là đã xử lý', async () => {
+    const run = await expectBlocked(
       (bot) => botConversation(bot, { aiPausedUntil: new Date(Date.now() + 10 * 60_000) }),
       'tạm dừng',
-    ));
+    );
+    expect(run.triggerMessageIds).toEqual([]);
+  });
 
-  it('đang chờ người thật', () =>
-    expectBlocked((bot) => botConversation(bot, { status: 'pending_human' }), 'chờ người thật'));
+  it('đang chờ người thật ⇒ coi tin là đã xử lý', async () => {
+    const run = await expectBlocked(
+      (bot) => botConversation(bot, { status: 'pending_human' }),
+      'chờ người thật',
+    );
+    expect(run.triggerMessageIds).toHaveLength(1);
+  });
 
   it('ngoài cửa sổ 24 giờ', () =>
     expectBlocked(
@@ -289,6 +301,8 @@ describe('escalate', () => {
     const bot = await createBot({
       handoffKeywords: ['gặp nhân viên'],
       handoffMessage: 'Dạ em chuyển nhân viên hỗ trợ mình ngay ạ',
+      // Nhắc lại theo bot (mặc định 0 = tắt); env của kit là 15 nhưng bot thắng.
+      handoffReminderMin: 25,
     });
     const conv = await botConversation(bot);
     await addMessage(t.db, conv, { text: 'Cho em GAP NHAN VIEN với', sentAt: new Date() });
@@ -329,7 +343,7 @@ describe('escalate', () => {
     expect(kit.lark.calls[0]!.url).toBe(LARK_URL);
     expect(JSON.stringify(kit.lark.calls[0]!.body)).toContain(`https://inbox.test/inbox/${conv.id}`);
     expect(kit.scheduler.reminders).toEqual([
-      { data: { conversationId: conv.id, handoffId: h!.id }, delayMs: 15 * 60_000 },
+      { data: { conversationId: conv.id, handoffId: h!.id }, delayMs: 25 * 60_000 },
     ]);
 
     // Read model.
@@ -405,6 +419,263 @@ describe('escalate', () => {
     expect(run!.error).toContain('hỏng');
     const [after] = await t.db.select().from(conversations).where(eq(conversations.id, conv.id));
     expect(after).toMatchObject({ status: 'pending_human', handoffReason: 'other' });
+  });
+});
+
+describe('từ khóa "Báo nhân viên, bot VẪN trả lời" (notifyKeywords)', () => {
+  const notifyEvents = () =>
+    kit.publisher.events
+      .filter((e) => e.event === 'handoff.created')
+      .map((e) => e.payload as HandoffCreatedPayload)
+      .filter((p) => p.botContinues);
+  const systemTexts = async (conversationId: string) =>
+    (await messagesOf(conversationId)).filter((m) => m.senderType === 'system').map((m) => m.text);
+  const larkTitle = (i: number) =>
+    (kit.lark.calls[i]!.body.card as { header: { title: { content: string } } }).header.title.content;
+
+  it('khớp ⇒ báo đúng một lần (tin system, handoff.created botContinues, Lark) và bot VẪN trả lời; không chuyển người', async () => {
+    const bot = await createBot({ notifyKeywords: ['gọi lại'], handoffKeywords: ['gặp nhân viên'] });
+    const conv = await botConversation(bot);
+    await addMessage(t.db, conv, { text: 'Anh ơi GOI LAI cho em nhé', sentAt: new Date() });
+
+    const out = await processAiReplyJob(t.db, kit.deps, conv.id);
+    expect(out).toMatchObject({ status: 'done', decision: 'reply' });
+    expect(kit.llm.calls).toHaveLength(1);
+    // Bot vẫn trả lời: tin bot xếp hàng gửi.
+    const bots = (await messagesOf(conv.id)).filter((m) => m.senderType === 'bot');
+    expect(bots).toHaveLength(2);
+    expect(kit.scheduler.outbound.map((o) => o.messageId)).toEqual(bots.map((m) => m.id));
+
+    // Không chuyển người: vẫn open/auto, không có handoffs, không nhắc lại.
+    const [after] = await t.db.select().from(conversations).where(eq(conversations.id, conv.id));
+    expect(after).toMatchObject({ status: 'open', aiMode: 'auto', handoffReason: null, chatbotId: bot.id });
+    expect(await t.db.select().from(handoffs).where(eq(handoffs.conversationId, conv.id))).toHaveLength(0);
+    expect(kit.scheduler.reminders).toHaveLength(0);
+
+    // Một tin system, gắn ai_run_id của lượt.
+    const systems = (await messagesOf(conv.id)).filter((m) => m.senderType === 'system');
+    expect(systems.map((m) => m.text)).toEqual([
+      'Đã báo nhân viên: khách nhắn từ khóa "gọi lại" — bot vẫn tiếp tục trả lời',
+    ]);
+    expect(systems[0]!.aiRunId).toBe((out as { aiRunId: string }).aiRunId);
+    expect(
+      kit.publisher.events.some(
+        (e) =>
+          e.event === 'message.created' && (e.payload as MessageCreatedPayload).message.id === systems[0]!.id,
+      ),
+    ).toBe(true);
+
+    const events = notifyEvents();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      conversationId: conv.id,
+      reasonCode: 'human_request',
+      contactName: 'Chị Mai',
+      channelName: 'Fanpage Nội Thất',
+      botContinues: true,
+    });
+    expect(events[0]!.summary).toContain('"gọi lại"');
+    expect(events[0]!.summary).toContain('Anh ơi GOI LAI cho em nhé');
+    expect(events[0]!.reminder).toBeUndefined();
+
+    expect(kit.lark.calls).toHaveLength(1);
+    expect(larkTitle(0)).toBe('🔔 Khách cần nhân viên — bot vẫn đang trả lời');
+    expect(JSON.stringify(kit.lark.calls[0]!.body)).toContain(`https://inbox.test/inbox/${conv.id}`);
+  });
+
+  it('chống trùng: cùng từ khóa trong 10 phút không báo lại (bot vẫn trả lời); từ khóa khác thì báo', async () => {
+    const bot = await createBot({ notifyKeywords: ['gọi lại', 'báo giá'] });
+    const conv = await botConversation(bot);
+    await addMessage(t.db, conv, { text: 'gọi lại em nha', sentAt: new Date(Date.now() - 2000) });
+    await processAiReplyJob(t.db, kit.deps, conv.id);
+    await addMessage(t.db, conv, { text: 'Gọi lại giúp em với', sentAt: new Date(Date.now() - 1000) });
+    await processAiReplyJob(t.db, kit.deps, conv.id);
+
+    expect(kit.llm.calls).toHaveLength(2);
+    expect((await messagesOf(conv.id)).filter((m) => m.senderType === 'bot')).toHaveLength(4);
+    expect(await systemTexts(conv.id)).toEqual([notifyStaffSystemText('gọi lại')]);
+    expect(notifyEvents()).toHaveLength(1);
+    expect(kit.lark.calls).toHaveLength(1);
+    expect(kit.redis.setCalls.find((c) => c.key === notifyStaffDedupeKey(conv.id, 'Gọi lại'))?.args).toEqual([
+      'EX',
+      600,
+      'NX',
+    ]);
+
+    await addMessage(t.db, conv, { text: 'cho em xin báo giá', sentAt: new Date() });
+    await processAiReplyJob(t.db, kit.deps, conv.id);
+    expect(await systemTexts(conv.id)).toEqual([
+      notifyStaffSystemText('gọi lại'),
+      notifyStaffSystemText('báo giá'),
+    ]);
+    expect(kit.lark.calls).toHaveLength(2);
+  });
+
+  it('Redis lỗi ⇒ chống trùng dựa vào tin system gần đây trong DB', async () => {
+    const bot = await createBot({ notifyKeywords: ['gọi lại'] });
+    const conv = await botConversation(bot);
+    const set = kit.redis.set.bind(kit.redis);
+    kit.redis.set = async (key, value, ...args) => {
+      if (key.startsWith('ai-notify:')) throw new Error('redis down');
+      return set(key, value, ...args);
+    };
+    await addMessage(t.db, conv, { text: 'gọi lại em nha', sentAt: new Date(Date.now() - 1000) });
+    await processAiReplyJob(t.db, kit.deps, conv.id);
+    await addMessage(t.db, conv, { text: 'gọi lại nhé', sentAt: new Date() });
+    await processAiReplyJob(t.db, kit.deps, conv.id);
+    expect(await systemTexts(conv.id)).toEqual([notifyStaffSystemText('gọi lại')]);
+    expect(kit.lark.calls).toHaveLength(1);
+  });
+
+  it('lưu tin system lỗi ⇒ nhả khóa chống trùng: lần sau trong 10 phút VẪN báo nhân viên', async () => {
+    const bot = await createBot({ notifyKeywords: ['gọi lại'] });
+    const conv = await botConversation(bot);
+    await addMessage(t.db, conv, { text: 'gọi lại em nha', sentAt: new Date() });
+    // DB hỏng đúng lúc ghi tin system (transaction ném) — lần sau bình thường.
+    let failOnce = true;
+    const flaky = new Proxy(t.db, {
+      get(target, prop) {
+        if (prop === 'transaction' && failOnce) {
+          failOnce = false;
+          return async () => {
+            throw new Error('db down');
+          };
+        }
+        const value = Reflect.get(target, prop, target) as unknown;
+        return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+    const input = { keyword: 'gọi lại', customerTexts: ['gọi lại em nha'] };
+    await expect(notifyStaffKeyword(flaky, kit.deps, conv.id, input)).rejects.toThrow('db down');
+    expect(kit.redis.store.has(notifyStaffDedupeKey(conv.id, 'gọi lại'))).toBe(false);
+    expect(await systemTexts(conv.id)).toEqual([]);
+    expect(notifyEvents()).toHaveLength(0);
+    expect(kit.lark.calls).toHaveLength(0);
+
+    // Lần chạy lại (vd. lượt sau cùng từ khóa) trong cửa sổ chống trùng vẫn báo được.
+    expect(await notifyStaffKeyword(t.db, kit.deps, conv.id, input)).toBe(true);
+    expect(await systemTexts(conv.id)).toEqual([notifyStaffSystemText('gọi lại')]);
+    expect(notifyEvents()).toHaveLength(1);
+    expect(kit.lark.calls).toHaveLength(1);
+    expect(kit.redis.store.has(notifyStaffDedupeKey(conv.id, 'gọi lại'))).toBe(true);
+    const [system] = (await messagesOf(conv.id)).filter((m) => m.senderType === 'system');
+    expect(system!.raw).toEqual({ notifyStaff: { keyword: 'gọi lại' } });
+    // Đã báo thật ⇒ lần nữa thì chống trùng.
+    expect(await notifyStaffKeyword(t.db, kit.deps, conv.id, input)).toBe(false);
+    expect(kit.lark.calls).toHaveLength(1);
+  });
+
+  it('lượt SAU khi đã báo: bot nói "em đã báo nhân viên rồi ạ" ⇒ vẫn reply, KHÔNG escalate (lịch sử có dòng [Hệ thống] thật)', async () => {
+    const bot = await createBot({ notifyKeywords: ['gọi lại'] });
+    const conv = await botConversation(bot);
+    await addMessage(t.db, conv, { text: 'gọi lại cho em nha', sentAt: new Date(Date.now() - 2000) });
+    kit.llm.impl = async () => llmReply(['Dạ em đã báo nhân viên rồi ạ', 'Anh/chị cần tư vấn mẫu nào ạ?']);
+    expect(await processAiReplyJob(t.db, kit.deps, conv.id)).toMatchObject({
+      status: 'done',
+      decision: 'reply',
+    });
+    expect(await systemTexts(conv.id)).toEqual([notifyStaffSystemText('gọi lại')]);
+
+    // Lượt 2: không có từ khóa; model nói lại (đúng sự thật) là đã báo nhân viên.
+    await addMessage(t.db, conv, { text: 'Bao giờ có người liên hệ em vậy', sentAt: new Date() });
+    kit.llm.impl = async () => llmReply(['Dạ em đã báo nhân viên rồi ạ, anh/chị đợi chút nhé']);
+    const out = await processAiReplyJob(t.db, kit.deps, conv.id);
+    expect(out).toMatchObject({ status: 'done', decision: 'reply' });
+    // Không gọi lại model (bộ chặn "tự nói đã chuyển" không kích hoạt), không chuyển người.
+    expect(kit.llm.calls).toHaveLength(2);
+    const runs = await runsOf(conv.id);
+    expect(JSON.stringify(runs.at(-1)!.toolCalls)).not.toContain('handoff_claim_guard');
+    expect(contentText(kit, 1)).toContain(`[Hệ thống] ${notifyStaffSystemText('gọi lại')}`);
+    expect(contentText(kit, 1)).not.toContain('Hệ thống ĐÃ báo nhân viên vì người nhắn');
+    const [after] = await t.db.select().from(conversations).where(eq(conversations.id, conv.id));
+    expect(after).toMatchObject({ status: 'open', aiMode: 'auto', handoffReason: null });
+    expect(await t.db.select().from(handoffs).where(eq(handoffs.conversationId, conv.id))).toHaveLength(0);
+    const bots = (await messagesOf(conv.id)).filter((m) => m.senderType === 'bot').map((m) => m.text);
+    expect(bots.at(-1)).toBe('Dạ em đã báo nhân viên rồi ạ, anh/chị đợi chút nhé');
+    expect(notifyEvents()).toHaveLength(1);
+    expect(kit.lark.calls).toHaveLength(1);
+  });
+
+  it('bot no_reply hoặc lượt bị hủy (nhân viên nhắn trong lúc gọi LLM) ⇒ VẪN báo nhân viên', async () => {
+    const bot = await createBot({ notifyKeywords: ['gọi lại'] });
+    const a = await botConversation(bot);
+    await addMessage(t.db, a, { text: 'gọi lại nhé', sentAt: new Date() });
+    kit.llm.impl = async () => ({
+      functionCall: { name: 'no_reply', args: { reason: 'Khách chỉ nhắn ngắn' } },
+      text: null,
+      usage: { inputTokens: 1, outputTokens: 1 },
+      model: 'gemini-test',
+    });
+    expect(await processAiReplyJob(t.db, kit.deps, a.id)).toMatchObject({
+      status: 'done',
+      decision: 'no_reply',
+    });
+    expect(await systemTexts(a.id)).toEqual([notifyStaffSystemText('gọi lại')]);
+
+    const b = await botConversation(bot);
+    await addMessage(t.db, b, { text: 'gọi lại cho em', sentAt: new Date() });
+    kit.llm.impl = async () => {
+      await addMessage(t.db, b, {
+        senderType: 'agent',
+        senderUserId: t.agent.id,
+        text: 'Dạ',
+        sentAt: new Date(),
+      });
+      return llmReply(['Dạ']);
+    };
+    expect(await processAiReplyJob(t.db, kit.deps, b.id)).toMatchObject({
+      status: 'cancelled',
+      reason: 'Nhân viên vừa nhắn',
+    });
+    expect(await systemTexts(b.id)).toEqual([notifyStaffSystemText('gọi lại')]);
+    expect(notifyEvents().map((e) => e.conversationId)).toEqual([a.id, b.id]);
+    expect(kit.lark.calls).toHaveLength(2);
+    for (const id of [a.id, b.id]) {
+      const [row] = await t.db.select().from(conversations).where(eq(conversations.id, id));
+      expect(row).toMatchObject({ status: 'open', aiMode: 'auto' });
+    }
+  });
+
+  it('LLM tự escalate ở lượt đó ⇒ chỉ chuyển người như thường (không báo thêm botContinues)', async () => {
+    const bot = await createBot({ notifyKeywords: ['gọi lại'] });
+    const conv = await botConversation(bot);
+    await addMessage(t.db, conv, { text: 'gọi lại cho em, em muốn khiếu nại', sentAt: new Date() });
+    kit.llm.impl = async () => ({
+      functionCall: {
+        name: 'escalate',
+        args: { reason_code: 'complaint', summary_for_agent: 'Khách khiếu nại' },
+      },
+      text: null,
+      usage: { inputTokens: 1, outputTokens: 1 },
+      model: 'gemini-test',
+    });
+    expect(await processAiReplyJob(t.db, kit.deps, conv.id)).toMatchObject({
+      status: 'done',
+      decision: 'escalate',
+    });
+    const [after] = await t.db.select().from(conversations).where(eq(conversations.id, conv.id));
+    expect(after).toMatchObject({ status: 'pending_human', handoffReason: 'complaint' });
+    expect(await systemTexts(conv.id)).toEqual([`${HANDOFF_SYSTEM_PREFIX}Khách phàn nàn / khiếu nại`]);
+    expect(notifyEvents()).toHaveLength(0);
+    expect(kit.lark.calls).toHaveLength(1);
+    expect(larkTitle(0)).toBe('🔔 Cần người xử lý');
+  });
+
+  it('khớp cả từ khóa chuyển người ⇒ đường chuyển người cũ (không gọi LLM, không báo botContinues)', async () => {
+    const bot = await createBot({ notifyKeywords: ['gọi lại'], handoffKeywords: ['gặp nhân viên'] });
+    const conv = await botConversation(bot);
+    await addMessage(t.db, conv, { text: 'gọi lại hoặc cho em gặp nhân viên', sentAt: new Date() });
+    expect(await processAiReplyJob(t.db, kit.deps, conv.id)).toMatchObject({
+      status: 'done',
+      decision: 'escalate',
+    });
+    expect(kit.llm.calls).toHaveLength(0);
+    const [after] = await t.db.select().from(conversations).where(eq(conversations.id, conv.id));
+    expect(after).toMatchObject({ status: 'pending_human', aiMode: 'off', handoffReason: 'human_request' });
+    expect(notifyEvents()).toHaveLength(0);
+    expect(kit.lark.calls).toHaveLength(1);
+    // Bot mặc định handoffReminderMin = 0 ⇒ không nhắc lại (dù env của kit là 15).
+    expect(kit.scheduler.reminders).toHaveLength(0);
   });
 });
 
@@ -1182,5 +1453,77 @@ describe('chỉ báo "đang soạn tin"', () => {
     expect(actions()).toEqual([]);
     // Realtime vẫn phát cho cả ba lượt.
     expect(typingEvents().map((e) => e.typing)).toEqual([true, false, true, false, true, false]);
+  });
+});
+
+describe('tạm dừng sau tin nhân viên không "nuốt" tin khách đang chờ', () => {
+  const sendStaff = (conversationId: string, text: string) =>
+    sendAgentMessage(t.db, t.admin, conversationId, { text, attachments: [] }, ctx);
+
+  /**
+   * Tin khách trước tin nhân viên (nhân viên đã lo) ⇒ nhân viên nhắn (áp agent_reply_mode) ⇒ tin khách trong lúc
+   * pause ⇒ job bị chặn, KHÔNG coi tin là đã xử lý ⇒ "Tiếp tục AI" ⇒ kick ⇒ bot trả lời đúng tin đang chờ.
+   */
+  async function pausedThenResume(mode: 'pause' | 'stop') {
+    const bot = await createBot({ agentReplyMode: mode, agentPauseMinutes: 30 });
+    const conv = await botConversation(bot);
+    const before = await addMessage(t.db, conv, { text: 'Shop ơi báo giá', sentAt: secAgo(30) });
+    const staff = await sendStaff(conv.id, 'Dạ em gửi chị bảng giá');
+    expect(staff.conversation.aiPausedUntil).not.toBeNull();
+    const during = await addMessage(t.db, conv, { text: 'Mẫu này còn màu trắng không?', sentAt: new Date() });
+
+    const blocked = await processAiReplyJob(t.db, kit.deps, conv.id);
+    expect(blocked).toMatchObject({ status: 'skipped', reason: AI_BLOCKED_PAUSED });
+    const [blockedRun] = await runsOf(conv.id);
+    expect(blockedRun).toMatchObject({
+      decision: 'no_reply',
+      error: AI_BLOCKED_PAUSED,
+      triggerMessageIds: [],
+    });
+    expect(kit.llm.calls).toHaveLength(0);
+    // Tin trong lúc pause vẫn chờ; tin trước tin nhân viên thì không (nhân viên đã lo).
+    expect((await loadPendingMessages(t.db, conv.id)).map((m) => m.id)).toEqual([during]);
+
+    // Job lặp lại trong lúc pause (tin khách kế tiếp) cũng không nuốt tin.
+    expect(await processAiReplyJob(t.db, kit.deps, conv.id)).toMatchObject({ reason: AI_BLOCKED_PAUSED });
+    expect((await loadPendingMessages(t.db, conv.id)).map((m) => m.id)).toEqual([during]);
+
+    await resumeConversationAi(t.db, t.admin, conv.id, ctx);
+    expect(await needsChatbotKick(t.db, conv.id, ctx.now())).toBe(true);
+    // Kick (worker) = lên lịch job reply như tin khách mới.
+    expect(await maybeScheduleChatbotReply(t.db, kit.redis, kit.scheduler, conv.id)).toBe(true);
+    const out = await processAiReplyJob(t.db, kit.deps, conv.id);
+    expect(out).toMatchObject({ status: 'done', decision: 'reply' });
+    const runs = await runsOf(conv.id);
+    expect(runs.at(-1)).toMatchObject({ decision: 'reply', triggerMessageIds: [during] });
+    expect(runs.at(-1)!.triggerMessageIds).not.toContain(before);
+    expect(kit.llm.calls).toHaveLength(1);
+    expect((await messagesOf(conv.id)).some((m) => m.senderType === 'bot')).toBe(true);
+  }
+
+  it('\'stop\' (dừng hẳn) ⇒ tin khách trong lúc dừng được trả lời sau "Tiếp tục AI"', () =>
+    pausedThenResume('stop'));
+
+  it('\'pause\' (tạm nghỉ) ⇒ tin khách trong lúc tạm nghỉ được trả lời sau "Tiếp tục AI"', () =>
+    pausedThenResume('pause'));
+
+  it('pause hết hạn tự nhiên ⇒ tin khách kế tiếp kéo theo cả tin đến trong lúc pause', async () => {
+    const bot = await createBot({ agentReplyMode: 'pause', agentPauseMinutes: 30 });
+    const conv = await botConversation(bot);
+    await sendStaff(conv.id, 'Dạ em chào chị');
+    const during = await addMessage(t.db, conv, { text: 'Còn hàng không?', sentAt: new Date() });
+    expect(await processAiReplyJob(t.db, kit.deps, conv.id)).toMatchObject({ reason: AI_BLOCKED_PAUSED });
+    // Giả lập pause đã hết hạn.
+    await t.db
+      .update(conversations)
+      .set({ aiPausedUntil: new Date(Date.now() - 1000) })
+      .where(eq(conversations.id, conv.id));
+    const next = await addMessage(t.db, conv, { text: 'Shop ơi?', sentAt: new Date() });
+    expect(await processAiReplyJob(t.db, kit.deps, conv.id)).toMatchObject({
+      status: 'done',
+      decision: 'reply',
+    });
+    const last = (await runsOf(conv.id)).at(-1)!;
+    expect([...last.triggerMessageIds].sort()).toEqual([during, next].sort());
   });
 });

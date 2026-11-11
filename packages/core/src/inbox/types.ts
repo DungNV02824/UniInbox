@@ -15,7 +15,8 @@ export interface InboxContext {
   policy: PolicyOptions;
   /**
    * AI_PAUSE_AFTER_AGENT_MIN: nhân viên gửi tin (hệ thống hoặc echo Business Suite) vào hội thoại có
-   * chatbot ⇒ ai_paused_until = now + số phút này (pauseAiAfterAgentMessage). Thiếu ⇒ 30.
+   * chatbot mà bot đặt agent_reply_mode 'pause' và không đặt agent_pause_minutes ⇒ ai_paused_until = now + số
+   * phút này (pauseAiAfterAgentMessage). Thiếu ⇒ 30.
    */
   aiPauseAfterAgentMin?: number;
 }

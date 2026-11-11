@@ -4,12 +4,14 @@ import {
   DEFAULT_HANDOFF_ACK_LABEL,
   DEFAULT_HANDOFF_RESOLVE_LABEL,
   HANDOFF_REASON_LABELS,
+  isAiPausedIndefinitely,
   type AiRunDecision,
   type ChatbotRef,
   type ConversationSummary,
   type MessageDto,
   type UserRef,
 } from '@dezon/shared';
+import { dayKey, formatClock } from '@/lib/inbox-format';
 
 /** Bộ lọc trạng thái AI phía web. 'handled' = "AI đang lo" (có chatbot và ai_mode auto). */
 export type AiStateFilter = 'handled';
@@ -21,6 +23,35 @@ export function isAiPaused(c: Pick<ConversationSummary, 'aiPausedUntil'>, now: n
   if (!c.aiPausedUntil) return false;
   const until = Date.parse(c.aiPausedUntil);
   return Number.isFinite(until) && until > now;
+}
+
+/** Dòng báo dừng khi bot "dừng hẳn" (agentReplyMode 'stop' ⇒ aiPausedUntil = AI_PAUSED_INDEFINITELY_ISO). */
+export const AI_STOPPED_BY_AGENT_TEXT = 'Bot đã dừng vì nhân viên nhắn tin';
+
+/**
+ * Mốc hết tạm dừng theo giờ địa phương: hôm nay ⇒ "HH:mm"; ngày mai ⇒ "HH:mm ngày mai"; ngày khác ⇒
+ * "HH:mm dd/MM" (khác năm ⇒ "HH:mm dd/MM/yyyy"). Thời gian tạm dừng có thể tới 1440 phút nên mốc dễ rơi sang hôm sau.
+ */
+function pauseEndLabel(iso: string, now: Date): string {
+  const clock = formatClock(iso);
+  const key = dayKey(iso);
+  if (key === dayKey(now.toISOString())) return clock;
+  const tomorrow = new Date(now);
+  tomorrow.setDate(now.getDate() + 1);
+  if (key === dayKey(tomorrow.toISOString())) return `${clock} ngày mai`;
+  const t = new Date(iso);
+  const date = `${String(t.getDate()).padStart(2, '0')}/${String(t.getMonth() + 1).padStart(2, '0')}`;
+  return t.getFullYear() === now.getFullYear() ? `${clock} ${date}` : `${clock} ${date}/${t.getFullYear()}`;
+}
+
+/**
+ * Dòng báo tạm dừng của hội thoại: dừng hẳn ⇒ "Bot đã dừng vì nhân viên nhắn tin"; có giờ ⇒
+ * "AI tạm dừng đến HH:mm[ ngày mai | dd/MM] vì nhân viên vừa nhắn" (thêm ngày khi mốc không phải hôm nay).
+ */
+export function aiPausedText(aiPausedUntil: string, now: Date | number = Date.now()): string {
+  if (isAiPausedIndefinitely(aiPausedUntil)) return AI_STOPPED_BY_AGENT_TEXT;
+  const until = pauseEndLabel(aiPausedUntil, new Date(now));
+  return `AI tạm dừng đến ${until} vì nhân viên vừa nhắn`;
 }
 
 /**

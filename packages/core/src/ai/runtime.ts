@@ -37,6 +37,7 @@ import {
   requeueQueuedBotMessages,
 } from './delivery';
 import { escalateConversation } from './escalate';
+import { notifyStaffKeyword, type NotifyStaffInput } from './notify-staff';
 import type { LlmClient } from './llm';
 import { HANDOFF_CLAIM_GUARD, runChatbotTurn } from './orchestrator';
 import { CHATBOT_MAX_BUBBLES } from './tools';
@@ -320,15 +321,20 @@ async function insertRun(db: DbLike, r: RunRecord): Promise<string> {
   return row!.id;
 }
 
+/**
+ * Lý do chặn khi ai_paused_until còn hiệu lực (tạm nghỉ / "dừng hẳn" sau tin nhân viên). Riêng lý do này KHÔNG coi
+ * các tin là đã xử lý (ai_runs ghi trigger rỗng): "Tiếp tục AI" (kick) hoặc tin khách sau khi pause hết hạn vẫn
+ * thấy tin khách đang chờ để trả lời. Xem processAiReplyJob bước 1.
+ */
+export const AI_BLOCKED_PAUSED = 'AI đang tạm dừng vì nhân viên vừa nhắn';
+
 /** Điều kiện 6.3 (trừ AI tổng và "có tin mới"). Trả lý do tiếng Việt nếu không được chạy. */
 async function blockedReason(db: Db, deps: AiRuntimeDeps, conv: JobConversation): Promise<string | null> {
   const bot = conv.bot;
   if (!bot || conv.aiMode !== 'auto') return 'Hội thoại không bật chatbot';
   if (!bot.isActive) return 'Chatbot đang tắt';
   if (conv.status === 'pending_human') return 'Hội thoại đang chờ người thật xử lý';
-  if (conv.aiPausedUntil && conv.aiPausedUntil > deps.ctx.now()) {
-    return 'AI đang tạm dừng vì nhân viên vừa nhắn';
-  }
+  if (conv.aiPausedUntil && conv.aiPausedUntil > deps.ctx.now()) return AI_BLOCKED_PAUSED;
   // "Nhân viên đã trả lời sau tin khách" không cần kiểm ở đây: tin chưa xử lý luôn tạo sau tin nhân viên cuối.
   // Hai lần đọc độc lập ⇒ song song (đường trễ trước LLM); thứ tự ưu tiên lý do giữ nguyên.
   const [send, replies] = await Promise.all([
@@ -561,7 +567,11 @@ async function raceReason(
  * 1. Xóa khóa debounce. Đọc conversation (+ kênh, chatbot). AI tổng tắt hoặc không có tin khách chưa xử lý
  *    ⇒ 'skipped' KHÔNG ghi ai_runs. Điều kiện 6.3 khác không đạt (bot gỡ/tắt, pending_human, đang pause,
  *    nhân viên đã trả lời, canSend(by 'bot'), giới hạn ai_runs 'reply' trong 60 phút) ⇒ 'skipped' + ai_runs
- *    decision 'no_reply', error = lý do, trigger = các tin chưa xử lý (coi như đã xử lý).
+ *    decision 'no_reply', error = lý do, trigger = các tin chưa xử lý (coi như đã xử lý) — TRỪ khi bị chặn vì
+ *    đang pause (AI_BLOCKED_PAUSED: tạm nghỉ / "dừng hẳn" sau tin nhân viên): trigger rỗng, tin khách đến trong
+ *    lúc pause vẫn là tin chưa xử lý ⇒ "Tiếp tục AI" (kick) trả lời ngay tin đang chờ. Pause hết hạn tự nhiên thì
+ *    không có gì đánh thức: tin khách kế tiếp kéo theo mọi tin đang chờ (sau tin nhân viên cuối, trong
+ *    PENDING_MAX_AGE_HOURS). Tin khách TRƯỚC tin nhân viên vẫn coi như nhân viên đã lo (mốc tin nhân viên cuối).
  * 2. Dựng history (CHATBOT_HISTORY_LIMIT tin cuối) + newMessages + ảnh (≤ 4, storage.get ⇒ base64), giờ làm
  *    việc, rồi runChatbotTurn({ llm, now: ctx.now, defaultModel, minConfidence }).
  * 3. Transaction + SELECT ... FOR UPDATE conversation (chống đua 6.4): ai_mode/chatbot_id đổi, có tin agent
@@ -572,7 +582,8 @@ async function raceReason(
  *    reply: tạo message sender 'bot' (queued, ai_run_id, tách ≤ 1999).
  * 4. Sau commit: reply ⇒ enqueueOutbound lần lượt với delay cộng dồn BOT_BUBBLE_GAP_MIN_MS..MAX_MS, phát
  *    message.created. escalate / error ⇒ escalateConversation(reasonCode ?? 'other', createdBy 'ai', messages của
- *    escalate — gửi thay handoffMessage).
+ *    escalate — gửi thay handoffMessage). Lượt khớp notifyKeywords (result.notifiedKeyword) mà không chuyển người
+ *    (kể cả bị hủy) ⇒ notifyStaffKeyword (tin system + handoff.created botContinues + Lark, chống trùng 10 phút).
  * 5. Luôn (finally): cờ aiDirtyKey còn ⇒ xóa và lên lịch lại (tin đến khi cả hai khe job đều bận).
  * Lỗi hạ tầng (DB/Redis) ⇒ ném (BullMQ retry); lỗi LLM không bao giờ ném (decision 'error').
  */
@@ -626,7 +637,8 @@ async function runAiReplyJob(db: Db, deps: AiRuntimeDeps, conversationId: string
     const id = await insertRun(db, {
       conversationId,
       chatbotId: conv.bot?.id ?? null,
-      triggerMessageIds,
+      // Đang pause ⇒ không coi là đã xử lý (resume/kick còn thấy tin để trả lời); lý do khác ⇒ coi như đã xử lý.
+      triggerMessageIds: reason === AI_BLOCKED_PAUSED ? [] : triggerMessageIds,
       model,
       decision: 'no_reply',
       error: reason,
@@ -719,6 +731,50 @@ async function runChatbotTurnAndCommit(
     return { race: null, aiRunId, messageIds };
   });
 
+  // Từ khóa "Báo nhân viên, bot VẪN trả lời" (notifyKeywords): báo nhân viên sau commit ở MỌI kết quả của lượt
+  // (reply / no_reply / hủy do chống đua hay công tắc), kể cả khi bước sau commit ném lỗi (finally) — trừ khi lượt
+  // này chuyển người thật (escalate/error đã ghi): escalateConversation đã báo (tin system + handoff.created + Lark).
+  const notifyKeyword =
+    result.notifiedKeyword && (saved.race || (result.decision !== 'escalate' && result.decision !== 'error'))
+      ? result.notifiedKeyword
+      : null;
+  try {
+    return await afterTurnCommitted(db, deps, conv, bot, result, saved);
+  } finally {
+    if (notifyKeyword) {
+      await notifyStaffSafe(db, deps, conversationId, {
+        keyword: notifyKeyword,
+        customerTexts: pending.map((m) => m.text),
+        aiRunId: saved.aiRunId,
+      });
+    }
+  }
+}
+
+/** Báo nhân viên (notifyStaffKeyword); lỗi chỉ log warn — lượt bot đã commit, không ném để BullMQ chạy lại. */
+async function notifyStaffSafe(
+  db: Db,
+  deps: AiRuntimeDeps,
+  conversationId: string,
+  input: NotifyStaffInput,
+): Promise<void> {
+  try {
+    await notifyStaffKeyword(db, deps, conversationId, input);
+  } catch (error) {
+    deps.logger.warn({ conversationId, err: errorText(error) }, 'Không báo được nhân viên (từ khóa báo)');
+  }
+}
+
+/** Bước 4 của processAiReplyJob: tác dụng phụ sau commit (gửi tin bot / chuyển người / lên lịch lại khi hủy). */
+async function afterTurnCommitted(
+  db: Db,
+  deps: AiRuntimeDeps,
+  conv: JobConversation,
+  bot: NonNullable<JobConversation['bot']>,
+  result: ChatbotTurnResult,
+  saved: { race: RaceResult | null; aiRunId: string; messageIds: string[] },
+): Promise<{ result: AiReplyOutcome; botReplyQueued: boolean }> {
+  const conversationId = conv.id;
   if (saved.race) {
     deps.logger.info({ conversationId, reason: saved.race.reason }, 'Hủy lượt chatbot (chống đua/công tắc)');
     if (saved.race.reschedule) {
@@ -758,28 +814,9 @@ async function runChatbotTurnAndCommit(
 }
 
 // ---------- Nhân viên nhắn ⇒ tạm dừng AI ----------
-
-/** Mặc định AI_PAUSE_AFTER_AGENT_MIN. */
-export const DEFAULT_AI_PAUSE_AFTER_AGENT_MIN = 30;
-
-/**
- * Nhân viên vừa gửi tin (sendAgentMessage hoặc echo Business Suite không phải của hệ thống) ⇒ nếu hội thoại
- * có chatbot_id: ai_paused_until = max(hiện tại, now + pauseMinutes) (tin đồng bộ cũ không rút ngắn pause).
- * Trả thời điểm pause sau cập nhật (null nếu không có bot). `db` nhận cả transaction.
- */
-export async function pauseAiAfterAgentMessage(
-  db: Pick<Db, 'update'>,
-  conversationId: string,
-  now: Date,
-  pauseMinutes: number = DEFAULT_AI_PAUSE_AFTER_AGENT_MIN,
-): Promise<Date | null> {
-  const until = new Date(now.getTime() + pauseMinutes * 60_000).toISOString();
-  const [row] = await db
-    .update(conversations)
-    .set({
-      aiPausedUntil: sql`greatest(${conversations.aiPausedUntil}, ${until}::timestamptz)`,
-    })
-    .where(and(eq(conversations.id, conversationId), sql`${conversations.chatbotId} is not null`))
-    .returning({ aiPausedUntil: conversations.aiPausedUntil });
-  return row?.aiPausedUntil ?? null;
-}
+// Áp "Khi nhân viên vào nhắn tin" (agent_reply_mode: continue / pause / stop) của bot — xem ./agent-pause.ts.
+export {
+  DEFAULT_AI_PAUSE_AFTER_AGENT_MIN,
+  pauseAiAfterAgentMessage,
+  type AgentPauseResult,
+} from './agent-pause';
