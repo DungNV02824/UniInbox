@@ -1,5 +1,6 @@
 // Kiểu dữ liệu thuần (không DB) dùng chung cho prompt/orchestrator/runtime.
 import type {
+  AiHandoffMode,
   ChatbotExampleDto,
   ChatbotTurnDecision,
   HandoffReasonCode,
@@ -37,6 +38,12 @@ export interface ChatbotConfig {
    * ChatbotTurnResult.notifiedKeyword rồi vẫn chạy LLM bình thường. Tùy chọn để fixture cũ hợp lệ (thiếu ⇒ []).
    */
   notifyKeywords?: string[];
+  /**
+   * "Khi AI tự chuyển người thật" (AI_HANDOFF_MODES): 'continue' ⇒ sau khi AI escalate bot VẪN trả lời các tin sau
+   * (prompt nói rõ; lượt có handoff mở thì được nói yêu cầu đã chuyển — xem ChatHistoryItem.handoffOpen). Tùy chọn để
+   * fixture cũ hợp lệ (thiếu ⇒ 'stop').
+   */
+  aiHandoffMode?: AiHandoffMode;
 }
 
 /** Một tin trong lịch sử/tin mới, đã rút gọn cho prompt. */
@@ -62,6 +69,13 @@ export interface ChatHistoryItem {
    * allowStaffNotified).
    */
   staffNotified?: boolean;
+  /**
+   * Dòng role 'system' "Hội thoại đã được chuyển cho nhân viên …" (loadTurnHistory, từ bảng handoffs) của handoff
+   * CÒN MỞ (resolved_at null). Bot aiHandoffMode 'continue' + có dòng này ⇒ hội thoại đang chờ nhân viên mà bot vẫn
+   * trả lời: prompt thêm ghi chú (handoffContinueTurnNote) và bộ chặn "tự nói đã chuyển" bỏ qua lời chuyển (nhân
+   * viên ĐÃ thật sự nhận yêu cầu) — claimsHandoffInReply allowHandedOff.
+   */
+  handoffOpen?: boolean;
 }
 
 /**

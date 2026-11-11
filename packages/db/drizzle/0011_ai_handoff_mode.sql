@@ -1,0 +1,2 @@
+ALTER TABLE "chatbots" ADD COLUMN "ai_handoff_mode" text DEFAULT 'stop' NOT NULL;--> statement-breakpoint
+ALTER TABLE "chatbots" ADD CONSTRAINT "chatbots_ai_handoff_mode_check" CHECK ("chatbots"."ai_handoff_mode" IN ('stop', 'continue'));

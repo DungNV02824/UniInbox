@@ -34,6 +34,7 @@ import {
   type EditorTab,
   type FormErrors,
 } from '@/lib/chatbot-form';
+import { withBotContinues } from '@/lib/chatbot-test';
 import { chatbotKeys, chatbotsApi } from '@/lib/chatbots-api';
 import { errorText } from '@/lib/inbox-queries';
 import { cn } from '@/lib/utils';
@@ -250,8 +251,11 @@ function ChatbotEditor({
       showErrors(result.errors, null);
       throw new DraftInvalidError(result.errors);
     }
-    if (savedId) return chatbotsApi.test(savedId, { messages, draft: dirty ? result.data : undefined });
-    return chatbotsApi.testDraft({ draft: result.data, messages });
+    const mode = form.aiHandoffMode;
+    const res = savedId
+      ? await chatbotsApi.test(savedId, { messages, draft: dirty ? result.data : undefined })
+      : await chatbotsApi.testDraft({ draft: result.data, messages });
+    return withBotContinues(res, mode);
   };
 
   const nameId = `${idPrefix}-name`;

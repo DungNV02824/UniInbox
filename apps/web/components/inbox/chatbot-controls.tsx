@@ -1,15 +1,17 @@
 'use client';
 
-import { AlertTriangle, CheckCircle2, Hand, Loader2, PauseCircle, Play, Siren } from 'lucide-react';
+import { AlertTriangle, Bot, CheckCircle2, Hand, Loader2, PauseCircle, Play, Siren } from 'lucide-react';
 import { isAiPausedIndefinitely, type ConversationSummary } from '@dezon/shared';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/lib/auth';
 import {
   aiPausedText,
+  botContinuesDuringHandoff,
   chatbotControlState,
   chatbotLockedHint,
   chatbotSelectOptions,
   handoffAckedText,
+  handoffBotNote,
   handoffButtonLabels,
   handoffReasonLabel,
   isAiPaused,
@@ -28,7 +30,8 @@ const OFF = '';
 
 /**
  * Ô chọn nổi bật "🤖 Chatbot: Tắt / <tên bot>" ở đầu khung chat. Chỉ tô "đang bật" khi ai_mode auto; còn gắn
- * bot mà ai_mode off (sau "Xong" / chuyển người) ⇒ "Bot đang tắt — Bật lại". Đang chờ người ⇒ khóa ô chọn.
+ * bot mà ai_mode off (sau "Xong" / chuyển người) ⇒ "Bot đang tắt — Bật lại". Đang chờ người ⇒ khóa ô chọn
+ * (bot đặt "vẫn trả lời khách" thì vẫn tô "đang bật").
  */
 export function ChatbotSelect({ conversation: c }: { conversation: ConversationSummary }) {
   const bots = useChatbotOptions();
@@ -36,16 +39,20 @@ export function ChatbotSelect({ conversation: c }: { conversation: ConversationS
   const current = c.chatbot ?? null;
   const options = chatbotSelectOptions(bots.data ?? [], current);
   const state = chatbotControlState(c);
-  const on = state === 'on';
-  const botOff = state === 'off' && current !== null;
   const locked = state === 'handoff';
+  // Chờ người nhưng bot đặt "vẫn trả lời khách": ô vẫn khóa (đóng yêu cầu bằng nút trên banner) nhưng tô "đang bật".
+  const continuing = locked && botContinuesDuringHandoff(c);
+  const on = state === 'on' || continuing;
+  const botOff = state === 'off' && current !== null;
   // Bot đang gắn đã bị admin tắt hẳn (is_active false — agent không thấy trong danh sách) thì không "Bật lại"
   // được. Danh sách chưa tải xong thì vẫn cho bấm (máy chủ kiểm lại).
   const canReEnable = botOff && (!bots.data || bots.data.some((b) => b.id === current.id && b.isActive));
   const busy = setBot.isPending || bots.isPending;
 
   let title = 'Chưa bật chatbot';
-  if (locked) title = chatbotLockedHint(current);
+  if (continuing && current)
+    title = `Chatbot "${current.name}" vẫn đang trả lời khách trong lúc chờ nhân viên xử lý`;
+  else if (locked) title = chatbotLockedHint(current);
   else if (on && current && isAiPausedIndefinitely(c.aiPausedUntil))
     title = `Chatbot "${current.name}" đã dừng vì nhân viên nhắn tin — bấm "Tiếp tục AI" để bot trả lời tiếp`;
   else if (on && current) title = `Chatbot "${current.name}" đang trả lời khách trong hội thoại này`;
@@ -134,7 +141,9 @@ export function ChatbotSelect({ conversation: c }: { conversation: ConversationS
 function AiPausedNotice({ conversation: c }: { conversation: ConversationSummary }) {
   const now = useNow(30_000);
   const resume = useResumeAi(c.id);
-  if (!c.chatbot || c.aiMode !== 'auto' || c.status === 'pending_human' || !isAiPaused(c, now)) return null;
+  // Chờ người ở chế độ bot dừng ⇒ banner "Cần người" đã nói; bot vẫn trả lời khi chờ người ⇒ vẫn báo tạm dừng.
+  if (!c.chatbot || c.aiMode !== 'auto' || !isAiPaused(c, now)) return null;
+  if (c.status === 'pending_human' && !botContinuesDuringHandoff(c)) return null;
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-violet-200 bg-violet-50 px-3 py-1.5 text-xs text-violet-900 sm:px-4">
       <span className="flex min-w-0 items-center gap-1.5">
@@ -157,13 +166,16 @@ function AiPausedNotice({ conversation: c }: { conversation: ConversationSummary
 
 /**
  * Banner đỏ "Cần người: <lý do> — <tóm tắt>" + "Nhận xử lý" / "Đã xong, trả lại cho AI" (bot có thể đặt tên
- * riêng cho hai nút, vd. "Nghiệm thu" / "Đã chuyển tiền").
+ * riêng cho hai nút, vd. "Nghiệm thu" / "Đã chuyển tiền"). Bot đặt "vẫn trả lời khách" ⇒ thêm dòng "Bot vẫn đang
+ * trả lời khách" (nút nhận chỉ ghi nhận; nút xong đóng yêu cầu, bot vốn đã bật).
  */
 function HandoffBanner({ conversation: c }: { conversation: ConversationSummary }) {
   const { user } = useAuth();
+  const now = useNow(30_000);
   const ack = useAckHandoff(c.id);
   const resolve = useResolveHandoff(c.id);
   if (c.status !== 'pending_human') return null;
+  const botNote = handoffBotNote(c, now);
   const h = c.handoff ?? null;
   const ackedBy = h?.acknowledgedBy ?? null;
   const busy = ack.isPending || resolve.isPending;
@@ -184,6 +196,12 @@ function HandoffBanner({ conversation: c }: { conversation: ConversationSummary 
           {ackedBy && (
             <p className="text-xs text-blue-800/80">
               {handoffAckedText(labels, ackedBy.id === user?.id ? 'bạn' : ackedBy.name)}
+            </p>
+          )}
+          {botNote && (
+            <p className="flex items-center gap-1 text-xs text-violet-800">
+              <Bot className="size-3.5 shrink-0" aria-hidden />
+              {botNote}
             </p>
           )}
         </div>

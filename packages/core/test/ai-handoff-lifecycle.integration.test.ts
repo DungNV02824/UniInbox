@@ -131,7 +131,13 @@ describe('escalate với handoff mở sót lại', () => {
       summary: 'x',
       createdBy: 'ai',
     });
-    expect(dup).toEqual({ handoffId: res.handoffId, created: false, botMessagesQueued: 0 });
+    expect(dup).toEqual({
+      handoffId: res.handoffId,
+      created: false,
+      botMessagesQueued: 0,
+      botContinues: false,
+      staffNotified: false,
+    });
     expect(await openHandoffs(conv.id)).toHaveLength(1);
   });
 });

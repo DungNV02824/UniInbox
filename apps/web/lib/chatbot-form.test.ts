@@ -18,6 +18,7 @@ import {
   moveItem,
   NAME_CONFLICT_MESSAGE,
   normalizeAgentReplyMode,
+  normalizeAiHandoffMode,
   normalizeResponseSpeed,
   overlapMessage,
   tabsWithErrors,
@@ -46,6 +47,7 @@ const dto: ChatbotDto = {
   handoffActionLark: false,
   handoffAckMessage: null,
   handoffResolveMessage: null,
+  aiHandoffMode: 'stop',
   agentReplyMode: 'pause',
   agentPauseMinutes: null,
   handoffReminderMin: 0,
@@ -86,6 +88,7 @@ describe('chatbotToForm / formToRequest', () => {
       handoffAckMessage: null,
       handoffResolveMessage: null,
       responseSpeed: 'fast',
+      aiHandoffMode: 'stop',
       agentReplyMode: 'pause',
       agentPauseMinutes: null,
       handoffReminderMin: 0,
@@ -376,6 +379,44 @@ describe('từ khóa "bot VẪN trả lời" + phối hợp nhân viên', () => 
     const bad = validateChatbotForm(form({ handoffResolveMessage: 'x'.repeat(1001) }));
     expect(!bad.ok && bad.errors.handoffResolveMessage).toBe('Tin gửi khách tối đa 1.000 ký tự');
     if (!bad.ok) expect(tabsWithErrors(bad.errors)).toEqual(new Set(['handoff']));
+  });
+});
+
+describe('"Khi AI tự chuyển người thật" (aiHandoffMode)', () => {
+  it("form mới mặc định 'stop'", () => {
+    expect(emptyChatbotForm().aiHandoffMode).toBe('stop');
+    expect(formToRequest(emptyChatbotForm()).aiHandoffMode).toBe('stop');
+  });
+
+  it("DTO 'continue' → form → body (gồm bản nháp chat thử) và bản sao giữ nguyên", () => {
+    const custom: ChatbotDto = { ...dto, aiHandoffMode: 'continue' };
+    const f = chatbotToForm(custom);
+    expect(f.aiHandoffMode).toBe('continue');
+    const res = validateChatbotForm(f);
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.data.aiHandoffMode).toBe('continue');
+    expect(duplicateRequest(custom, []).aiHandoffMode).toBe('continue');
+    expect(duplicateRequest(dto, []).aiHandoffMode).toBe('stop');
+  });
+
+  it("API cũ thiếu trường / giá trị lạ ⇒ 'stop'", () => {
+    const legacy = { ...dto } as Partial<ChatbotDto>;
+    delete legacy.aiHandoffMode;
+    expect(chatbotToForm(legacy as ChatbotDto).aiHandoffMode).toBe('stop');
+    expect(duplicateRequest(legacy as ChatbotDto, []).aiHandoffMode).toBe('stop');
+    expect(normalizeAiHandoffMode('xyz')).toBe('stop');
+    expect(normalizeAiHandoffMode(undefined)).toBe('stop');
+    expect(normalizeAiHandoffMode('continue')).toBe('continue');
+  });
+
+  it('isFormDirty nhận ra đổi chế độ; lỗi ô thuộc tab Phối hợp nhân viên', () => {
+    const baseline = form();
+    expect(isFormDirty(form(), baseline)).toBe(false);
+    expect(isFormDirty(form({ aiHandoffMode: 'continue' }), baseline)).toBe(true);
+    expect(tabsWithErrors({ aiHandoffMode: 'x' })).toEqual(new Set(['staff']));
+    const bad = validateChatbotForm(form({ aiHandoffMode: 'xyz' as never }));
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) expect(bad.errors.aiHandoffMode).toBe('Chọn cách bot xử lý khi AI tự chuyển người thật');
   });
 });
 

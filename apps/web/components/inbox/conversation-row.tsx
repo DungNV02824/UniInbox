@@ -3,7 +3,7 @@ import { PauseCircle, TriangleAlert, UserRound } from 'lucide-react';
 import { isAiPausedIndefinitely, type ConversationSummary } from '@dezon/shared';
 import { Avatar } from '@/components/ui/avatar';
 import { contactTagsOf } from '@/lib/contact-tags';
-import { conversationAiState, handoffReasonLabel } from '@/lib/inbox-ai';
+import { chatbotChipState, conversationAiState, handoffReasonLabel } from '@/lib/inbox-ai';
 import {
   CHANNEL_TYPE_LABELS,
   formatDateTime,
@@ -37,6 +37,8 @@ export function ConversationRow({
   const time = c.lastMessage?.sentAt ?? c.lastMessageAt;
   const channelTitle = `${CHANNEL_TYPE_LABELS[c.channel.type]} · ${c.channel.displayName}`;
   const aiState = conversationAiState(c, now);
+  // Chip bot tách khỏi "Cần người": bot đặt "vẫn trả lời khách" thì chờ người mà bot vẫn đang trả lời.
+  const botState = chatbotChipState(c, now);
   const handoffTitle = c.handoff
     ? `Cần người: ${handoffReasonLabel(c.handoff.reasonCode)}${c.handoff.acknowledgedBy ? ` · đã nhận bởi ${c.handoff.acknowledgedBy.name}` : ''}`
     : 'Cần người xử lý';
@@ -102,14 +104,14 @@ export function ConversationRow({
             <span
               className={cn(
                 'flex max-w-[45%] min-w-0 items-center gap-0.5 rounded px-1 text-[10px] leading-4 font-medium',
-                aiState === 'active' ? 'bg-violet-100 text-violet-700' : 'bg-muted text-muted-foreground',
+                botState === 'active' ? 'bg-violet-100 text-violet-700' : 'bg-muted text-muted-foreground',
               )}
               title={
-                aiState === 'paused'
+                botState === 'paused'
                   ? isAiPausedIndefinitely(c.aiPausedUntil)
                     ? `Chatbot ${c.chatbot.name} · đã dừng vì nhân viên nhắn tin`
                     : `Chatbot ${c.chatbot.name} · tạm dừng vì nhân viên vừa nhắn`
-                  : aiState === 'active'
+                  : botState === 'active'
                     ? `Chatbot ${c.chatbot.name} đang trả lời`
                     : `Chatbot ${c.chatbot.name} · đang tắt cho hội thoại này`
               }
@@ -117,7 +119,7 @@ export function ConversationRow({
               <span aria-hidden>🤖</span>
               <span className="sr-only">Chatbot: </span>
               <span className="truncate">{c.chatbot.name}</span>
-              {aiState === 'paused' && <PauseCircle className="size-3 shrink-0" aria-label="AI tạm dừng" />}
+              {botState === 'paused' && <PauseCircle className="size-3 shrink-0" aria-label="AI tạm dừng" />}
             </span>
           )}
           {c.assignedUser && (

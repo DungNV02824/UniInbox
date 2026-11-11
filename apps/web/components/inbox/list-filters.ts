@@ -180,7 +180,8 @@ export function activeAiFilter(filters: Pick<ConversationFilters, 'status' | 'ai
 
 /**
  * Chọn "Cần người" (= trạng thái pending_human) hoặc "AI đang lo" (= có bot, ai_mode auto). Hai lựa chọn
- * loại trừ nhau (hội thoại chờ người đã tắt AI); bỏ chọn thì chỉ gỡ phần do nhóm này đặt.
+ * loại trừ nhau ở bộ lọc (thường hội thoại chờ người đã tắt AI; bot đặt "vẫn trả lời khách" thì hội thoại chờ người
+ * cũng nằm trong "AI đang lo"); bỏ chọn thì chỉ gỡ phần do nhóm này đặt.
  */
 export function applyAiFilter(filters: ConversationFilters, choice: AiQuickFilter): ConversationFilters {
   const status = filters.status === 'pending_human' ? undefined : filters.status;

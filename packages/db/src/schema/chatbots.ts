@@ -1,6 +1,6 @@
 import { sql } from 'drizzle-orm';
 import { boolean, check, integer, jsonb, pgTable, real, text, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
-import type { AgentReplyMode, ResponseSpeed } from '@dezon/shared';
+import type { AgentReplyMode, AiHandoffMode, ResponseSpeed } from '@dezon/shared';
 import { emptyTextArray, id, timestamps } from './_common';
 import { users } from './users';
 
@@ -54,6 +54,8 @@ export const chatbots = pgTable(
     handoffResolveMessage: text('handoff_resolve_message'),
     /** "Khi nhân viên vào nhắn tin": 'continue' | 'pause' | 'stop' (AGENT_REPLY_MODES). */
     agentReplyMode: text('agent_reply_mode').$type<AgentReplyMode>().notNull().default('pause'),
+    /** "Khi AI tự chuyển người thật": 'stop' | 'continue' (AI_HANDOFF_MODES). */
+    aiHandoffMode: text('ai_handoff_mode').$type<AiHandoffMode>().notNull().default('stop'),
     /** Số phút tạm nghỉ khi agent_reply_mode = 'pause'; null = AI_PAUSE_AFTER_AGENT_MIN. */
     agentPauseMinutes: integer('agent_pause_minutes'),
     /** Nhắc lại "chưa ai nhận hội thoại" sau N phút kể từ lúc chuyển người; 0 = tắt (mặc định). */
@@ -66,6 +68,7 @@ export const chatbots = pgTable(
     check('chatbots_name_length', sql`char_length(${t.name}) BETWEEN 1 AND 100`),
     check('chatbots_response_speed_check', sql`${t.responseSpeed} IN ('fast', 'balanced', 'thorough')`),
     check('chatbots_agent_reply_mode_check', sql`${t.agentReplyMode} IN ('continue', 'pause', 'stop')`),
+    check('chatbots_ai_handoff_mode_check', sql`${t.aiHandoffMode} IN ('stop', 'continue')`),
     check(
       'chatbots_agent_pause_minutes_check',
       sql`${t.agentPauseMinutes} IS NULL OR ${t.agentPauseMinutes} BETWEEN 1 AND 1440`,

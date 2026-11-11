@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import type { AppConfig } from '../../config';
 import { ChatbotModelsService } from './chatbot-models.service';
 import {
+  botContinuesAfterHandoff,
   ChatbotTestService,
   customerFacingMessages,
   splitTestMessages,
@@ -24,7 +25,53 @@ describe('customerFacingMessages', () => {
   });
 });
 
+describe('botContinuesAfterHandoff', () => {
+  it("chỉ escalate do AI tự chuyển với bot 'continue'", () => {
+    const cont = { aiHandoffMode: 'continue' as const };
+    expect(botContinuesAfterHandoff({ decision: 'escalate' }, cont)).toBe(true);
+    expect(botContinuesAfterHandoff({ decision: 'escalate', matchedKeyword: 'gặp nhân viên' }, cont)).toBe(
+      false,
+    );
+    expect(botContinuesAfterHandoff({ decision: 'reply' }, cont)).toBe(false);
+    // Lỗi AI ⇒ chạy thật chuyển người (AI tự chuyển) ⇒ bot 'continue' vẫn trả lời.
+    expect(botContinuesAfterHandoff({ decision: 'error' }, cont)).toBe(true);
+    expect(botContinuesAfterHandoff({ decision: 'error' }, { aiHandoffMode: 'stop' })).toBe(false);
+    expect(botContinuesAfterHandoff({ decision: 'escalate' }, { aiHandoffMode: 'stop' })).toBe(false);
+    expect(botContinuesAfterHandoff({ decision: 'escalate' }, {})).toBe(false);
+  });
+});
+
 describe('splitTestMessages', () => {
+  it('handoffOpened ⇒ dòng [Hệ thống] handoff còn mở ngay sau tin đó (lượt sau chạy như bot continue thật)', () => {
+    const { history, newMessages } = splitTestMessages([
+      { role: 'customer', text: 'Em gửi 7 ảnh', imageCount: 7 },
+      { role: 'bot', text: 'Dạ em đã nhận đủ ảnh', handoffOpened: 'other' },
+      { role: 'customer', text: 'hello' },
+    ]);
+    expect(history).toEqual([
+      { role: 'customer', text: 'Em gửi 7 ảnh', attachmentCount: 7 },
+      { role: 'bot', text: 'Dạ em đã nhận đủ ảnh' },
+      {
+        role: 'system',
+        text: 'Hội thoại đã được chuyển cho nhân viên (lý do: Lý do khác).',
+        handoffOpen: true,
+      },
+    ]);
+    expect(newMessages).toEqual([{ role: 'customer', text: 'hello' }]);
+  });
+
+  it('lượt chuyển không có tin bot (đánh dấu ở tin khách) ⇒ tin đó thành lịch sử, chỉ tin sau là tin mới', () => {
+    const { history, newMessages } = splitTestMessages([
+      { role: 'customer', text: 'chào' },
+      { role: 'bot', text: 'Dạ em chào anh' },
+      { role: 'customer', text: 'giá bao nhiêu', handoffOpened: 'low_confidence' },
+      { role: 'customer', text: 'hello' },
+    ]);
+    expect(history.map((h) => h.role)).toEqual(['customer', 'bot', 'customer', 'system']);
+    expect(history.at(-1)).toMatchObject({ handoffOpen: true });
+    expect(newMessages).toEqual([{ role: 'customer', text: 'hello' }]);
+  });
+
   it('các tin khách cuối là tin mới, phần trước là lịch sử', () => {
     const { history, newMessages } = splitTestMessages([
       { role: 'customer', text: 'a' },

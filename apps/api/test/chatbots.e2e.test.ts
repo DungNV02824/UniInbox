@@ -385,6 +385,28 @@ describe('CRUD chatbot', () => {
     expect(other.json<ChatbotDto>()).toMatchObject({ ...expected, agentPauseMinutes: 1440 });
   });
 
+  it("aiHandoffMode: mặc định 'stop', tạo/sửa 'continue', đọc lại; giá trị lạ => 400", async () => {
+    const plain = await createBot({ name: 'Bot khi AI chuyển mặc định' });
+    expect(plain.aiHandoffMode).toBe(CHATBOT_DEFAULTS.aiHandoffMode);
+    expect(plain.aiHandoffMode).toBe('stop');
+    const bot = await createBot({ name: 'Bot vẫn trả lời', aiHandoffMode: 'continue' });
+    expect(bot.aiHandoffMode).toBe('continue');
+    const patched = await asAdmin('PATCH', `/chatbots/${plain.id}`, { aiHandoffMode: 'continue' });
+    expect(patched.statusCode).toBe(200);
+    expect(patched.json<ChatbotDto>().aiHandoffMode).toBe('continue');
+    expect((await asAdmin('GET', `/chatbots/${plain.id}`)).json<ChatbotDto>().aiHandoffMode).toBe('continue');
+    // PATCH trường khác giữ nguyên.
+    const other = await asAdmin('PATCH', `/chatbots/${plain.id}`, { handoffReminderMin: 5 });
+    expect(other.json<ChatbotDto>()).toMatchObject({ aiHandoffMode: 'continue', handoffReminderMin: 5 });
+    expect((await asAdmin('PATCH', `/chatbots/${plain.id}`, { aiHandoffMode: 'pause' })).statusCode).toBe(
+      400,
+    );
+    expect((await asAdmin('POST', '/chatbots', { name: 'Bot mode lạ', aiHandoffMode: 'x' })).statusCode).toBe(
+      400,
+    );
+    expect((await asAdmin('GET', `/chatbots/${plain.id}`)).json<ChatbotDto>().aiHandoffMode).toBe('continue');
+  });
+
   it('cài đặt mới: giá trị ngoài khoảng / lạ => 400', async () => {
     const bot = await createBot({ name: 'Bot kiểm giới hạn' });
     const BAD: Record<string, unknown>[] = [
@@ -617,6 +639,62 @@ describe('chạy thử chatbot', () => {
       (await asAdmin('POST', '/chatbots/test-draft', { messages: [{ role: 'customer', text: 'x' }] }))
         .statusCode,
     ).toBe(400);
+  });
+
+  it("Chat thử: escalate với bot aiHandoffMode 'continue' ⇒ botContinuesAfterHandoff; 'stop' / từ khóa ⇒ không có", async () => {
+    const escalate = {
+      functionCall: {
+        name: 'escalate',
+        args: {
+          reason_code: 'other',
+          summary_for_agent: 'CTV gửi 7 ảnh',
+          messages_to_customer: ['Dạ em đã nhận đủ ảnh và chuyển cho bộ phận kiểm tra ạ.'],
+        },
+      },
+      text: null,
+      usage: { inputTokens: 5, outputTokens: 5 },
+      model: 'gemini-2.5-flash',
+    };
+    const messages = [{ role: 'customer', text: 'Em gửi 7 ảnh công trình' }];
+    nextLlmResponse = escalate;
+    const cont = await asAdmin('POST', '/chatbots/test-draft', {
+      draft: { name: 'Bot nháp vẫn trả lời', aiHandoffMode: 'continue' },
+      messages,
+    });
+    expect(cont.statusCode).toBe(200);
+    expect(cont.json<ChatbotTestResult>()).toMatchObject({
+      decision: 'escalate',
+      botContinuesAfterHandoff: true,
+    });
+
+    nextLlmResponse = escalate;
+    const stop = await asAdmin('POST', '/chatbots/test-draft', {
+      draft: { name: 'Bot nháp dừng' },
+      messages,
+    });
+    expect(stop.json<ChatbotTestResult>().decision).toBe('escalate');
+    expect(stop.json<ChatbotTestResult>()).not.toHaveProperty('botContinuesAfterHandoff');
+
+    const saved = await createBot({
+      name: 'Bot đã lưu vẫn trả lời',
+      aiHandoffMode: 'continue',
+      handoffKeywords: ['gặp nhân viên'],
+    });
+    nextLlmResponse = escalate;
+    const savedRun = await asAdmin('POST', `/chatbots/${saved.id}/test`, { messages });
+    expect(savedRun.json<ChatbotTestResult>()).toMatchObject({ botContinuesAfterHandoff: true });
+    nextLlmResponse = escalate;
+    const overridden = await asAdmin('POST', `/chatbots/${saved.id}/test`, {
+      messages,
+      draft: { aiHandoffMode: 'stop' },
+    });
+    expect(overridden.json<ChatbotTestResult>()).not.toHaveProperty('botContinuesAfterHandoff');
+    // Từ khóa chuyển người luôn dừng bot.
+    const keyword = await asAdmin('POST', `/chatbots/${saved.id}/test`, {
+      messages: [{ role: 'customer', text: 'cho em gặp nhân viên' }],
+    });
+    expect(keyword.json<ChatbotTestResult>().decision).toBe('escalate');
+    expect(keyword.json<ChatbotTestResult>()).not.toHaveProperty('botContinuesAfterHandoff');
   });
 
   it('escalateWhenUnsure: mặc định confidence thấp => escalate; draft false => vẫn reply', async () => {

@@ -55,6 +55,36 @@ export function aiPausedText(aiPausedUntil: string, now: Date | number = Date.no
 }
 
 /**
+ * Hội thoại "Cần người" mà bot VẪN trả lời khách: bot đặt aiHandoffMode 'continue' (AI tự chuyển người thì
+ * ai_mode giữ 'auto'). Bot 'stop' / chuyển do từ khóa ⇒ ai_mode 'off' ⇒ false.
+ */
+export function botContinuesDuringHandoff(
+  c: Pick<ConversationSummary, 'status' | 'aiMode' | 'chatbot'>,
+): boolean {
+  return c.status === 'pending_human' && c.aiMode === 'auto' && !!c.chatbot?.aiHandoffContinues;
+}
+
+export const BOT_CONTINUES_DURING_HANDOFF_TEXT = 'Bot vẫn đang trả lời khách';
+
+/**
+ * Dòng phụ trên banner "Cần người": bot vẫn trả lời ⇒ "Bot vẫn đang trả lời khách"; đang tạm dừng vì nhân viên
+ * vừa nhắn (dải "AI tạm dừng…" hiện riêng) hoặc bot đã dừng ⇒ null.
+ */
+export function handoffBotNote(c: AiFields, now: number): string | null {
+  return botContinuesDuringHandoff(c) && !isAiPaused(c, now) ? BOT_CONTINUES_DURING_HANDOFF_TEXT : null;
+}
+
+/**
+ * Trạng thái chip 🤖 của bot ở dòng hội thoại (bỏ qua "Cần người", banner/biểu tượng cảnh báo lo phần đó):
+ * 'active' đang trả lời, 'paused' tạm dừng vì nhân viên nhắn, 'off' bot đang tắt (kể cả chờ người ở chế độ dừng).
+ */
+export function chatbotChipState(c: AiFields, now: number): 'active' | 'paused' | 'off' {
+  if (!c.chatbot || c.aiMode !== 'auto') return 'off';
+  if (c.status === 'pending_human' && !botContinuesDuringHandoff(c)) return 'off';
+  return isAiPaused(c, now) ? 'paused' : 'active';
+}
+
+/**
  * Trạng thái AI hiển thị của hội thoại:
  * - 'handoff': đang chờ người thật (pending_human);
  * - 'paused': có bot, ai_mode auto nhưng đang tạm dừng vì nhân viên vừa nhắn;

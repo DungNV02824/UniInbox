@@ -16,7 +16,7 @@ import type {
   CreateChatbotRequest,
   UpdateChatbotRequest,
 } from '@dezon/shared';
-import { and, asc, count, desc, eq, isNull, ne, sql, type SQL } from 'drizzle-orm';
+import { and, asc, count, desc, eq, isNull, ne, or, sql, type SQL } from 'drizzle-orm';
 import { CONVERSATION_NOT_FOUND, canViewConversation } from '../inbox/access';
 import { resolveOpenHandoffs, type UpdateConversationResult } from '../inbox/commands';
 import { InboxForbiddenError, InboxNotFoundError, InboxValidationError } from '../inbox/errors';
@@ -77,6 +77,7 @@ function toDto(row: ChatbotRow, conversationCount: number): ChatbotDto {
     handoffActionLark: row.handoffActionLark,
     handoffAckMessage: row.handoffAckMessage,
     handoffResolveMessage: row.handoffResolveMessage,
+    aiHandoffMode: row.aiHandoffMode,
     agentReplyMode: row.agentReplyMode,
     agentPauseMinutes: row.agentPauseMinutes,
     handoffReminderMin: row.handoffReminderMin,
@@ -140,6 +141,7 @@ function toSet(input: Partial<CreateChatbotRequest>): ChatbotSet {
   if (input.handoffAckMessage !== undefined) set.handoffAckMessage = nullIfBlank(input.handoffAckMessage);
   if (input.handoffResolveMessage !== undefined)
     set.handoffResolveMessage = nullIfBlank(input.handoffResolveMessage);
+  if (input.aiHandoffMode !== undefined) set.aiHandoffMode = input.aiHandoffMode;
   if (input.agentReplyMode !== undefined) set.agentReplyMode = input.agentReplyMode;
   if (input.agentPauseMinutes !== undefined) set.agentPauseMinutes = input.agentPauseMinutes;
   if (input.handoffReminderMin !== undefined) set.handoffReminderMin = input.handoffReminderMin;
@@ -413,7 +415,7 @@ export async function setConversationChatbot(
 
 /**
  * Có nên "đánh thức" chatbot ngay không (job AI_KICK_JOB_NAME): hội thoại có bot đang bật (bot is_active,
- * ai_mode 'auto'), không pending_human, không đang tạm dừng, và tin cuối cùng (bỏ qua tin system) là của
+ * ai_mode 'auto'), không pending_human (trừ bot aiHandoffMode 'continue'), không đang tạm dừng, và tin cuối cùng (bỏ qua tin system) là của
  * khách — tức khách đang chờ mà chưa ai trả lời. Gọi sau bật bot / "trả lại cho AI" / "Tiếp tục AI".
  */
 export async function needsChatbotKick(db: DbLike, conversationId: string, now: Date): Promise<boolean> {
@@ -433,7 +435,8 @@ export async function needsChatbotKick(db: DbLike, conversationId: string, now: 
       and(
         eq(conversations.id, conversationId),
         eq(conversations.aiMode, 'auto'),
-        ne(conversations.status, 'pending_human'),
+        // Chờ người ⇒ không đánh thức — trừ bot 'continue' (AI tự chuyển mà bot vẫn trả lời).
+        or(ne(conversations.status, 'pending_human'), eq(chatbots.aiHandoffMode, 'continue')),
         eq(chatbots.isActive, true),
       ),
     );

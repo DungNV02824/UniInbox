@@ -41,6 +41,7 @@ export const CHATBOT_DEFAULTS = {
   responseSpeed: 'fast',
   handoffActionLark: false,
   agentReplyMode: 'pause',
+  aiHandoffMode: 'stop',
   /** 0 = không nhắc lại "chưa ai nhận hội thoại". */
   handoffReminderMin: 0,
 } as const;
@@ -70,6 +71,24 @@ export function isAiPausedIndefinitely(aiPausedUntil: string | null | undefined)
   const t = Date.parse(aiPausedUntil);
   return Number.isFinite(t) && new Date(t).getUTCFullYear() >= 9000;
 }
+
+// ---------- Khi AI tự chuyển người thật ----------
+
+/**
+ * Bot làm gì khi AI TỰ chuyển người thật (tool escalate, độ tự tin thấp, bộ chặn "đã chuyển" giả, lỗi) — KHÔNG áp
+ * dụng cho từ khóa (handoffKeywords luôn dừng bot, notifyKeywords luôn để bot trả lời):
+ * - 'stop'    : như trước — pending_human, ai_mode 'off', bot dừng tới khi nhân viên trả lại cho AI.
+ * - 'continue': vẫn pending_human (banner "Cần người", hai nút, Lark, nhắc lại theo bot) nhưng ai_mode giữ 'auto'
+ *               và bot vẫn trả lời các tin tiếp theo của khách.
+ */
+export const AI_HANDOFF_MODES = ['stop', 'continue'] as const;
+export type AiHandoffMode = (typeof AI_HANDOFF_MODES)[number];
+export const aiHandoffModeSchema = z.enum(AI_HANDOFF_MODES);
+
+export const AI_HANDOFF_MODE_LABELS: Record<AiHandoffMode, string> = {
+  stop: 'Bot dừng, chờ nhân viên xử lý',
+  continue: 'Báo nhân viên, bot vẫn trả lời khách',
+};
 
 export const AGENT_REPLY_MODE_LABELS: Record<AgentReplyMode, string> = {
   continue: 'Bot vẫn trả lời cùng nhân viên',
@@ -172,6 +191,8 @@ export interface ChatbotDto {
    */
   handoffAckMessage: string | null;
   handoffResolveMessage: string | null;
+  /** "Khi AI tự chuyển người thật" (xem AI_HANDOFF_MODES). Mặc định 'stop'. */
+  aiHandoffMode: AiHandoffMode;
   /** "Khi nhân viên vào nhắn tin" (xem AGENT_REPLY_MODES). Mặc định 'pause'. */
   agentReplyMode: AgentReplyMode;
   /** Số phút tạm nghỉ khi agentReplyMode = 'pause'; null = AI_PAUSE_AFTER_AGENT_MIN của server (30). */
@@ -207,6 +228,8 @@ export interface ChatbotRef {
   handoffAckLabel?: string;
   /** Tên nút "xong" riêng của bot; không có = DEFAULT_HANDOFF_RESOLVE_LABEL. */
   handoffResolveLabel?: string;
+  /** true = bot đặt aiHandoffMode 'continue' (banner Cần người ghi "bot vẫn đang trả lời"). */
+  aiHandoffContinues?: boolean;
 }
 
 const exampleSchema = z.object({
@@ -246,6 +269,8 @@ const chatbotFields = {
   /** Chuỗi rỗng / null ⇒ không gửi tin khi bấm nút. */
   handoffAckMessage: z.string().trim().max(CHATBOT_LIMITS.handoffMessageMax).nullable().optional(),
   handoffResolveMessage: z.string().trim().max(CHATBOT_LIMITS.handoffMessageMax).nullable().optional(),
+  /** Bỏ trống khi tạo ⇒ DB mặc định 'stop'. */
+  aiHandoffMode: aiHandoffModeSchema.optional(),
   /** Bỏ trống khi tạo ⇒ DB mặc định 'pause'. */
   agentReplyMode: agentReplyModeSchema.optional(),
   /** null ⇒ AI_PAUSE_AFTER_AGENT_MIN của server. Chỉ dùng khi agentReplyMode = 'pause' (giữ nguyên khi đổi mode). */
@@ -322,6 +347,13 @@ export const chatbotTestMessageSchema = z
       .optional(),
     /** Số ảnh thật của tin khách ở lượt cũ (ảnh không gửi lại, chỉ báo số lượng cho lịch sử). */
     imageCount: z.number().int().min(0).max(100).optional(),
+    /**
+     * Ngay SAU tin này, lượt chạy thử trước đã chuyển người thật mà bot VẪN trả lời (aiHandoffMode 'continue' —
+     * ChatbotTestResult.botContinuesAfterHandoff): API chèn dòng [Hệ thống] "đã chuyển cho nhân viên" (handoff còn
+     * mở) vào lịch sử ⇒ lượt sau chạy như thật (ghi chú lượt + bộ chặn "đã chuyển" nới cho lời đã chuyển). Giá trị
+     * là lý do chuyển.
+     */
+    handoffOpened: z.enum(HANDOFF_REASON_CODES).optional(),
   })
   .refine((m) => !m.images?.length || m.role === 'customer', {
     message: 'Chỉ tin của khách mới được gửi kèm ảnh',
@@ -376,6 +408,12 @@ export interface ChatbotTestResult {
    * bot vẫn trả lời (decision là kết quả của bot). Chat thử KHÔNG gửi thông báo thật.
    */
   notifiedKeyword?: string;
+  /**
+   * true khi AI tự chuyển — decision 'escalate' không phải từ khóa chuyển người, hoặc 'error' (chạy thật lỗi ⇒ chuyển
+   * người) — và bot (bản nháp hoặc đã lưu) đặt aiHandoffMode 'continue' ⇒ chạy thật nhân viên được báo nhưng bot VẪN
+   * trả lời các tin sau. Không có = bot dừng. Web gửi lại thành `handoffOpened` ở tin trước lượt sau.
+   */
+  botContinuesAfterHandoff?: boolean;
   latencyMs: number;
   model: string;
   usage?: LlmUsage;

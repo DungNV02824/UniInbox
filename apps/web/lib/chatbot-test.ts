@@ -4,9 +4,11 @@ import {
   CHATBOT_TEST_IMAGE_MIMES,
   HANDOFF_REASON_LABELS,
   base64DecodedBytes,
+  type AiHandoffMode,
   type ChatbotTestImageMime,
   type ChatbotTestRequest,
   type ChatbotTestResult,
+  type HandoffReasonCode,
 } from '@dezon/shared';
 
 /** Ảnh đính kèm tin khách khi chat thử (đã thu nhỏ + nén JPEG ở trình duyệt). */
@@ -45,6 +47,8 @@ interface PreparedMessage {
   images: TestImage[];
   /** Số ảnh khách đã gửi trong tin (kể cả ảnh hỏng) — để lịch sử ghi đúng "[gửi N ảnh/tệp]". */
   imageCount: number;
+  /** Ngay sau tin này lượt thử đã chuyển người mà bot vẫn trả lời (handoff mở) — lý do chuyển. */
+  handoffOpened?: HandoffReasonCode;
 }
 
 /** Giữ `n` phần tử cuối (mới nhất), đúng thứ tự. */
@@ -52,10 +56,26 @@ function lastN<T>(items: readonly T[], n: number): T[] {
   return n <= 0 ? [] : items.slice(Math.max(0, items.length - n));
 }
 
-/** Tin khách/bot sẽ gửi lên API: bỏ dòng trống, cắt độ dài, giữ ≤ 30 tin gần nhất, bắt đầu bằng tin khách. */
+/**
+ * Lượt thử chuyển người mà chạy thật bot VẪN trả lời (botContinuesAfterHandoff) ⇒ handoff mở từ đó (Chat thử không
+ * có bước nhân viên đóng): lý do chuyển; không thì null.
+ */
+function handoffOpenedBy(e: TestEntry): HandoffReasonCode | null {
+  if (e.kind !== 'outcome' || botContinuesNote(e.result) === null) return null;
+  return e.result.reasonCode ?? 'other';
+}
+
+/**
+ * Tin khách/bot sẽ gửi lên API: bỏ dòng trống, cắt độ dài, giữ ≤ 30 tin gần nhất, bắt đầu bằng tin khách. Lượt chuyển
+ * người đầu tiên mà bot vẫn trả lời ⇒ tin ngay trước nó mang `handoffOpened` (rơi khỏi 30 tin ⇒ gắn vào tin đầu còn
+ * giữ) để API dựng lại dòng [Hệ thống] "đã chuyển cho nhân viên" như chạy thật.
+ */
 function prepareMessages(entries: readonly TestEntry[]): PreparedMessage[] {
   const messages: PreparedMessage[] = [];
+  let opened: { index: number; reason: HandoffReasonCode } | null = null;
   for (const e of entries) {
+    const reason: HandoffReasonCode | null = opened ? null : handoffOpenedBy(e);
+    if (reason && messages.length > 0) opened = { index: messages.length - 1, reason };
     if (e.kind !== 'customer' && e.kind !== 'bot') continue;
     const all = e.kind === 'customer' ? (e.images ?? []) : [];
     const images = lastN(
@@ -67,9 +87,15 @@ function prepareMessages(entries: readonly TestEntry[]): PreparedMessage[] {
     if (!text && imageCount === 0) continue;
     messages.push({ role: e.kind, text, images, imageCount });
   }
-  const recent = messages.slice(-CHATBOT_LIMITS.testMessagesMax);
-  const firstCustomer = recent.findIndex((m) => m.role === 'customer');
-  return firstCustomer < 0 ? [] : recent.slice(firstCustomer);
+  const start = Math.max(0, messages.length - CHATBOT_LIMITS.testMessagesMax);
+  const firstCustomer = messages.findIndex((m, i) => i >= start && m.role === 'customer');
+  if (firstCustomer < 0) return [];
+  const kept = messages.slice(firstCustomer);
+  if (opened) {
+    const at = Math.max(0, opened.index - firstCustomer);
+    kept[at] = { ...kept[at]!, handoffOpened: opened.reason };
+  }
+  return kept;
 }
 
 /** Vị trí bắt đầu chuỗi tin khách ở cuối danh sách (sau tin bot gần nhất). */
@@ -97,11 +123,13 @@ function trailingImages(messages: readonly PreparedMessage[]): Map<number, TestI
 function toRequest(recent: readonly PreparedMessage[]): ChatbotTestRequest['messages'] {
   const kept = trailingImages(recent);
   return recent.map((m, i): TestMessage => {
-    if (m.role !== 'customer' || m.imageCount === 0) return { role: m.role, text: m.text };
+    const handoff = m.handoffOpened ? { handoffOpened: m.handoffOpened } : {};
+    if (m.role !== 'customer' || m.imageCount === 0) return { role: m.role, text: m.text, ...handoff };
     const imgs = kept.get(i) ?? [];
     return {
       role: m.role,
       text: m.text,
+      ...handoff,
       ...(imgs.length > 0 ? { images: imgs.map((img) => ({ mimeType: img.mimeType, data: img.data })) } : {}),
       // Không gửi đủ ảnh (lượt cũ / quá 10 ảnh / ảnh hỏng) => báo đúng số ảnh khách đã gửi.
       ...(imgs.length < m.imageCount ? { imageCount: m.imageCount } : {}),
@@ -307,6 +335,47 @@ export function notifiedKeywordNote(
   if (!keyword) return null;
   const base = `🔔 Chạy thật sẽ báo nhân viên (từ khóa "${keyword}")`;
   return result.decision === 'reply' ? `${base} — bot vẫn trả lời` : base;
+}
+
+// ---------- "Khi AI tự chuyển người thật": bot vẫn trả lời ----------
+
+/** Kết quả Chat thử kèm cờ "chạy thật bot vẫn trả lời sau khi chuyển người" (API mới có thể tự điền). */
+export type TestResultWithContinue = ChatbotTestResult & { botContinuesAfterHandoff?: boolean };
+
+export const BOT_CONTINUES_AFTER_HANDOFF_NOTE = 'Chạy thật: chuyển nhân viên nhưng bot vẫn tiếp tục trả lời';
+
+/** Tóm tắt lượt khớp từ khóa "Báo nhân viên + DỪNG bot" (orchestrator) — từ khóa luôn dừng bot. */
+const KEYWORD_HANDOFF_SUMMARY_PREFIX = 'Khách nhắn từ khóa chuyển người';
+
+/**
+ * Chạy thật, lượt này bot có tiếp tục trả lời sau khi chuyển người không. API có điền `botContinuesAfterHandoff`
+ * thì dùng luôn; không thì suy ra từ bản nháp: chỉ khi AI TỰ chuyển (escalate / lỗi ⇒ chuyển người) và bot đặt
+ * aiHandoffMode 'continue'. Lượt khớp từ khóa "DỪNG bot" luôn dừng bot.
+ */
+export function botContinuesAfterHandoff(
+  result: TestResultWithContinue,
+  aiHandoffMode: AiHandoffMode,
+): boolean {
+  if (typeof result.botContinuesAfterHandoff === 'boolean') return result.botContinuesAfterHandoff;
+  if (aiHandoffMode !== 'continue') return false;
+  if (result.decision !== 'escalate' && result.decision !== 'error') return false;
+  return !result.summary?.trim().startsWith(KEYWORD_HANDOFF_SUMMARY_PREFIX);
+}
+
+/** Gắn cờ theo chế độ của bản nháp LÚC CHẠY (đổi chế độ sau đó không làm sai các lượt cũ). */
+export function withBotContinues(
+  result: ChatbotTestResult,
+  aiHandoffMode: AiHandoffMode,
+): TestResultWithContinue {
+  return { ...result, botContinuesAfterHandoff: botContinuesAfterHandoff(result, aiHandoffMode) };
+}
+
+/** Ghi chú dưới kết quả chuyển người khi chạy thật bot vẫn trả lời; không thì null. */
+export function botContinuesNote(result: TestResultWithContinue): string | null {
+  return result.botContinuesAfterHandoff === true &&
+    (result.decision === 'escalate' || result.decision === 'error')
+    ? BOT_CONTINUES_AFTER_HANDOFF_NOTE
+    : null;
 }
 
 /** 850 => "850 ms"; 1234 => "1,2 giây". */

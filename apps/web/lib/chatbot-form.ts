@@ -1,11 +1,13 @@
 // Trình soạn chatbot: chuyển đổi form ↔ DTO, kiểm tra hợp lệ, lỗi API → lỗi từng ô. Hàm thuần để test.
 import {
   AGENT_REPLY_MODES,
+  AI_HANDOFF_MODES,
   CHATBOT_DEFAULTS,
   CHATBOT_LIMITS,
   createChatbotSchema,
   RESPONSE_SPEEDS,
   type AgentReplyMode,
+  type AiHandoffMode,
   type ChatbotDto,
   type CreateChatbotRequest,
   type ResponseSpeed,
@@ -46,6 +48,8 @@ export interface ChatbotFormValues {
   handoffResolveMessage: string;
   /** "Tốc độ trả lời" = mức suy nghĩ của AI (Nhanh nhất / Cân bằng / Suy nghĩ kỹ). */
   responseSpeed: ResponseSpeed;
+  /** "Khi AI tự chuyển người thật": bot dừng (mặc định) / vẫn trả lời khách. Không áp dụng cho từ khóa. */
+  aiHandoffMode: AiHandoffMode;
   /** "Khi nhân viên vào nhắn tin với khách": bot vẫn trả lời / tạm nghỉ / dừng hẳn. */
   agentReplyMode: AgentReplyMode;
   /** Số phút tạm nghỉ (mode 'pause'); '' = mặc định hệ thống (30 phút). */
@@ -107,6 +111,7 @@ export function emptyChatbotForm(): ChatbotFormValues {
     handoffAckMessage: '',
     handoffResolveMessage: '',
     responseSpeed: CHATBOT_DEFAULTS.responseSpeed,
+    aiHandoffMode: CHATBOT_DEFAULTS.aiHandoffMode,
     agentReplyMode: CHATBOT_DEFAULTS.agentReplyMode,
     agentPauseMinutes: '',
     handoffReminderEnabled: false,
@@ -138,6 +143,7 @@ export function chatbotToForm(dto: ChatbotDto): ChatbotFormValues {
     handoffAckMessage: dto.handoffAckMessage ?? '',
     handoffResolveMessage: dto.handoffResolveMessage ?? '',
     responseSpeed: normalizeResponseSpeed(dto.responseSpeed),
+    aiHandoffMode: normalizeAiHandoffMode(dto.aiHandoffMode),
     agentReplyMode: normalizeAgentReplyMode(dto.agentReplyMode),
     agentPauseMinutes: dto.agentPauseMinutes == null ? '' : String(dto.agentPauseMinutes),
     handoffReminderEnabled: reminder > 0,
@@ -162,6 +168,13 @@ export function normalizeAgentReplyMode(value: unknown): AgentReplyMode {
   return (AGENT_REPLY_MODES as readonly unknown[]).includes(value)
     ? (value as AgentReplyMode)
     : CHATBOT_DEFAULTS.agentReplyMode;
+}
+
+/** Giá trị lạ/thiếu (API cũ chưa có trường) => mặc định 'stop'. */
+export function normalizeAiHandoffMode(value: unknown): AiHandoffMode {
+  return (AI_HANDOFF_MODES as readonly unknown[]).includes(value)
+    ? (value as AiHandoffMode)
+    : CHATBOT_DEFAULTS.aiHandoffMode;
 }
 
 /** handoffReminderMin lạ/thiếu => 0 (tắt). */
@@ -206,6 +219,7 @@ export function formToRequest(form: ChatbotFormValues): CreateChatbotRequest {
     handoffAckMessage: blankToNull(form.handoffAckMessage),
     handoffResolveMessage: blankToNull(form.handoffResolveMessage),
     responseSpeed: form.responseSpeed,
+    aiHandoffMode: form.aiHandoffMode,
     agentReplyMode: form.agentReplyMode,
     agentPauseMinutes: agentPauseMinutesToRequest(form),
     handoffReminderMin: form.handoffReminderEnabled ? parseNumberField(form.handoffReminderMin) : 0,
@@ -269,6 +283,8 @@ function fieldMessage(path: string, code?: string): string {
       return 'Nhiệt độ phải từ 0 đến 1';
     case 'responseSpeed':
       return 'Chọn một tốc độ trả lời';
+    case 'aiHandoffMode':
+      return 'Chọn cách bot xử lý khi AI tự chuyển người thật';
     case 'agentReplyMode':
       return 'Chọn cách bot xử lý khi nhân viên nhắn tin';
     case 'agentPauseMinutes':
@@ -385,6 +401,7 @@ const FIELD_TAB: Record<string, EditorTab> = {
   handoffActionLark: 'handoff',
   handoffAckMessage: 'handoff',
   handoffResolveMessage: 'handoff',
+  aiHandoffMode: 'staff',
   agentReplyMode: 'staff',
   agentPauseMinutes: 'staff',
   handoffReminderEnabled: 'staff',
@@ -541,6 +558,7 @@ export function duplicateRequest(dto: ChatbotDto, existingNames: readonly string
     handoffAckMessage: dto.handoffAckMessage ?? null,
     handoffResolveMessage: dto.handoffResolveMessage ?? null,
     responseSpeed: normalizeResponseSpeed(dto.responseSpeed),
+    aiHandoffMode: normalizeAiHandoffMode(dto.aiHandoffMode),
     agentReplyMode: normalizeAgentReplyMode(dto.agentReplyMode),
     agentPauseMinutes: dto.agentPauseMinutes ?? null,
     handoffReminderMin: normalizeReminderMin(dto.handoffReminderMin),

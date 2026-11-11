@@ -19,6 +19,7 @@ export function toChatbotConfig(
     | 'escalateWhenUnsure'
     | 'responseSpeed'
     | 'notifyKeywords'
+    | 'aiHandoffMode'
   >,
   draft?: Partial<CreateChatbotRequest>,
 ): ChatbotConfig {
@@ -35,5 +36,6 @@ export function toChatbotConfig(
     escalateWhenUnsure: draft?.escalateWhenUnsure ?? row.escalateWhenUnsure,
     responseSpeed: draft?.responseSpeed ?? row.responseSpeed,
     notifyKeywords: draft?.notifyKeywords ?? row.notifyKeywords,
+    aiHandoffMode: draft?.aiHandoffMode ?? row.aiHandoffMode,
   };
 }

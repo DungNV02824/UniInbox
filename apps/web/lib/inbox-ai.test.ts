@@ -6,13 +6,17 @@ import {
   AI_STOPPED_BY_AGENT_TEXT,
   aiPausedText,
   CHATBOT_LOCKED_HINT,
+  BOT_CONTINUES_DURING_HANDOFF_TEXT,
+  botContinuesDuringHandoff,
   botSenderLabel,
+  chatbotChipState,
   chatbotControlState,
   chatbotSelectOptions,
   conversationAiState,
   extractConversation,
   formatLatency,
   handoffAckedText,
+  handoffBotNote,
   handoffButtonLabels,
   chatbotLockedHint,
   handoffReasonLabel,
@@ -264,5 +268,43 @@ describe('tên nút banner Cần người', () => {
   it('gợi ý ô chọn bot bị khóa nêu đúng tên nút xong', () => {
     expect(chatbotLockedHint(BOT)).toBe(CHATBOT_LOCKED_HINT);
     expect(chatbotLockedHint(custom)).toBe("Bấm 'Đã chuyển tiền' để bật lại bot");
+  });
+});
+
+describe('Cần người mà bot vẫn trả lời (aiHandoffMode continue)', () => {
+  const CONT = { ...BOT, aiHandoffContinues: true };
+  const pending = { status: 'pending_human' as const, handoff: HANDOFF };
+  const PAUSED = '2026-11-09T08:30:00.000Z';
+
+  it('botContinuesDuringHandoff: cần pending_human + ai_mode auto + bot đặt continue', () => {
+    expect(botContinuesDuringHandoff(conv({ ...pending, chatbot: CONT, aiMode: 'auto' }))).toBe(true);
+    expect(botContinuesDuringHandoff(conv({ ...pending, chatbot: CONT, aiMode: 'off' }))).toBe(false);
+    expect(botContinuesDuringHandoff(conv({ ...pending, chatbot: BOT, aiMode: 'auto' }))).toBe(false);
+    expect(botContinuesDuringHandoff(conv({ chatbot: CONT, aiMode: 'auto' }))).toBe(false);
+  });
+
+  it('handoffBotNote: "Bot vẫn đang trả lời khách"; tạm dừng / bot dừng ⇒ null', () => {
+    expect(BOT_CONTINUES_DURING_HANDOFF_TEXT).toBe('Bot vẫn đang trả lời khách');
+    expect(handoffBotNote(conv({ ...pending, chatbot: CONT, aiMode: 'auto' }), NOW)).toBe(
+      BOT_CONTINUES_DURING_HANDOFF_TEXT,
+    );
+    expect(
+      handoffBotNote(conv({ ...pending, chatbot: CONT, aiMode: 'auto', aiPausedUntil: PAUSED }), NOW),
+    ).toBeNull();
+    expect(handoffBotNote(conv({ ...pending, chatbot: BOT, aiMode: 'off' }), NOW)).toBeNull();
+    expect(handoffBotNote(conv({ ...pending, chatbot: CONT, aiMode: 'off' }), NOW)).toBeNull();
+  });
+
+  it('chatbotChipState: chờ người ở chế độ continue vẫn "active"; chế độ stop ⇒ "off"', () => {
+    expect(chatbotChipState(conv({ ...pending, chatbot: CONT, aiMode: 'auto' }), NOW)).toBe('active');
+    expect(
+      chatbotChipState(conv({ ...pending, chatbot: CONT, aiMode: 'auto', aiPausedUntil: PAUSED }), NOW),
+    ).toBe('paused');
+    expect(chatbotChipState(conv({ ...pending, chatbot: BOT, aiMode: 'off' }), NOW)).toBe('off');
+    expect(chatbotChipState(conv({ ...pending, chatbot: BOT, aiMode: 'auto' }), NOW)).toBe('off');
+    expect(chatbotChipState(conv({ chatbot: BOT, aiMode: 'auto' }), NOW)).toBe('active');
+    expect(chatbotChipState(conv({ chatbot: null, aiMode: 'auto' }), NOW)).toBe('off');
+    // Biểu tượng "Cần người" vẫn hiện.
+    expect(conversationAiState(conv({ ...pending, chatbot: CONT, aiMode: 'auto' }), NOW)).toBe('handoff');
   });
 });

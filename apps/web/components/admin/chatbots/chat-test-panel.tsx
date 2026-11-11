@@ -29,6 +29,7 @@ import { Button } from '@/components/ui/button';
 import {
   addPendingImages,
   appendResult,
+  botContinuesNote,
   buildTestMessages,
   describeOutcome,
   imageSrc,
@@ -92,6 +93,17 @@ function NotifiedNote({ result, className }: { result: ChatbotTestResult; classN
   );
 }
 
+/** "Chạy thật: chuyển nhân viên nhưng bot vẫn tiếp tục trả lời" (bot đặt aiHandoffMode 'continue'). */
+function BotContinuesNote({ result }: { result: ChatbotTestResult }) {
+  const note = botContinuesNote(result);
+  if (!note) return null;
+  return (
+    <p className="w-fit max-w-[95%] rounded-md border border-dashed border-violet-300 bg-violet-50/70 px-2 py-1 text-center text-[11px] text-violet-900 dark:border-violet-800 dark:bg-violet-950/30 dark:text-violet-100">
+      🤖 {note}
+    </p>
+  );
+}
+
 function OutcomeRow({ result }: { result: ChatbotTestResult }) {
   const view = describeOutcome(result);
   const meta = outcomeMeta(result);
@@ -128,6 +140,7 @@ function OutcomeRow({ result }: { result: ChatbotTestResult }) {
         </div>
       </div>
       {view.note && <p className="max-w-[95%] text-center text-[11px] text-muted-foreground">{view.note}</p>}
+      <BotContinuesNote result={result} />
       <NotifiedNote result={result} />
       {meta && <p className="text-[11px] text-muted-foreground">{meta}</p>}
     </div>

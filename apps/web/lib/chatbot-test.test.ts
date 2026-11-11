@@ -2,6 +2,9 @@ import type { ChatbotTestResult } from '@dezon/shared';
 import { describe, expect, it } from 'vitest';
 import {
   appendResult,
+  BOT_CONTINUES_AFTER_HANDOFF_NOTE,
+  botContinuesAfterHandoff,
+  botContinuesNote,
   buildTestMessages,
   describeOutcome,
   formatLatency,
@@ -9,6 +12,7 @@ import {
   notifiedKeywordNote,
   outcomeMeta,
   transcriptIsLong,
+  withBotContinues,
   type TestEntry,
 } from './chatbot-test';
 
@@ -24,6 +28,53 @@ describe('notifiedKeywordNote', () => {
     );
     expect(notifiedKeywordNote({ decision: 'reply' })).toBeNull();
     expect(notifiedKeywordNote({ decision: 'reply', notifiedKeyword: '  ' })).toBeNull();
+  });
+});
+
+describe('bot vẫn trả lời sau khi AI tự chuyển người (aiHandoffMode continue)', () => {
+  const escalate: ChatbotTestResult = {
+    ...base,
+    decision: 'escalate',
+    reasonCode: 'other',
+    summary: 'CTV gửi đủ 7 ảnh công trình, cần duyệt thù lao',
+    messages: ['Dạ em đã nhận đủ ảnh và chuyển thông tin cho bộ phận kiểm tra…'],
+  };
+
+  it("suy ra từ bản nháp: chỉ khi 'continue' + AI tự chuyển (escalate / lỗi)", () => {
+    expect(botContinuesAfterHandoff(escalate, 'continue')).toBe(true);
+    expect(botContinuesAfterHandoff({ ...base, decision: 'error', reason: 'x' }, 'continue')).toBe(true);
+    expect(botContinuesAfterHandoff(escalate, 'stop')).toBe(false);
+    expect(botContinuesAfterHandoff({ ...base, decision: 'reply', messages: ['x'] }, 'continue')).toBe(false);
+    expect(botContinuesAfterHandoff({ ...base, decision: 'no_reply' }, 'continue')).toBe(false);
+    // Từ khóa "DỪNG bot" luôn dừng bot.
+    expect(
+      botContinuesAfterHandoff(
+        {
+          ...escalate,
+          summary: 'Khách nhắn từ khóa chuyển người "giảm giá" (Khách hỏi giảm giá / khuyến mãi)',
+        },
+        'continue',
+      ),
+    ).toBe(false);
+  });
+
+  it('API đã điền botContinuesAfterHandoff ⇒ dùng luôn', () => {
+    expect(botContinuesAfterHandoff({ ...escalate, botContinuesAfterHandoff: false }, 'continue')).toBe(
+      false,
+    );
+    expect(botContinuesAfterHandoff({ ...escalate, botContinuesAfterHandoff: true }, 'stop')).toBe(true);
+  });
+
+  it('ghi chú "Chạy thật: chuyển nhân viên nhưng bot vẫn tiếp tục trả lời"', () => {
+    expect(BOT_CONTINUES_AFTER_HANDOFF_NOTE).toBe(
+      'Chạy thật: chuyển nhân viên nhưng bot vẫn tiếp tục trả lời',
+    );
+    expect(botContinuesNote(withBotContinues(escalate, 'continue'))).toBe(BOT_CONTINUES_AFTER_HANDOFF_NOTE);
+    expect(botContinuesNote(withBotContinues(escalate, 'stop'))).toBeNull();
+    expect(botContinuesNote(escalate)).toBeNull();
+    expect(botContinuesNote({ ...base, decision: 'reply', botContinuesAfterHandoff: true })).toBeNull();
+    // withBotContinues giữ nguyên kết quả gốc.
+    expect(withBotContinues(escalate, 'continue')).toMatchObject(escalate);
   });
 });
 
@@ -59,6 +110,43 @@ describe('buildTestMessages', () => {
 
   it('không có tin khách => rỗng', () => {
     expect(buildTestMessages([{ id: '1', kind: 'bot', text: 'x' }])).toEqual([]);
+  });
+
+  it('lượt chuyển người mà bot vẫn trả lời ⇒ tin ngay trước mang handoffOpened (chỉ lần đầu)', () => {
+    const handoff = (extra: Partial<ChatbotTestResult> = {}): TestEntry => ({
+      id: 'o',
+      kind: 'outcome',
+      result: {
+        ...base,
+        decision: 'escalate',
+        reasonCode: 'other',
+        botContinuesAfterHandoff: true,
+        ...extra,
+      },
+    });
+    const msgs = buildTestMessages([
+      { id: '1', kind: 'customer', text: 'Em gửi ảnh' },
+      { id: '2', kind: 'bot', text: 'Dạ em đã nhận đủ ảnh' },
+      handoff(),
+      { id: '3', kind: 'customer', text: 'ảnh CT B' },
+      { id: '4', kind: 'bot', text: 'Dạ em nhận CT B' },
+      handoff({ reasonCode: 'complaint' }),
+      { id: '5', kind: 'customer', text: 'hello' },
+    ]);
+    expect(msgs.map((m) => m.handoffOpened)).toEqual([undefined, 'other', undefined, undefined, undefined]);
+    // Lỗi (không reasonCode) ⇒ 'other'; bot dừng (không có cờ) ⇒ không đánh dấu.
+    const err = buildTestMessages([
+      { id: '1', kind: 'customer', text: 'alo' },
+      handoff({ decision: 'error', reasonCode: undefined }),
+      { id: '2', kind: 'customer', text: 'hello' },
+    ]);
+    expect(err[0]).toEqual({ role: 'customer', text: 'alo', handoffOpened: 'other' });
+    const stop = buildTestMessages([
+      { id: '1', kind: 'customer', text: 'alo' },
+      handoff({ botContinuesAfterHandoff: false }),
+      { id: '2', kind: 'customer', text: 'hello' },
+    ]);
+    expect(stop.every((m) => m.handoffOpened === undefined)).toBe(true);
   });
 });
 

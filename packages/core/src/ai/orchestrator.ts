@@ -229,8 +229,32 @@ function convertClaimToEscalate(bubbles: string[], confidence: number | undefine
   };
 }
 
-const isClaimingReply = (d: Decided, allowStaffNotified: boolean): boolean =>
-  d.decision === 'reply' && claimsHandoffInReply(d.messages ?? [], { allowStaffNotified });
+interface ClaimTolerance {
+  allowStaffNotified: boolean;
+  allowHandedOff: boolean;
+}
+
+const isClaimingReply = (d: Decided, tolerance: ClaimTolerance): boolean =>
+  d.decision === 'reply' && claimsHandoffInReply(d.messages ?? [], tolerance);
+
+/**
+ * Lịch sử của lượt có dòng [Hệ thống] "Hội thoại đã được chuyển cho nhân viên …" của handoff CÒN MỞ (loadTurnHistory
+ * đánh dấu handoffOpen từ bảng handoffs — khách không giả được).
+ */
+export function historyHasOpenHandoff(history: readonly ChatHistoryItem[]): boolean {
+  return history.some((h) => h.role === 'system' && h.handoffOpen === true);
+}
+
+/**
+ * Bot aiHandoffMode 'continue' và hội thoại đang có handoff mở ⇒ bot đang trả lời trong lúc chờ nhân viên: prompt
+ * thêm handoffContinueTurnNote, bộ chặn "tự nói đã chuyển" bỏ qua lời chuyển (allowHandedOff).
+ */
+export function handoffContinuesInTurn(
+  chatbot: Pick<ChatbotConfig, 'aiHandoffMode'>,
+  history: readonly ChatHistoryItem[],
+): boolean {
+  return chatbot.aiHandoffMode === 'continue' && historyHasOpenHandoff(history);
+}
 
 /**
  * Lịch sử của lượt có dòng [Hệ thống] "Đã báo nhân viên …" THẬT (loadTurnHistory: tin system của notifyStaffKeyword,
@@ -378,6 +402,7 @@ export async function runChatbotTurn(
     // 2. Gọi LLM có retry.
     const now = deps.now();
     startedAt = now.getTime();
+    const handoffContinues = handoffContinuesInTurn(chatbot, input.history);
     const prompt = buildChatbotPrompt({
       chatbot,
       history: input.history,
@@ -387,6 +412,7 @@ export async function runChatbotTurn(
       now,
       images: input.images,
       ...(notifiedKeyword ? { notifiedKeyword } : {}),
+      ...(handoffContinues ? { handoffContinues } : {}),
     });
     const sleep = deps.sleep ?? defaultSleep;
     const request: LlmRequest = {
@@ -445,8 +471,13 @@ export async function runChatbotTurn(
     // 3b. reply tự nói đã chuyển cho người thật mà không gọi escalate ⇒ gọi lại một lần; vẫn vậy ⇒ tự chuyển.
     // Lượt khớp từ khóa báo nhân viên: nhân viên ĐÃ được báo thật ⇒ không chặn. Lượt sau (lịch sử có dòng [Hệ thống]
     // "Đã báo nhân viên" thật) ⇒ chỉ bỏ qua lời "đã báo nhân viên" thuần; lời chuyển khác vẫn chặn.
-    const staffNotified = historyHasStaffNotified(input.history);
-    if (!notifiedKeyword && isClaimingReply(decided, staffNotified)) {
+    // Bot 'continue' đang trả lời trong lúc handoff còn mở: nhân viên ĐÃ nhận yêu cầu ⇒ "em đã chuyển … cho bộ phận"
+    // là đúng sự thật; lời hứa "nhân viên sẽ liên hệ…" vẫn chặn.
+    const tolerance: ClaimTolerance = {
+      allowStaffNotified: historyHasStaffNotified(input.history),
+      allowHandedOff: handoffContinues,
+    };
+    if (!notifiedKeyword && isClaimingReply(decided, tolerance)) {
       toolCalls.push({ name: HANDOFF_CLAIM_GUARD, args: { action: 'retry' } });
       let claim = decided;
       const second = await call({
@@ -464,10 +495,10 @@ export async function runChatbotTurn(
           args: { action: 'retry_failed', error: truncateAtWord(errorMessage(second.error), 300) },
         });
       }
-      if (retried && isClaimingReply(retried, staffNotified)) claim = retried;
+      if (retried && isClaimingReply(retried, tolerance)) claim = retried;
       const acceptable =
         retried !== null &&
-        !isClaimingReply(retried, staffNotified) &&
+        !isClaimingReply(retried, tolerance) &&
         (retried.decision === 'escalate' || retried.decision === 'reply' || retried.decision === 'no_reply');
       if (acceptable) {
         decided = retried!;

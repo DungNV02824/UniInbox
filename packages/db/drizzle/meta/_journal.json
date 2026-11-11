@@ -78,6 +78,13 @@
       "when": 1794417226600,
       "tag": "0010_handoff_action_messages",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1794422800294,
+      "tag": "0011_ai_handoff_mode",
+      "breakpoints": true
     }
   ]
 }

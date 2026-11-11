@@ -15,6 +15,7 @@ const row = {
   temperature: 0.4,
   escalateWhenUnsure: true,
   responseSpeed: 'balanced' as const,
+  aiHandoffMode: 'stop' as const,
 };
 
 describe('toChatbotConfig', () => {
@@ -32,5 +33,13 @@ describe('toChatbotConfig', () => {
     expect(toChatbotConfig(row, { notifyKeywords: ['đơn gấp'] }).notifyKeywords).toEqual(['đơn gấp']);
     expect(toChatbotConfig(row, { notifyKeywords: [] }).notifyKeywords).toEqual([]);
     expect(toChatbotConfig(row, { name: 'Nháp' }).notifyKeywords).toEqual(['bảo hành']);
+  });
+
+  it('aiHandoffMode: lấy bản đã lưu; draft ghi đè', () => {
+    expect(toChatbotConfig(row).aiHandoffMode).toBe('stop');
+    expect(toChatbotConfig(row, { aiHandoffMode: 'continue' }).aiHandoffMode).toBe('continue');
+    expect(toChatbotConfig({ ...row, aiHandoffMode: 'continue' }, { name: 'Nháp' }).aiHandoffMode).toBe(
+      'continue',
+    );
   });
 });

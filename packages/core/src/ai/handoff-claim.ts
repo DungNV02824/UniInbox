@@ -32,6 +32,12 @@ interface ClaimPattern {
   unlessAnywhere?: RegExp;
   /** Khớp "báo nhân viên" thuần của mẫu này được bỏ qua khi allowStaffNotified (STAFF_NOTIFIED_RE). */
   notifyTolerant?: boolean;
+  /**
+   * Mẫu lời "chuyển/gửi/báo cho nhân viên/bộ phận" — khi allowHandedOff (hội thoại đã thật sự được chuyển cho nhân
+   * viên) chỉ khớp ở thì quá khứ ("em đã chuyển …", isPastTransfer) được bỏ qua; "em sẽ/đang chuyển …" vẫn chặn.
+   * Mẫu hứa "nhân viên/bộ phận sẽ liên hệ/duyệt…" không có cờ này: vẫn chặn.
+   */
+  transfer?: boolean;
 }
 
 const CLAIM_PATTERNS: ClaimPattern[] = [
@@ -43,21 +49,24 @@ const CLAIM_PATTERNS: ClaimPattern[] = [
     ),
     subject: true,
     notifyTolerant: true,
+    transfer: true,
   },
   // "chuyển hồ sơ", "đã chuyển cho/sang …" (nơi nhận không phải người nhắn), "gửi hồ sơ sang/cho …" (không phải
   // gửi cho em/bên em).
-  { re: new RegExp(`${B}chuyen ho so${E}`), subject: true },
+  { re: new RegExp(`${B}chuyen ho so${E}`), subject: true, transfer: true },
   {
     re: new RegExp(
       `${B}da chuyen (?:cho|sang|qua|toi|den) (?!(?:em|minh|anh|chi|ban|a/c|anh/chi|quy khach|khach|shop)${E})`,
     ),
     subject: true,
+    transfer: true,
   },
   {
     re: new RegExp(
       `${B}gui ho so (?:sang|cho|toi|den|qua|len) (?!(?:em|minh|ben em|shop|dezon|anh|chi|ban|a/c|anh/chi)${E})`,
     ),
     subject: true,
+    transfer: true,
   },
   // "nhân viên (bên em) sẽ liên hệ/gọi…", "người phụ trách sẽ phản hồi…": hứa người thật liên hệ.
   {
@@ -132,20 +141,53 @@ function subjectBlocks(prefix: string): boolean {
   return negated || (i >= 0 && CUSTOMER_SUBJECTS.has(words[i]!));
 }
 
+/** Dấu hiệu thì TƯƠNG LAI / đang làm trước động từ chuyển ("em sẽ chuyển", "em đang báo", "em sắp gửi"). */
+const FUTURE_MARKERS = new Set(['se', 'dang', 'sap']);
+/** Dấu hiệu việc ĐÃ làm trước động từ chuyển ("em đã chuyển", "em vừa gửi"). */
+const PAST_MARKERS = new Set(['da', 'vua']);
+/** "… cho bộ phận rồi ạ" — "rồi" SAU lời chuyển ⇒ việc đã làm. */
+const PAST_SUFFIX_RE = /(?<![a-z0-9])roi(?![a-z0-9])/;
+
+/**
+ * Lời chuyển ở thì QUÁ KHỨ ("em đã/vừa chuyển … cho bộ phận …", "em chuyển cho bộ phận rồi ạ") — chỉ lời này được
+ * bỏ qua khi allowHandedOff (yêu cầu cũ đã thật sự chuyển). `lead` = phần mệnh đề trước động từ (kể cả "đã" của mẫu
+ * "đã chuyển cho …"), `rest` = phần sau khớp. Dấu hiệu thì gần động từ nhất quyết định: sẽ/đang/sắp ⇒ không phải
+ * quá khứ (lời hứa chuyển yêu cầu MỚI, vẫn chặn). "da" ở ĐẦU mệnh đề là "Dạ" (bỏ dấu trùng "đã") ⇒ không tính.
+ * Không có dấu hiệu nào ("em chuyển cho nhân viên nhé", "em báo quản lý ngay") ⇒ không phải quá khứ.
+ */
+function isPastTransfer(lead: string, rest: string): boolean {
+  const words = lead.split(/[^a-z0-9/]+/).filter(Boolean);
+  for (let i = words.length - 1; i >= 0; i--) {
+    const w = words[i]!;
+    if (FUTURE_MARKERS.has(w)) return false;
+    if (PAST_MARKERS.has(w) && !(w === 'da' && i === 0)) return true;
+  }
+  return PAST_SUFFIX_RE.test(rest);
+}
+
 /**
  * Một câu (đã bỏ dấu) có lời khẳng định chuyển cho người thật không. Mặc định chỉ xét khớp ĐẦU TIÊN của mỗi mẫu;
  * allowStaffNotified ⇒ mẫu notifyTolerant xét MỌI khớp và bỏ qua khớp "báo nhân viên" thuần (STAFF_NOTIFIED_RE).
+ * allowHandedOff ⇒ mẫu `transfer` xét MỌI khớp và chỉ bỏ qua lời chuyển ở thì quá khứ (isPastTransfer); lời hứa
+ * "em sẽ/đang chuyển …" vẫn bị chặn (bot phải `escalate` yêu cầu mới thật).
  */
-function sentenceClaims(sentence: string, allowStaffNotified: boolean): boolean {
+function sentenceClaims(sentence: string, allowStaffNotified: boolean, allowHandedOff: boolean): boolean {
   if (sentence.includes('?') || TRAILING_QUESTION_RE.test(sentence)) return false;
-  for (const { re, subject, unlessAnywhere, notifyTolerant } of CLAIM_PATTERNS) {
+  for (const { re, subject, unlessAnywhere, notifyTolerant, transfer } of CLAIM_PATTERNS) {
     if (unlessAnywhere?.test(sentence)) continue;
     const tolerant = allowStaffNotified && notifyTolerant === true;
-    const found = tolerant ? [...sentence.matchAll(new RegExp(re.source, 'g'))] : [re.exec(sentence)];
+    const handedOff = allowHandedOff && transfer === true;
+    const found =
+      tolerant || handedOff ? [...sentence.matchAll(new RegExp(re.source, 'g'))] : [re.exec(sentence)];
     for (const m of found) {
       if (!m) continue;
       if (tolerant && STAFF_NOTIFIED_RE.test(m[0])) continue;
       const prefix = sentence.slice(0, m.index);
+      if (handedOff) {
+        // Mẫu "đã chuyển cho …" mang sẵn "đã" trong khớp.
+        const lead = m[0].startsWith('da ') ? sentence.slice(0, m.index + 2) : prefix;
+        if (isPastTransfer(lead, sentence.slice(m.index + m[0].length))) continue;
+      }
       if (CONDITIONAL_RE.test(prefix)) continue;
       if (subject && subjectBlocks(prefix)) continue;
       return true;
@@ -173,11 +215,12 @@ export function claimsHandoffInReply(
   options: HandoffClaimOptions = {},
 ): boolean {
   const allow = options.allowStaffNotified === true;
+  const handedOff = options.allowHandedOff === true;
   return messages.some((bubble) =>
     splitSentences(bubble).some((sentence) =>
       // Mỗi mệnh đề sau dấu phẩy/chấm phẩy xét riêng (chủ ngữ/điều kiện của mệnh đề trước không áp sang).
       // Riêng dấu hiệu điều kiện ở mệnh đề trước ("Nếu anh/chị cần, em chuyển…") vẫn áp: xét cả câu trước.
-      sentenceClaimsWithClauses(normalizeForMatch(sentence), allow),
+      sentenceClaimsWithClauses(normalizeForMatch(sentence), allow, handedOff),
     ),
   );
 }
@@ -189,14 +232,25 @@ export interface HandoffClaimOptions {
    * lời chuyển khác ("đã chuyển hồ sơ cho bộ phận duyệt", "nhân viên sẽ liên hệ") vẫn bị chặn.
    */
   allowStaffNotified?: boolean;
+  /**
+   * Hội thoại ĐÃ thật sự được chuyển cho nhân viên (handoff còn mở) mà bot vẫn trả lời (aiHandoffMode 'continue') ⇒
+   * lời "em đã/vừa chuyển (thông tin/hồ sơ) cho bộ phận …", "… cho bộ phận rồi ạ" (thì quá khứ) là đúng sự thật,
+   * không tính là tự nói đã chuyển. Lời hứa chuyển yêu cầu mới ("em sẽ/đang chuyển …", "em báo quản lý ngay"),
+   * "nhân viên sẽ liên hệ/gọi lại", "bộ phận … sẽ duyệt" vẫn bị chặn.
+   */
+  allowHandedOff?: boolean;
 }
 
-function sentenceClaimsWithClauses(sentence: string, allowStaffNotified: boolean): boolean {
+function sentenceClaimsWithClauses(
+  sentence: string,
+  allowStaffNotified: boolean,
+  allowHandedOff: boolean,
+): boolean {
   if (sentence.includes('?') || TRAILING_QUESTION_RE.test(sentence)) return false;
   const clauses = sentence.split(/\s*[,;:]\s*/);
   let conditionalBefore = false;
   for (const clause of clauses) {
-    if (!conditionalBefore && sentenceClaims(clause, allowStaffNotified)) return true;
+    if (!conditionalBefore && sentenceClaims(clause, allowStaffNotified, allowHandedOff)) return true;
     if (CONDITIONAL_RE.test(clause)) conditionalBefore = true;
   }
   return false;

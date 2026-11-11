@@ -17,7 +17,7 @@ import {
   HANDOFF_REASON_CODES,
   type HandoffReasonCode,
 } from '@dezon/shared';
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import type { ChannelType } from '@dezon/shared';
 import type { CredentialsCipher } from '../channels/service';
 import type { ChannelConnector } from '../connectors/types';
@@ -31,6 +31,7 @@ import { toChatbotConfig } from './config';
 import {
   botCanSend,
   bubbleDelays,
+  countBotTurnsLastHour,
   emitMessagesCreated,
   errorText,
   insertBotMessages,
@@ -61,12 +62,32 @@ import type { ChatbotTurnResult } from './types';
 
 export { BOT_REQUEUE_MAX_AGE_SEC, requeueQueuedBotMessages } from './delivery';
 export {
+  appendHandoffSummary,
   escalateConversation,
+  HANDOFF_BOT_STOPPED_SUFFIX,
+  HANDOFF_REPEAT_NOTIFY_THROTTLE_MIN,
+  HANDOFF_REPEAT_PREFIX,
   HANDOFF_SYSTEM_PREFIX,
   processHandoffReminderJob,
   type EscalateInput,
   type EscalateResult,
 } from './escalate';
+
+// ---------- Chờ người mà bot vẫn trả lời ----------
+
+/**
+ * Hội thoại pending_human có được chạy bot không: CHỈ khi ai_mode 'auto' và bot HIỆN TẠI đặt aiHandoffMode
+ * 'continue' (AI tự chuyển người mà bot vẫn trả lời). Đọc cài đặt bot lúc chạy ⇒ admin đổi bot sang 'stop' thì hội
+ * thoại đang chờ người (ai_mode vẫn 'auto') lại bị chặn như cũ. Không pending_human ⇒ true (điều kiện khác kiểm riêng).
+ */
+export function pendingHumanAllowsBot(conv: {
+  status: string;
+  aiMode: string;
+  aiHandoffMode: string | null | undefined;
+}): boolean {
+  if (conv.status !== 'pending_human') return true;
+  return conv.aiMode === 'auto' && conv.aiHandoffMode === 'continue';
+}
 
 // ---------- Debounce ----------
 
@@ -197,7 +218,7 @@ async function startEarlyTyping(
   const [ai, conv] = await Promise.all([getAiSettings(db), loadJobConversation(db, conversationId)]);
   const bot = conv?.bot;
   if (!ai.enabled || !conv || !bot || conv.aiMode !== 'auto' || !bot.isActive) return;
-  if (conv.status === 'pending_human') return;
+  if (!pendingHumanAllowsBot({ ...conv, aiHandoffMode: bot.aiHandoffMode })) return;
   if (conv.aiPausedUntil && conv.aiPausedUntil > deps.ctx.now()) return;
   if (!(await botCanSend(db, conv, deps.ctx)).allowed) return;
   await startEarlyAiTyping(db, deps, typingTarget(conv), ttlMs);
@@ -333,7 +354,10 @@ async function blockedReason(db: Db, deps: AiRuntimeDeps, conv: JobConversation)
   const bot = conv.bot;
   if (!bot || conv.aiMode !== 'auto') return 'Hội thoại không bật chatbot';
   if (!bot.isActive) return 'Chatbot đang tắt';
-  if (conv.status === 'pending_human') return 'Hội thoại đang chờ người thật xử lý';
+  // Chờ người: chặn — trừ bot 'continue' (AI tự chuyển mà bot vẫn trả lời, ai_mode còn 'auto').
+  if (!pendingHumanAllowsBot({ ...conv, aiHandoffMode: bot.aiHandoffMode })) {
+    return 'Hội thoại đang chờ người thật xử lý';
+  }
   if (conv.aiPausedUntil && conv.aiPausedUntil > deps.ctx.now()) return AI_BLOCKED_PAUSED;
   // "Nhân viên đã trả lời sau tin khách" không cần kiểm ở đây: tin chưa xử lý luôn tạo sau tin nhân viên cuối.
   // Hai lần đọc độc lập ⇒ song song (đường trễ trước LLM); thứ tự ưu tiên lý do giữ nguyên.
@@ -348,19 +372,8 @@ async function blockedReason(db: Db, deps: AiRuntimeDeps, conv: JobConversation)
 
 const capReason = (n: number) => `Đã đạt giới hạn ${n} lượt trả lời/giờ`;
 
-async function countRepliesLastHour(db: DbLike, conversationId: string): Promise<number> {
-  const [cap] = await db
-    .select({ n: sql<number>`count(*)::int` })
-    .from(aiRuns)
-    .where(
-      and(
-        eq(aiRuns.conversationId, conversationId),
-        eq(aiRuns.decision, 'reply'),
-        sql`${aiRuns.createdAt} > now() - interval '1 hour'`,
-      ),
-    );
-  return cap?.n ?? 0;
-}
+/** Lượt reply + lượt escalate đã gửi tin bot (countBotTurnsLastHour) trong 60 phút qua. */
+const countRepliesLastHour = countBotTurnsLastHour;
 
 interface KillSwitch {
   reason: string;
@@ -443,6 +456,15 @@ function runCustomerMessages(run: { decision: string; toolCalls: unknown }): str
     .slice(0, CHATBOT_MAX_BUBBLES);
 }
 
+/** Từ khóa chuyển người (pre-filter) của lần chạy escalate đã ghi — escalate bù cũng phải dừng bot. */
+function runMatchedKeyword(run: { decision: string; toolCalls: unknown }): string | null {
+  if (run.decision !== 'escalate' || !Array.isArray(run.toolCalls)) return null;
+  const call = lastDecisionCall(run.toolCalls as LoggedCall[]);
+  if (call?.name !== 'prefilter') return null;
+  const keyword = call.args?.keyword;
+  return typeof keyword === 'string' && keyword ? keyword : 'prefilter';
+}
+
 /** Escalate bù chỉ cho lần chạy trong khoảng này (cũ hơn thì bỏ qua). */
 const ESCALATE_RECOVERY_MAX_AGE_HOURS = 24;
 
@@ -480,14 +502,20 @@ async function recoverLostSideEffects(db: Db, deps: AiRuntimeDeps, conversationI
       status: conversations.status,
       aiMode: conversations.aiMode,
       chatbotId: conversations.chatbotId,
+      aiHandoffMode: chatbots.aiHandoffMode,
     })
     .from(conversations)
+    .leftJoin(chatbots, eq(chatbots.id, conversations.chatbotId))
     .where(eq(conversations.id, conversationId));
-  if (!conv || conv.status === 'pending_human' || conv.aiMode !== 'auto' || !conv.chatbotId) return;
+  // Đang chờ người ⇒ thôi — trừ bot 'continue' đang trò chuyện: lượt escalate lặp lại (handoff đã mở) có thể mất tin
+  // messages_to_customer ⇒ escalate bù gửi lại (escalateConversation không tạo handoff trùng).
+  if (!conv || conv.aiMode !== 'auto' || !conv.chatbotId || !pendingHumanAllowsBot(conv)) return;
+  // escalateConversation ghi tin system (lượt tạo handoff) HOẶC tin bot (lượt lặp lại khi bot 'continue') gắn
+  // ai_run_id trong cùng transaction ⇒ có một trong hai = tác dụng phụ đã xong.
   const [done] = await db
     .select({ id: messages.id })
     .from(messages)
-    .where(and(eq(messages.aiRunId, run.id), eq(messages.senderType, 'system')))
+    .where(and(eq(messages.aiRunId, run.id), inArray(messages.senderType, ['system', 'bot'])))
     .limit(1);
   if (done) return;
   // Có handoff tạo/đóng sau lần chạy (nhân viên đã can thiệp) ⇒ không escalate bù.
@@ -509,6 +537,7 @@ async function recoverLostSideEffects(db: Db, deps: AiRuntimeDeps, conversationI
     createdBy: 'ai',
     aiRunId: run.id,
     messages: runCustomerMessages(run),
+    ...(runMatchedKeyword(run) ? { matchedKeyword: runMatchedKeyword(run) } : {}),
   });
 }
 
@@ -544,8 +573,18 @@ async function raceReason(
     .from(conversations)
     .where(eq(conversations.id, conversationId))
     .for('update');
-  if (!cur || cur.aiMode !== 'auto' || cur.chatbotId !== botId || cur.status === 'pending_human') {
+  if (!cur || cur.aiMode !== 'auto' || cur.chatbotId !== botId) {
     return { reason: 'Chatbot của hội thoại đã thay đổi', reschedule: false };
+  }
+  if (cur.status === 'pending_human') {
+    // Bot 'continue' vẫn trả lời trong lúc chờ người; đọc cài đặt hiện tại (admin có thể vừa đổi sang 'stop').
+    const [bot] = await tx
+      .select({ aiHandoffMode: chatbots.aiHandoffMode })
+      .from(chatbots)
+      .where(eq(chatbots.id, botId));
+    if (!pendingHumanAllowsBot({ ...cur, aiHandoffMode: bot?.aiHandoffMode })) {
+      return { reason: 'Chatbot của hội thoại đã thay đổi', reschedule: false };
+    }
   }
   if (await hasAgentMessageAfter(tx, conversationId, pending[0]!.id)) {
     return { reason: 'Nhân viên vừa nhắn', reschedule: false };
@@ -566,7 +605,8 @@ async function raceReason(
  *    'queued', escalate bù khi lần chạy escalate/error chưa kịp chuyển người.
  * 1. Xóa khóa debounce. Đọc conversation (+ kênh, chatbot). AI tổng tắt hoặc không có tin khách chưa xử lý
  *    ⇒ 'skipped' KHÔNG ghi ai_runs. Điều kiện 6.3 khác không đạt (bot gỡ/tắt, pending_human, đang pause,
- *    nhân viên đã trả lời, canSend(by 'bot'), giới hạn ai_runs 'reply' trong 60 phút) ⇒ 'skipped' + ai_runs
+ *    nhân viên đã trả lời, canSend(by 'bot'), giới hạn lượt gửi tin trong 60 phút — ai_runs 'reply' + 'escalate' đã
+ *    gửi tin bot, countBotTurnsLastHour) ⇒ 'skipped' + ai_runs
  *    decision 'no_reply', error = lý do, trigger = các tin chưa xử lý (coi như đã xử lý) — TRỪ khi bị chặn vì
  *    đang pause (AI_BLOCKED_PAUSED: tạm nghỉ / "dừng hẳn" sau tin nhân viên): trigger rỗng, tin khách đến trong
  *    lúc pause vẫn là tin chưa xử lý ⇒ "Tiếp tục AI" (kick) trả lời ngay tin đang chờ. Pause hết hạn tự nhiên thì
@@ -734,13 +774,20 @@ async function runChatbotTurnAndCommit(
   // Từ khóa "Báo nhân viên, bot VẪN trả lời" (notifyKeywords): báo nhân viên sau commit ở MỌI kết quả của lượt
   // (reply / no_reply / hủy do chống đua hay công tắc), kể cả khi bước sau commit ném lỗi (finally) — trừ khi lượt
   // này chuyển người thật (escalate/error đã ghi): escalateConversation đã báo (tin system + handoff.created + Lark).
-  const notifyKeyword =
-    result.notifiedKeyword && (saved.race || (result.decision !== 'escalate' && result.decision !== 'error'))
-      ? result.notifiedKeyword
-      : null;
+  // escalateConversation không báo gì (staffNotified false — đã chờ người với bot dừng, chống trùng) ⇒ vẫn báo theo từ khóa.
+  let staffNotified: boolean | undefined;
   try {
-    return await afterTurnCommitted(db, deps, conv, bot, result, saved);
+    const out = await afterTurnCommitted(db, deps, conv, bot, result, saved);
+    staffNotified = out.staffNotified;
+    return out;
   } finally {
+    const notifyKeyword =
+      result.notifiedKeyword &&
+      (saved.race ||
+        (result.decision !== 'escalate' && result.decision !== 'error') ||
+        staffNotified === false)
+        ? result.notifiedKeyword
+        : null;
     if (notifyKeyword) {
       await notifyStaffSafe(db, deps, conversationId, {
         keyword: notifyKeyword,
@@ -773,7 +820,7 @@ async function afterTurnCommitted(
   bot: NonNullable<JobConversation['bot']>,
   result: ChatbotTurnResult,
   saved: { race: RaceResult | null; aiRunId: string; messageIds: string[] },
-): Promise<{ result: AiReplyOutcome; botReplyQueued: boolean }> {
+): Promise<{ result: AiReplyOutcome; botReplyQueued: boolean; staffNotified?: boolean }> {
   const conversationId = conv.id;
   if (saved.race) {
     deps.logger.info({ conversationId, reason: saved.race.reason }, 'Hủy lượt chatbot (chống đua/công tắc)');
@@ -791,6 +838,7 @@ async function afterTurnCommitted(
     'Lượt chatbot xong',
   );
   let botReplyQueued = false;
+  let staffNotified: boolean | undefined;
   if (result.decision === 'reply') {
     const delays = bubbleDelays(saved.messageIds.length, deps.random);
     for (const [i, id] of saved.messageIds.entries()) {
@@ -806,11 +854,18 @@ async function afterTurnCommitted(
       createdBy: 'ai',
       aiRunId: saved.aiRunId,
       ...(result.decision === 'escalate' && result.messages?.length ? { messages: result.messages } : {}),
+      // Từ khóa chuyển người luôn dừng bot (kể cả bot 'continue').
+      ...(result.matchedKeyword ? { matchedKeyword: result.matchedKeyword } : {}),
     });
+    staffNotified = escalated.staffNotified;
     // Tin bot đầu tiên tự tắt dấu ba chấm (như reply) ⇒ không gửi typing_off.
     if (escalated.botMessagesQueued > 0) botReplyQueued = true;
   }
-  return { result: { status: 'done', decision: result.decision, aiRunId: saved.aiRunId }, botReplyQueued };
+  return {
+    result: { status: 'done', decision: result.decision, aiRunId: saved.aiRunId },
+    botReplyQueued,
+    ...(staffNotified !== undefined ? { staffNotified } : {}),
+  };
 }
 
 // ---------- Nhân viên nhắn ⇒ tạm dừng AI ----------

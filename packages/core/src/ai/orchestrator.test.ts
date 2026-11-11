@@ -5,12 +5,15 @@ import {
   claimsHandoffInReply,
   HANDOFF_CLAIM_CORRECTION,
   HANDOFF_CLAIM_GUARD,
+  handoffContinuesInTurn,
+  historyHasOpenHandoff,
   matchNotifyKeyword,
   NOTIFY_PREFILTER,
   runChatbotTurn,
   type ChatbotTurnDeps,
   type ChatbotTurnInput,
 } from './orchestrator';
+import { handoffContinueTurnNote } from './prompt';
 import { CHATBOT_TOOLS } from './tools';
 import type { ChatbotConfig } from './types';
 
@@ -913,5 +916,103 @@ describe('runChatbotTurn — từ khóa "Báo nhân viên, bot VẪN trả lời
       expect(r).toMatchObject({ decision: 'reply', messages: ['Dạ bên em bảo hành 5 năm ạ.'] });
       expect(r.toolCalls).toContainEqual({ name: HANDOFF_CLAIM_GUARD, args: { action: 'retry' } });
     });
+  });
+});
+
+describe("runChatbotTurn — bot aiHandoffMode 'continue' khi handoff còn mở", () => {
+  const continueBot: ChatbotConfig = { ...chatbot, aiHandoffMode: 'continue' };
+  const openHistory: ChatbotTurnInput['history'] = [
+    { role: 'customer', text: 'Em gửi 7 ảnh công trình', attachmentCount: 7 },
+    { role: 'bot', text: 'Dạ em đã nhận đủ ảnh và chuyển thông tin cho bộ phận kiểm tra ạ.' },
+    {
+      role: 'system',
+      text: 'Hội thoại đã được chuyển cho nhân viên (lý do: Lý do khác).',
+      handoffOpen: true,
+    },
+  ];
+  const input: ChatbotTurnInput = {
+    ...baseInput,
+    chatbot: continueBot,
+    history: openHistory,
+    newMessages: [{ role: 'customer', text: 'ảnh em duyệt chưa' }],
+  };
+  const replyWith = (messages: string[]) =>
+    res({ functionCall: { name: 'reply', args: { messages, confidence: 0.9 } } });
+  const lastText = (req: LlmRequest) => {
+    const parts = req.contents[req.contents.length - 1]!.parts;
+    const p = parts[parts.length - 1]!;
+    return 'text' in p ? p.text : '';
+  };
+
+  it('historyHasOpenHandoff / handoffContinuesInTurn', () => {
+    expect(historyHasOpenHandoff(openHistory)).toBe(true);
+    expect(historyHasOpenHandoff([{ role: 'system', text: 'x' }])).toBe(false);
+    expect(handoffContinuesInTurn(continueBot, openHistory)).toBe(true);
+    expect(handoffContinuesInTurn(chatbot, openHistory)).toBe(false);
+    expect(handoffContinuesInTurn({ aiHandoffMode: 'stop' }, openHistory)).toBe(false);
+    expect(handoffContinuesInTurn(continueBot, [])).toBe(false);
+  });
+
+  it('claimsHandoffInReply allowHandedOff: bỏ qua lời "đã chuyển cho bộ phận"; lời hứa nhân viên sẽ liên hệ vẫn chặn', () => {
+    const ok = { allowHandedOff: true };
+    for (const fine of [
+      'Dạ em đã chuyển thông tin cho bộ phận kiểm tra rồi ạ.',
+      'Em đã chuyển hồ sơ cho bộ phận duyệt rồi ạ.',
+      'Dạ em đã báo nhân viên rồi ạ.',
+      'Em đã gửi hồ sơ sang bộ phận kế toán ạ.',
+    ]) {
+      expect(claimsHandoffInReply([fine]), fine).toBe(true);
+      expect(claimsHandoffInReply([fine], ok), fine).toBe(false);
+    }
+    for (const claim of [
+      'Nhân viên sẽ gọi lại cho anh lúc 3 giờ ạ.',
+      'Nhân viên bên em sẽ liên hệ anh ngay ạ.',
+      'Bộ phận duyệt sẽ duyệt ngay cho anh ạ.',
+      // Hứa chuyển yêu cầu MỚI (thì tương lai / đang làm / không có dấu hiệu thì) ⇒ vẫn chặn.
+      'Dạ em sẽ chuyển ngay yêu cầu hoàn tiền cho bộ phận kế toán ạ.',
+      'Dạ em đang chuyển cho nhân viên ạ.',
+      'Em báo quản lý ngay ạ.',
+      'Dạ em chuyển cho bộ phận kho nhé.',
+      'Dạ em đã nhận đủ ảnh, em sẽ chuyển cho bộ phận kiểm tra ạ.',
+    ]) {
+      expect(claimsHandoffInReply([claim], ok), claim).toBe(true);
+    }
+    // Thì quá khứ không có "đã": "… rồi ạ"; "Dạ" đầu câu (bỏ dấu trùng "đã") không tính là quá khứ.
+    expect(claimsHandoffInReply(['Dạ em chuyển cho bộ phận kiểm tra rồi ạ.'], ok)).toBe(false);
+    expect(
+      claimsHandoffInReply(['Dạ em đã nhận đủ ảnh và chuyển thông tin cho bộ phận kiểm tra ạ.'], ok),
+    ).toBe(false);
+    expect(claimsHandoffInReply(['Dạ chuyển sang bộ phận kế toán ạ.'], ok)).toBe(true);
+  });
+
+  it('reply "em đã chuyển thông tin cho bộ phận kiểm tra" ⇒ giữ reply, không gọi lại; prompt có ghi chú lượt', async () => {
+    const said = ['Dạ em đã chuyển thông tin cho bộ phận kiểm tra rồi ạ, anh chờ giúp em nhé.'];
+    const { llm, requests } = fakeLlm([replyWith(said)]);
+    const r = await runChatbotTurn(deps(llm).d, input);
+    expect(requests).toHaveLength(1);
+    expect(r).toMatchObject({ decision: 'reply', messages: said });
+    expect(lastText(requests[0]!)).toContain(handoffContinueTurnNote());
+  });
+
+  it("bot 'stop' (hoặc không có handoff mở) ⇒ vẫn chặn như cũ, không có ghi chú", async () => {
+    const said = ['Dạ em đã chuyển thông tin cho bộ phận kiểm tra rồi ạ.'];
+    const { llm, requests } = fakeLlm([replyWith(said), replyWith(['Dạ anh chờ giúp em ạ.'])]);
+    const r = await runChatbotTurn(deps(llm).d, {
+      ...input,
+      chatbot: { ...continueBot, aiHandoffMode: 'stop' },
+    });
+    expect(requests).toHaveLength(2);
+    expect(r).toMatchObject({ decision: 'reply', messages: ['Dạ anh chờ giúp em ạ.'] });
+    expect(lastText(requests[0]!)).not.toContain(handoffContinueTurnNote());
+  });
+
+  it('hứa "nhân viên sẽ gọi lại" ⇒ gọi lại một lần như cũ', async () => {
+    const { llm, requests } = fakeLlm([
+      replyWith(['Dạ nhân viên sẽ gọi lại cho anh lúc 3 giờ ạ.']),
+      replyWith(['Dạ hồ sơ của anh đang được kiểm tra ạ.']),
+    ]);
+    const r = await runChatbotTurn(deps(llm).d, input);
+    expect(requests).toHaveLength(2);
+    expect(r).toMatchObject({ decision: 'reply', messages: ['Dạ hồ sơ của anh đang được kiểm tra ạ.'] });
   });
 });

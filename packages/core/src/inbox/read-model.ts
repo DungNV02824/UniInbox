@@ -106,6 +106,7 @@ const summaryFields = {
   chatbotName: chatbots.name,
   chatbotAckLabel: chatbots.handoffAckLabel,
   chatbotResolveLabel: chatbots.handoffResolveLabel,
+  chatbotAiHandoffMode: chatbots.aiHandoffMode,
   handoff: openHandoffSql,
 };
 
@@ -220,6 +221,8 @@ export async function toSummary(row: SummaryRow, ctx: InboxContext): Promise<Con
             // Chỉ kèm khi bot đặt tên nút riêng (bot thường giữ nguyên dạng { id, name }).
             ...(row.chatbotAckLabel ? { handoffAckLabel: row.chatbotAckLabel } : {}),
             ...(row.chatbotResolveLabel ? { handoffResolveLabel: row.chatbotResolveLabel } : {}),
+            // Bot vẫn trả lời sau khi AI tự chuyển người (banner Cần người ghi rõ). Chỉ kèm khi true.
+            ...(row.chatbotAiHandoffMode === 'continue' ? { aiHandoffContinues: true } : {}),
           }
         : null,
     aiPausedUntil:

@@ -1,7 +1,7 @@
 // Tiện ích dùng chung của runtime chatbot: tạo tin bot, xếp hàng gửi (giãn bong bóng), kiểm cửa sổ gửi
 // cho bot, phát realtime.
 import { randomUUID } from 'node:crypto';
-import { channelAccounts, conversations, messages, type Db, type NewMessage } from '@dezon/db';
+import { aiRuns, channelAccounts, conversations, messages, type Db, type NewMessage } from '@dezon/db';
 import { and, asc, eq, sql } from 'drizzle-orm';
 import { getConversationSummary, getMessageDto } from '../inbox/queries';
 import type { DbLike } from '../inbox/read-model';
@@ -20,6 +20,27 @@ export interface EmitDeps {
 }
 
 export const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+
+/**
+ * Số lượt bot đã GỬI tin trong 60 phút qua (giới hạn maxRepliesPerHour): ai_runs 'reply', cộng ai_runs 'escalate'
+ * đã gửi tin bot (messages_to_customer / handoffMessage, gắn ai_run_id) — bot aiHandoffMode 'continue' trả lời bằng
+ * escalate lặp lại trong lúc chờ người cũng bị tính.
+ */
+export async function countBotTurnsLastHour(db: DbLike, conversationId: string): Promise<number> {
+  const [cap] = await db
+    .select({ n: sql<number>`count(*)::int` })
+    .from(aiRuns)
+    .where(
+      and(
+        eq(aiRuns.conversationId, conversationId),
+        sql`${aiRuns.createdAt} > now() - interval '1 hour'`,
+        sql`(${aiRuns.decision} = 'reply' or (${aiRuns.decision} = 'escalate' and exists (
+          select 1 from ${messages} b where b.conversation_id = ${conversationId}
+            and b.ai_run_id = ${aiRuns.id} and b.sender_type = 'bot')))`,
+      ),
+    );
+  return cap?.n ?? 0;
+}
 
 /** raw.outbound của tin bot: batchId chung + vị trí trong lượt (worker gửi typing_on trước phần kế tiếp). */
 export interface BotOutboundRaw {

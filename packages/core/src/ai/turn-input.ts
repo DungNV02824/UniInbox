@@ -4,7 +4,8 @@
 // 1. gửi trong PENDING_MAX_AGE_HOURS giờ gần đây (sent_at) — không trả lời "tồn đọng" cũ khi bật lại AI/bot;
 // 2. tạo SAU mốc = greatest(tin kích hoạt mới nhất của lần chạy gần nhất có trigger − PENDING_RACE_SLACK_SEC,
 //    tin nhân viên cuối KHÔNG phải echo tự động của Page, lần "trả lại cho AI" gần nhất — handoffs.resolved_at:
-//    tin khách nhắn trong lúc chờ người coi như nhân viên đã xử lý);
+//    tin khách nhắn trong lúc chờ người coi như nhân viên đã xử lý; bỏ qua handoff mà bot vẫn trả lời suốt lúc chờ
+//    người — bot 'continue', xem HandoffSystemRaw);
 // 3. KHÔNG nằm trong trigger_message_ids của bất kỳ ai_runs nào của hội thoại.
 // Điều 3 + độ trễ PENDING_RACE_SLACK_SEC xử lý thứ tự commit: created_at = lúc transaction lưu tin BẮT ĐẦU, nên
 // tin commit muộn có thể có created_at nhỏ hơn tin kích hoạt của lần chạy trước — so mốc thuần sẽ bỏ sót mãi.
@@ -69,8 +70,16 @@ export async function loadPendingMessages(db: DbLike, conversationId: string): P
       : sql`null::timestamptz`;
   const lastAgent = sql`(select max(a.created_at) from ${messages} a
     where a.conversation_id = ${conversationId} and a.sender_type = 'agent' and ${notAutomatedEcho(sql`a.raw`)})`;
-  // "Trả lại cho AI": nhân viên đã lo các tin trước đó (kể cả xử lý ngoài hệ thống, không nhắn gì).
-  const lastResolved = sql`(select max(h.resolved_at) from ${handoffs} h where h.conversation_id = ${conversationId})`;
+  // "Trả lại cho AI": nhân viên đã lo các tin trước đó (kể cả xử lý ngoài hệ thống, không nhắn gì) — TRỪ handoff mà
+  // bot vẫn trả lời suốt lúc chờ người (aiHandoffMode 'continue': tin system của handoff có dấu handoffBotContinues và
+  // không bị dừng giữa chừng — handoffBotStopped): tin khách chưa xử lý lúc bấm là việc của bot (đang/sắp trả lời).
+  const lastResolved = sql`(select max(h.resolved_at) from ${handoffs} h where h.conversation_id = ${conversationId}
+    and not (
+      exists (select 1 from ${messages} s where s.conversation_id = ${conversationId} and s.sender_type = 'system'
+        and s.raw -> 'handoffBotContinues' ->> 'handoffId' = h.id::text)
+      and not exists (select 1 from ${messages} s where s.conversation_id = ${conversationId} and s.sender_type = 'system'
+        and s.raw -> 'handoffBotStopped' ->> 'handoffId' = h.id::text)
+    ))`;
   return db
     .select({
       id: messages.id,
@@ -173,7 +182,8 @@ export async function loadTurnHistory(
     .limit(CHATBOT_HISTORY_LIMIT);
   rows.reverse();
 
-  // Mốc handoff trong khoảng lịch sử đã tải (đủ giới hạn ⇒ chỉ lấy mốc từ tin cũ nhất trở đi).
+  // Mốc handoff trong khoảng lịch sử đã tải (đủ giới hạn ⇒ chỉ lấy mốc từ tin cũ nhất trở đi). Handoff CÒN MỞ luôn
+  // được lấy (kể cả tạo trước khoảng đó): bot aiHandoffMode 'continue' cần biết hội thoại đang chờ nhân viên.
   const since = rows.length >= CHATBOT_HISTORY_LIMIT ? rows[0]?.sentAt : undefined;
   const handoffRows = await db
     .select({
@@ -186,7 +196,7 @@ export async function loadTurnHistory(
       and(
         eq(handoffs.conversationId, conversationId),
         since
-          ? sql`coalesce(${handoffs.resolvedAt}, ${handoffs.createdAt}) >= ${since.toISOString()}::timestamptz`
+          ? sql`(${handoffs.resolvedAt} is null or coalesce(${handoffs.resolvedAt}, ${handoffs.createdAt}) >= ${since.toISOString()}::timestamptz)`
           : undefined,
       ),
     )
@@ -194,8 +204,14 @@ export async function loadTurnHistory(
     .limit(HISTORY_HANDOFF_LIMIT);
   const markers: ChatHistoryItem[] = [];
   for (const h of handoffRows) {
-    if (!since || h.createdAt >= since) {
-      markers.push({ role: 'system', text: handoffCreatedMarker(h.reasonCode), sentAt: h.createdAt });
+    const open = h.resolvedAt === null;
+    if (!since || h.createdAt >= since || open) {
+      markers.push({
+        role: 'system',
+        text: handoffCreatedMarker(h.reasonCode),
+        sentAt: h.createdAt,
+        ...(open ? { handoffOpen: true } : {}),
+      });
     }
     if (h.resolvedAt) markers.push({ role: 'system', text: HANDOFF_RESOLVED_MARKER, sentAt: h.resolvedAt });
   }

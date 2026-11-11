@@ -5,6 +5,7 @@ import { useId, useState, type KeyboardEvent, type ReactNode } from 'react';
 import {
   AlarmClock,
   BellRing,
+  Bot,
   Gauge,
   Plus,
   Power,
@@ -18,6 +19,8 @@ import {
 import {
   AGENT_REPLY_MODE_LABELS,
   AGENT_REPLY_MODES,
+  AI_HANDOFF_MODE_LABELS,
+  AI_HANDOFF_MODES,
   CHATBOT_DEFAULTS,
   CHATBOT_LIMITS,
   DEFAULT_HANDOFF_ACK_LABEL,
@@ -27,6 +30,7 @@ import {
   RESPONSE_SPEED_LABELS,
   RESPONSE_SPEEDS,
   type AgentReplyMode,
+  type AiHandoffMode,
   type ResponseSpeed,
 } from '@dezon/shared';
 import { Input } from '@/components/ui/input';
@@ -497,12 +501,68 @@ const AGENT_REPLY_MODE_HINTS: Record<AgentReplyMode, string> = {
   stop: 'Bot ngừng hẳn ở hội thoại đó. Bấm “Tiếp tục AI” hoặc bật lại bot trong khung chat để bot trả lời tiếp.',
 };
 
-/** Tab "Phối hợp nhân viên": bot làm gì khi nhân viên nhắn + nhắc lại khi chưa ai nhận hội thoại. */
+const AI_HANDOFF_MODE_HINTS: Record<AiHandoffMode, string> = {
+  stop: 'Hội thoại chuyển sang Cần người, bot ngừng trả lời cho tới khi nhân viên bấm nút trả lại cho AI.',
+  continue:
+    'Hội thoại vẫn sang Cần người (banner, hai nút, Lark như cũ) nhưng bot tiếp tục trả lời khách. Hợp với bot nhận ảnh công trình: nhân viên duyệt, bot vẫn hỗ trợ khách.',
+};
+
+/**
+ * Tab "Phối hợp nhân viên": bot làm gì khi AI tự chuyển người thật, khi nhân viên nhắn, và nhắc lại khi chưa ai
+ * nhận hội thoại.
+ */
 export function StaffTab({ form, update, errors }: TabProps) {
   const id = useId();
   const max = CHATBOT_LIMITS.handoffReminderMinMax.toLocaleString('vi-VN');
   return (
     <div className="flex flex-col gap-6">
+      <fieldset className="flex flex-col gap-2">
+        <legend className="mb-1 flex items-center gap-1.5 text-sm font-medium">
+          <Bot className="size-4 text-muted-foreground" aria-hidden />
+          Khi AI tự chuyển người thật
+        </legend>
+        <p className="-mt-1 mb-1 text-xs text-muted-foreground">
+          Áp dụng khi bot tự quyết định chuyển nhân viên (không chắc câu trả lời, hướng dẫn bảo chuyển, gặp
+          lỗi…). Hai danh sách từ khóa ở tab “Chuyển người thật” vẫn giữ cách riêng của chúng.
+        </p>
+        <div className="grid gap-2 sm:grid-cols-2">
+          {AI_HANDOFF_MODES.map((mode) => {
+            const checked = form.aiHandoffMode === mode;
+            return (
+              <label
+                key={mode}
+                className={cn(
+                  'flex cursor-pointer items-start gap-2.5 rounded-lg border bg-background p-3 transition-colors focus-within:ring-[3px] focus-within:ring-ring/50 hover:border-brand/40',
+                  checked && 'border-brand bg-brand/5',
+                  errors.aiHandoffMode && 'border-destructive',
+                )}
+              >
+                <input
+                  type="radio"
+                  name={`${id}-ai-handoff-mode`}
+                  value={mode}
+                  checked={checked}
+                  onChange={() => update({ aiHandoffMode: mode })}
+                  className="mt-0.5 size-4 shrink-0 accent-[var(--brand)] outline-none"
+                />
+                <span className="flex min-w-0 flex-col gap-0.5">
+                  <span className="text-sm font-medium">
+                    {AI_HANDOFF_MODE_LABELS[mode]}
+                    {mode === CHATBOT_DEFAULTS.aiHandoffMode && (
+                      <span className="ml-1.5 text-xs font-normal text-muted-foreground">(mặc định)</span>
+                    )}
+                  </span>
+                  <span className="text-xs leading-snug text-muted-foreground">
+                    {AI_HANDOFF_MODE_HINTS[mode]}
+                  </span>
+                </span>
+              </label>
+            );
+          })}
+        </div>
+        <FieldError message={errors.aiHandoffMode} />
+      </fieldset>
+
       <fieldset className="flex flex-col gap-2">
         <legend className="mb-1 flex items-center gap-1.5 text-sm font-medium">
           <UserCog className="size-4 text-muted-foreground" aria-hidden />

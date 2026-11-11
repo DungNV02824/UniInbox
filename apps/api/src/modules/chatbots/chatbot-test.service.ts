@@ -3,6 +3,7 @@ import {
   type ChatHistoryItem,
   type ChatbotTurnResult,
   getBusinessHours,
+  handoffCreatedMarker,
   InboxNotFoundError,
   type LlmClient,
   type PromptImage,
@@ -48,6 +49,7 @@ type TestMessage = ChatbotTestRequest['messages'][number];
  * lại); dòng lịch sử vẫn ghi "[gửi N ảnh/tệp]" như chạy thật — web gửi tin khách của lượt cũ chỉ kèm `imageCount`
  * (không gửi lại ảnh, text có thể rỗng): attachmentCount = max(imageCount, số ảnh gửi kèm), text rỗng ⇒ null.
  * Ảnh không phải JPEG/PNG/WebP/GIF ⇒ 400.
+ * Tin có `handoffOpened` (lượt trước chuyển người mà bot vẫn trả lời) ⇒ chèn dòng [Hệ thống] handoff còn mở sau tin đó.
  */
 export function splitTestMessages(messages: TestMessage[]): {
   history: ChatHistoryItem[];
@@ -64,6 +66,21 @@ export function splitTestMessages(messages: TestMessage[]): {
     const count = Math.max(m.imageCount ?? 0, m.images?.length ?? 0);
     return { role: m.role, text: m.text || null, ...(count > 0 ? { attachmentCount: count } : {}) };
   };
+  // Lượt thử trước đã chuyển người mà bot vẫn trả lời (handoffOpened) ⇒ dòng [Hệ thống] handoff còn mở ngay sau tin
+  // đó, như loadTurnHistory của chạy thật. Chỉ lấy đánh dấu đầu tiên (handoff mở đến khi nhân viên đóng — Chat thử
+  // không có bước đóng). Lượt chuyển không có tin bot ⇒ đánh dấu rơi vào chuỗi tin khách cuối: các tin tới đó là của
+  // lượt đã xử lý (chạy thật đã nằm trong trigger của lượt chuyển) ⇒ đưa vào lịch sử, chỉ các tin sau là tin mới.
+  const opened = messages.findIndex((m) => m.handoffOpened !== undefined);
+  if (opened >= cut && opened + 1 < messages.length) cut = opened + 1;
+  const history = messages.slice(0, cut).map(toItem);
+  if (opened >= 0) {
+    const marker: ChatHistoryItem = {
+      role: 'system',
+      text: handoffCreatedMarker(messages[opened]!.handoffOpened!),
+      handoffOpen: true,
+    };
+    history.splice(Math.min(opened + 1, history.length), 0, marker);
+  }
   // Đánh số ảnh trên toàn khung chat (khớp thứ tự admin thấy) cho thông điệp lỗi.
   let position = 0;
   const images: PromptImage[] = [];
@@ -76,7 +93,7 @@ export function splitTestMessages(messages: TestMessage[]): {
     }
   });
   return {
-    history: messages.slice(0, cut).map(toItem),
+    history,
     newMessages: messages.slice(cut).map(toItem),
     images,
   };
@@ -104,6 +121,19 @@ export function customerFacingMessages(
   }
 }
 
+/**
+ * Kết quả chat thử là AI tự chuyển người — escalate không phải từ khóa chuyển người, hoặc lỗi (chạy thật lỗi ⇒ chuyển
+ * người) — và bot (nháp/đã lưu) đặt aiHandoffMode 'continue' ⇒ chạy thật nhân viên được báo nhưng bot VẪN trả lời
+ * các tin sau.
+ */
+export function botContinuesAfterHandoff(
+  result: Pick<ChatbotTurnResult, 'decision' | 'matchedKeyword'>,
+  chatbot: Pick<ChatbotConfig, 'aiHandoffMode'>,
+): boolean {
+  const aiHandoff = (result.decision === 'escalate' && !result.matchedKeyword) || result.decision === 'error';
+  return aiHandoff && chatbot.aiHandoffMode === 'continue';
+}
+
 /** Bot chưa lưu: bắt đầu từ mặc định của bảng chatbots rồi ghép bản nháp. */
 function draftConfig(draft: CreateChatbotRequest): ChatbotConfig {
   const base = {
@@ -119,6 +149,7 @@ function draftConfig(draft: CreateChatbotRequest): ChatbotConfig {
     temperature: CHATBOT_DEFAULTS.temperature,
     escalateWhenUnsure: CHATBOT_DEFAULTS.escalateWhenUnsure,
     responseSpeed: CHATBOT_DEFAULTS.responseSpeed,
+    aiHandoffMode: CHATBOT_DEFAULTS.aiHandoffMode,
   };
   return { ...toChatbotConfig(base, draft), id: null };
 }
@@ -197,6 +228,8 @@ export class ChatbotTestService {
       ...(result.reason !== undefined ? { reason: result.reason } : {}),
       // Khớp từ khóa "Báo nhân viên, bot VẪN trả lời": chỉ báo cho giao diện, KHÔNG gửi thông báo thật.
       ...(result.notifiedKeyword !== undefined ? { notifiedKeyword: result.notifiedKeyword } : {}),
+      // AI tự chuyển (không phải từ khóa) với bot 'continue' ⇒ chạy thật bot vẫn trả lời sau khi báo nhân viên.
+      ...(botContinuesAfterHandoff(result, chatbot) ? { botContinuesAfterHandoff: true } : {}),
       latencyMs: result.latencyMs,
       model: result.model,
       usage: result.usage,
