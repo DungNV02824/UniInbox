@@ -9,3 +9,4 @@ export * from './chatbots';
 export * from './contact-tags';
 export * from './zalo';
 export * from './realtime';
+export * from './search';

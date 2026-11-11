@@ -14,28 +14,36 @@ import {
   findCatalogTag,
   firstSelectableIndex,
   moveActiveIndex,
+  shouldAutoAssignOnTag,
   tagKey,
   type TagOption,
 } from '@/lib/contact-tags';
 import { contactTagKeys, contactTagsApi, useContactTags } from '@/lib/contact-tags-api';
-import { errorText, useUpdateContact } from '@/lib/inbox-queries';
+import { errorText, useUpdateContact, useUpdateConversation } from '@/lib/inbox-queries';
 import { tagSwatchClass } from '@/lib/tag-colors';
 import { cn } from '@/lib/utils';
 
 const TAGS_MAX = 30;
 const LEGACY_TITLE = 'Nhãn chưa có trong danh sách';
 
-/** Nhãn của khách: chọn từ danh sách nhãn (ô gõ để lọc), xóa bằng × trên chip. */
+/**
+ * Nhãn của khách: chọn từ danh sách nhãn (ô gõ để lọc), xóa bằng × trên chip.
+ * Gắn nhãn cho hội thoại chưa phân công ⇒ tự giao cho người gắn.
+ */
 export function ContactTagsEditor({
   conversationId,
   contactId,
   tags,
+  assignedUserId,
 }: {
   conversationId: string;
   contactId: string;
   tags: string[];
+  /** Người đang phụ trách hội thoại; null = chưa phân công. */
+  assignedUserId?: string | null;
 }) {
   const update = useUpdateContact(conversationId, contactId);
+  const assign = useUpdateConversation(conversationId);
   const catalogQuery = useContactTags();
   const catalog = useMemo(() => catalogQuery.data ?? [], [catalogQuery.data]);
   const index = useMemo(() => buildTagIndex(catalog), [catalog]);
@@ -59,10 +67,16 @@ export function ContactTagsEditor({
   const activeIndex = active >= 0 && active < options.length ? active : firstSelectableIndex(options);
 
   function saveTags(next: string[]) {
+    const autoAssign = !!user && shouldAutoAssignOnTag(shown, next, assignedUserId);
     update.mutate(
       { tags: next },
-      // Số khách trên trang quản trị đổi: đánh dấu cũ, không tải lại ngay.
-      { onSuccess: () => void qc.invalidateQueries({ queryKey: contactTagKeys.all, refetchType: 'none' }) },
+      {
+        onSuccess: () => {
+          // Số khách trên trang quản trị đổi: đánh dấu cũ, không tải lại ngay.
+          void qc.invalidateQueries({ queryKey: contactTagKeys.all, refetchType: 'none' });
+          if (autoAssign && user && !assign.isPending) assign.mutate({ assignedUserId: user.id });
+        },
+      },
     );
   }
 

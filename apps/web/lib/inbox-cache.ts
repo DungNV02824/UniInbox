@@ -10,6 +10,7 @@ import type {
   SendMessageRequest,
   UserRole,
 } from '@dezon/shared';
+import { matchesSearch } from '@dezon/shared';
 import { matchesAiState } from '@/lib/inbox-ai';
 import type { ConversationFilters } from '@/lib/inbox-api';
 
@@ -46,6 +47,12 @@ export function matchesFilters(conv: ConversationSummary, f: ConversationFilters
   }
   if (f.unread && conv.unreadCount <= 0) return false;
   if (!matchesAiState(conv, f.aiState)) return false;
+  // Tìm kiếm: phía web chỉ biết tên khách (nội dung tin nằm trên máy chủ) — xem applyConversationToList.
+  if (f.q && !matchesSearch(conv.contact.displayName, f.q)) return false;
+  if (f.tag) {
+    const want = f.tag.trim().toLowerCase();
+    if (!conv.contact.tags.some((t) => t.trim().toLowerCase() === want)) return false;
+  }
   return true;
 }
 
@@ -280,7 +287,14 @@ export function applyConversationToList(
   const matches = matchesFilters(conv, filters, viewer);
   const stickyUnread =
     existing && filters.unread && matchesFilters(conv, { ...filters, unread: false }, viewer);
-  const keep = visible && (matches || stickyUnread);
+  // Đang tìm kiếm: dòng máy chủ đã trả (có thể khớp theo nội dung tin) thì giữ lại khi có cập nhật.
+  const withoutQ = { ...filters, q: undefined };
+  const stickySearch =
+    existing &&
+    !!filters.q &&
+    (matchesFilters(conv, withoutQ, viewer) ||
+      (!!filters.unread && matchesFilters(conv, { ...withoutQ, unread: false }, viewer)));
+  const keep = visible && (matches || stickyUnread || stickySearch);
 
   if (!keep) {
     if (!existing) return data;

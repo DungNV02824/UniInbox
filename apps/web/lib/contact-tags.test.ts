@@ -18,6 +18,7 @@ import {
   tagUsageText,
   validateTagName,
   type TagOption,
+  shouldAutoAssignOnTag,
 } from './contact-tags';
 
 function tag(id: string, name: string, sortOrder: number, color: TagColor = 'blue'): ContactTagDto {
@@ -162,5 +163,15 @@ describe('nhãn cạnh tên khách', () => {
     expect(splitVisibleTags([], 2)).toEqual({ visible: [], hidden: [], overflow: 0 });
     expect(splitVisibleTags(['a', 'b'], 0)).toEqual({ visible: [], hidden: ['a', 'b'], overflow: 2 });
     expect(splitVisibleTags(['a', 'b'], -1).overflow).toBe(2);
+  });
+});
+
+describe('shouldAutoAssignOnTag', () => {
+  it('chỉ giao khi hội thoại chưa phân công và có nhãn mới được thêm', () => {
+    expect(shouldAutoAssignOnTag([], ['TN'], null)).toBe(true);
+    expect(shouldAutoAssignOnTag(['VIP'], ['VIP', 'TN'], undefined)).toBe(true);
+    expect(shouldAutoAssignOnTag(['VIP', 'TN'], ['VIP'], null)).toBe(false);
+    expect(shouldAutoAssignOnTag(['TN'], ['tn'], null)).toBe(false);
+    expect(shouldAutoAssignOnTag([], ['TN'], 'user-1')).toBe(false);
   });
 });

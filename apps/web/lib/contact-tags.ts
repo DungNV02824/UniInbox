@@ -167,3 +167,17 @@ export function splitVisibleTags(
   const hidden = tags.slice(n);
   return { visible, hidden, overflow: hidden.length };
 }
+
+/**
+ * Gắn nhãn cho khách đang chưa ai phụ trách ⇒ tự giao hội thoại cho người gắn (để khách vào "Của tôi").
+ * Chỉ khi có nhãn MỚI được thêm (gỡ nhãn thì không giao).
+ */
+export function shouldAutoAssignOnTag(
+  prev: readonly string[],
+  next: readonly string[],
+  assignedUserId: string | null | undefined,
+): boolean {
+  if (assignedUserId) return false;
+  const before = new Set(prev.map(tagKey));
+  return next.some((t) => !before.has(tagKey(t)));
+}

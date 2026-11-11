@@ -39,6 +39,10 @@ export interface ConversationFilters {
    * thêm trên trang đã tải; khi API có `aiState=handled` thì kết quả đúng ngay từ máy chủ.
    */
   aiState?: AiStateFilter;
+  /** Tên nhãn khách (so khớp không phân biệt hoa thường). */
+  tag?: string;
+  /** Từ khóa tìm theo tên khách / nội dung tin (máy chủ bỏ dấu, không phân biệt hoa thường). */
+  q?: string;
 }
 
 /** Bỏ khóa undefined/false để hai bộ lọc giống nhau luôn cho cùng query key. */
@@ -50,6 +54,8 @@ export function normalizeFilters(f: ConversationFilters): ConversationFilters {
   if (f.assignee) out.assignee = f.assignee;
   if (f.unread) out.unread = true;
   if (f.aiState) out.aiState = f.aiState;
+  if (f.tag) out.tag = f.tag;
+  if (f.q?.trim()) out.q = f.q.trim();
   return out;
 }
 

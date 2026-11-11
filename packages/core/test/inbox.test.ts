@@ -1,4 +1,4 @@
-import { auditLogs, contactTags, conversations, messages, type Db } from '@dezon/db';
+import { auditLogs, contactTags, contacts, conversations, messages, type Db } from '@dezon/db';
 import type { ConversationSummary, ListConversationsQuery } from '@dezon/shared';
 import { and, asc, eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -550,6 +550,81 @@ describe('updateContact', () => {
       InboxForbiddenError,
     );
     expect((await updateContact(db, t.admin, hidden.contactId, { notes: 'x' }, ctx)).notes).toBe('x');
+  });
+
+  it('lọc theo nhãn khách (không phân biệt hoa thường), kết hợp với kênh', async () => {
+    const channel = await createChannel(db);
+    const other = await createChannel(db);
+    const tn = await createConversation(db, { channel, lastMessageAt: ago(HOUR) });
+    const none = await createConversation(db, { channel, lastMessageAt: ago(2 * HOUR) });
+    const elsewhere = await createConversation(db, { channel: other, lastMessageAt: ago(HOUR) });
+    await db
+      .update(contacts)
+      .set({ tags: ['Khách hàng TN', 'vip'] })
+      .where(eq(contacts.id, tn.contactId));
+    await db
+      .update(contacts)
+      .set({ tags: ['khách hàng tn'] })
+      .where(eq(contacts.id, elsewhere.contactId));
+
+    const byTag = (over: Partial<ListConversationsQuery>) =>
+      listConversations(db, t.admin, q(over), ctx).then((p) => ids(p.items));
+    expect(await byTag({ channelAccountId: channel.id, tag: 'KHÁCH HÀNG TN' })).toEqual([tn.id]);
+    expect(await byTag({ channelAccountId: channel.id, tag: 'không có' })).toEqual([]);
+    expect(await byTag({ channelAccountId: channel.id })).toEqual([tn.id, none.id]);
+    expect(await byTag({ channelAccountId: other.id, tag: 'Khách hàng TN' })).toEqual([elsewhere.id]);
+  });
+
+  it('tìm kiếm q: tên khách hoặc nội dung tin, bỏ dấu, không phân biệt hoa thường, thoát % _', async () => {
+    const channel = await createChannel(db);
+    const byName = await createConversation(db, {
+      channel,
+      contactName: 'Đúng Văn',
+      lastMessageAt: ago(HOUR),
+    });
+    const byText = await createConversation(db, {
+      channel,
+      contactName: 'Khách B',
+      lastMessageAt: ago(2 * HOUR),
+    });
+    const neither = await createConversation(db, {
+      channel,
+      contactName: 'Khách C',
+      lastMessageAt: ago(3 * HOUR),
+    });
+    await db.insert(messages).values([
+      {
+        conversationId: byText.id,
+        channelAccountId: channel.id,
+        senderType: 'customer',
+        text: 'Công trình 33 Trần Quang Diệu, giảm 50% nhé',
+        status: 'received',
+      },
+      {
+        conversationId: neither.id,
+        channelAccountId: channel.id,
+        senderType: 'customer',
+        text: 'Xin chào, bên em xây dựng nhà phố',
+        status: 'received',
+      },
+    ]);
+    const search = (term: string) =>
+      listConversations(db, t.admin, q({ channelAccountId: channel.id, q: term }), ctx).then((p) =>
+        ids(p.items),
+      );
+    expect(await search('dung van')).toEqual([byName.id]);
+    expect(await search('ĐÚNG')).toEqual([byName.id]);
+    expect(await search('tran quang dieu')).toEqual([byText.id]);
+    expect(await search('Trần Quang')).toEqual([byText.id]);
+    expect(await search('50%')).toEqual([byText.id]);
+    expect(await search('%')).toEqual([byText.id]);
+    expect(await search('_')).toEqual([]);
+    expect(await search('khach')).toEqual([byText.id, neither.id]);
+    // Gõ có dấu ⇒ so đúng dấu; gõ không dấu ⇒ khớp mọi dấu.
+    expect(await search('Đúng')).toEqual([byName.id]);
+    expect(await search('dựng')).toEqual([neither.id]);
+    expect(await search('dung')).toEqual([byName.id, neither.id]);
+    expect(await search('không có ai')).toEqual([]);
   });
 
   it('contact.tags có trong summary danh sách + chi tiết, đúng thứ tự đã lưu', async () => {

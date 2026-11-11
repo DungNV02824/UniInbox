@@ -6,8 +6,8 @@ import type { ConversationFilters } from '@/lib/inbox-api';
 import { safeColor } from '@/lib/inbox-format';
 import { cn } from '@/lib/utils';
 import {
+  channelAccountOptions,
   channelFilterFor,
-  channelFilterOptions,
   channelOptionLabel,
   groupChannelsForFilter,
   isChannelActive,
@@ -36,8 +36,8 @@ function channelDotColor(ch: ChannelFilterChannel) {
 }
 
 /**
- * Menu chọn kênh dạng listbox (thay hàng chip kênh): "Tất cả kênh", rồi theo nền tảng
- * (Facebook, Zalo OA, Zalo cá nhân) từng Trang/tài khoản kèm chấm màu. Điều hướng bằng phím mũi tên,
+ * Menu chọn kênh dạng listbox: theo nền tảng (Facebook, Zalo OA, Zalo cá nhân — tiêu đề nhóm không chọn được)
+ * từng Trang/tài khoản kèm chấm màu. Hộp thư luôn xem MỘT kênh (không có "Tất cả kênh"). Điều hướng bằng phím mũi tên,
  * Home/End, Enter/Space để chọn, Esc để đóng.
  */
 export function ChannelFilterMenu({
@@ -59,13 +59,12 @@ export function ChannelFilterMenu({
   const listRef = useRef<HTMLDivElement>(null);
 
   const groups = useMemo(() => groupChannelsForFilter(channels), [channels]);
-  const options = useMemo(() => channelFilterOptions(groups), [groups]);
+  const options = useMemo(() => channelAccountOptions(groups), [groups]);
   const selectedKey = selectedChannelKey(value);
   const selectedIndex = Math.max(
     0,
     options.findIndex((o) => o.key === selectedKey),
   );
-  const selected = options[selectedIndex];
   const selectedChannel = value.channelAccountId
     ? channels.find((c) => c.id === value.channelAccountId)
     : undefined;
@@ -143,7 +142,7 @@ export function ChannelFilterMenu({
   };
 
   // Nhãn trên nút: kênh đang chọn (kể cả khi danh sách kênh chưa tải xong).
-  let label = 'Tất cả kênh';
+  let label = loading ? 'Đang tải kênh...' : channels.length === 0 ? 'Chưa có kênh' : 'Chọn kênh';
   let dot: string | null = null;
   if (value.channelAccountId) {
     label = selectedChannel
@@ -152,8 +151,6 @@ export function ChannelFilterMenu({
         ? 'Đang tải kênh...'
         : 'Kênh đã chọn';
     dot = selectedChannel ? channelDotColor(selectedChannel) : null;
-  } else if (selected?.kind === 'type') {
-    label = `Tất cả ${selected.label}`;
   }
 
   const optionId = (index: number) => `${id}-opt-${index}`;
@@ -265,16 +262,13 @@ export function ChannelFilterMenu({
           onKeyDown={onListKeyDown}
           className="absolute inset-x-0 top-full z-30 mt-1 max-h-[min(60dvh,360px)] overflow-y-auto rounded-lg border bg-popover p-1 text-popover-foreground shadow-lg outline-none"
         >
-          {renderOption(options[0]!)}
           {groups.map((g) => (
             <div key={g.type} role="group" aria-label={g.label}>
-              {options
-                .filter(
-                  (o) =>
-                    (o.kind === 'type' && o.type === g.type) ||
-                    (o.kind === 'account' && o.channel.type === g.type),
-                )
-                .map(renderOption)}
+              <div className="mt-1 flex h-7 items-center gap-1 px-2 text-xs font-semibold text-muted-foreground first:mt-0">
+                <span>{g.label}</span>
+                <span className="font-normal">({g.channels.length})</span>
+              </div>
+              {options.filter((o) => o.kind === 'account' && o.channel.type === g.type).map(renderOption)}
             </div>
           ))}
           {groups.length === 0 && (

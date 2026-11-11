@@ -1,5 +1,6 @@
 // Phần đọc của hộp thư (read model) — dùng cho REST và cho payload realtime.
-import { channelAccounts, conversations, messages, type Db } from '@dezon/db';
+import { channelAccounts, contacts, conversations, messages, type Db } from '@dezon/db';
+import { searchMode, VN_ACCENTED_CHARS, VN_PLAIN_CHARS } from '@dezon/shared';
 import type {
   ConversationDetail,
   ConversationSummary,
@@ -8,7 +9,7 @@ import type {
   MessageDto,
   Page,
 } from '@dezon/shared';
-import { and, desc, eq, gt, isNotNull, isNull, lt, or, sql, type SQL } from 'drizzle-orm';
+import { and, desc, eq, gt, isNotNull, isNull, lt, or, sql, type AnyColumn, type SQL } from 'drizzle-orm';
 import { assertCanView, CONVERSATION_NOT_FOUND, visibleConversationsWhere } from './access';
 import { decodeCursor, encodeCursor } from './cursor';
 import { InboxNotFoundError } from './errors';
@@ -23,6 +24,32 @@ import {
 } from './read-model';
 import type { InboxContext, Viewer } from './types';
 
+/** Cột văn bản → dạng so khớp: bỏ dấu (khớp normalizeSearchText) hoặc giữ dấu (khớp foldSearchText). */
+function foldSql(col: SQL | AnyColumn, accented: boolean): SQL {
+  const folded = sql`lower(normalize(coalesce(${col}, ''), NFC))`;
+  return accented ? folded : sql`translate(${folded}, ${VN_ACCENTED_CHARS}, ${VN_PLAIN_CHARS})`;
+}
+
+/** Mẫu LIKE '%từ khóa%' (đã thoát % _ \). */
+function likePattern(q: string): string {
+  return `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+}
+
+/**
+ * Tên khách hoặc một tin bất kỳ trong hội thoại chứa từ khóa (xem searchMode). Quét bảng messages MỘT lần
+ * (semi-join), giới hạn trong kênh đang chọn nếu có, thay vì EXISTS lặp lại cho từng hội thoại.
+ */
+function searchFilter(rawQuery: string, channelAccountId: string | undefined): SQL | undefined {
+  const { accented, term } = searchMode(rawQuery);
+  if (!term) return undefined;
+  const pattern = likePattern(term);
+  const inChannel = channelAccountId ? sql`m.channel_account_id = ${channelAccountId} and` : sql``;
+  return or(
+    sql`${foldSql(contacts.displayName, accented)} like ${pattern}`,
+    sql`${conversations.id} in (select m.conversation_id from ${messages} m where ${inChannel} m.text is not null and ${foldSql(sql`m.text`, accented)} like ${pattern})`,
+  );
+}
+
 function conversationFilters(viewer: Viewer, query: ListConversationsQuery): (SQL | undefined)[] {
   const f: (SQL | undefined)[] = [visibleConversationsWhere(viewer)];
   if (query.channelType) f.push(eq(channelAccounts.type, query.channelType));
@@ -36,6 +63,12 @@ function conversationFilters(viewer: Viewer, query: ListConversationsQuery): (SQ
   if (query.aiState === 'handled') {
     f.push(and(isNotNull(conversations.chatbotId), eq(conversations.aiMode, 'auto')));
   }
+  if (query.tag) {
+    f.push(
+      sql`exists (select 1 from unnest(${contacts.tags}) as t(name) where lower(t.name) = lower(${query.tag}))`,
+    );
+  }
+  if (query.q) f.push(searchFilter(query.q, query.channelAccountId));
   if (query.cursor) {
     const c = decodeCursor(query.cursor);
     const lastAt = conversations.lastMessageAt;

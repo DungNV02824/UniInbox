@@ -4,13 +4,16 @@ import {
   activeQuickTab,
   applyAiFilter,
   applyQuickTab,
+  channelAccountOptions,
   channelFilterFor,
   channelFilterOptions,
   channelOptionLabel,
   clearPopoverFilters,
   countPopoverFilters,
+  defaultChannelId,
   groupChannelsForFilter,
   selectedChannelKey,
+  toggleTagFilter,
   type ChannelFilterChannel,
 } from './list-filters';
 
@@ -163,5 +166,47 @@ describe('lọc "Cần người" / "AI đang lo"', () => {
     expect(countPopoverFilters({ aiState: 'handled' })).toBe(1);
     expect(countPopoverFilters({ aiState: 'handled', status: 'open' })).toBe(2);
     expect(clearPopoverFilters({ aiState: 'handled', unread: true })).toEqual({ unread: true });
+  });
+});
+
+describe('một kênh mỗi lần (không có "Tất cả kênh")', () => {
+  const channels = [
+    ch('z1', 'Shop Zalo', 'zalo_oa'),
+    ch('off', 'Aaa đã ngắt', 'messenger', 'disconnected'),
+    ch('2', 'Vua Thầu'),
+    ch('1', 'Cập nhật công trình'),
+  ];
+
+  it('menu chỉ có Trang/tài khoản, đúng thứ tự nhóm', () => {
+    const opts = channelAccountOptions(groupChannelsForFilter(channels));
+    expect(opts.map((o) => o.key)).toEqual(['acc:1', 'acc:2', 'acc:off', 'acc:z1']);
+    expect(opts.every((o) => o.kind === 'account')).toBe(true);
+  });
+
+  it('mặc định: kênh đã lưu nếu còn, không thì kênh đang kết nối đầu tiên', () => {
+    expect(defaultChannelId(channels, '2')).toBe('2');
+    expect(defaultChannelId(channels, 'z1')).toBe('z1');
+    expect(defaultChannelId(channels, 'đã-xóa')).toBe('1');
+    expect(defaultChannelId(channels, null)).toBe('1');
+    expect(defaultChannelId([ch('off', 'Ngắt', 'messenger', 'disconnected')], null)).toBe('off');
+    expect(defaultChannelId([], 'x')).toBeUndefined();
+  });
+});
+
+describe('lọc theo nhãn', () => {
+  it('chọn / bấm lại để bỏ / "Tất cả"; được đếm và xóa cùng bộ lọc', () => {
+    const f = toggleTagFilter({ channelAccountId: 'c' }, 'Khách hàng TN');
+    expect(f).toEqual({ channelAccountId: 'c', tag: 'Khách hàng TN' });
+    expect(toggleTagFilter(f, 'khách hàng tn').tag).toBeUndefined();
+    expect(toggleTagFilter(f, 'VIP').tag).toBe('VIP');
+    expect(toggleTagFilter(f, undefined).tag).toBeUndefined();
+    expect(countPopoverFilters(f)).toBe(1);
+    expect(clearPopoverFilters(f)).toEqual({
+      channelAccountId: 'c',
+      tag: undefined,
+      status: undefined,
+      assignee: undefined,
+      aiState: undefined,
+    });
   });
 });

@@ -5,11 +5,19 @@ import { SlidersHorizontal } from 'lucide-react';
 import type { ConversationStatus } from '@dezon/shared';
 import { NativeSelect } from '@/components/ui/select';
 import { Feature } from '@/lib/config';
+import { useContactTags } from '@/lib/contact-tags-api';
 import type { ConversationFilters } from '@/lib/inbox-api';
 import { useDirectory } from '@/lib/inbox-queries';
+import { TAG_SWATCH_CLASSES, isTagColor, LEGACY_TAG_SWATCH_CLASS } from '@/lib/tag-colors';
 import { cn } from '@/lib/utils';
 import { FilterChip } from './filter-chip';
-import { activeAiFilter, applyAiFilter, clearPopoverFilters, countPopoverFilters } from './list-filters';
+import {
+  activeAiFilter,
+  applyAiFilter,
+  clearPopoverFilters,
+  countPopoverFilters,
+  toggleTagFilter,
+} from './list-filters';
 import { useDismiss } from './use-dismiss';
 
 /** Admin lọc theo một nhân viên cụ thể (agent chỉ thấy hội thoại của mình + chưa phân công nên không cần). */
@@ -40,6 +48,49 @@ function AssigneeStaffSelect({
   );
 }
 
+/** Nhóm "Nhãn khách": chọn một nhãn để chỉ xem khách có nhãn đó. */
+function TagFilterSection({
+  value,
+  onChange,
+}: {
+  value: string | undefined;
+  onChange: (tag: string | undefined) => void;
+}) {
+  const tags = useContactTags();
+  const list = tags.data ?? [];
+  const want = value?.toLowerCase();
+  // Nhãn đang lọc không còn trong danh sách (đã xóa/đổi tên) vẫn hiện để bỏ chọn được.
+  const missing = value && !list.some((t) => t.name.toLowerCase() === want) ? value : null;
+  return (
+    <Section title="Nhãn khách">
+      <FilterChip label="Tất cả" active={!value} onClick={() => onChange(undefined)} />
+      {list.map((t) => (
+        <FilterChip
+          key={t.id}
+          label={t.name}
+          title={`${t.name} · ${t.contactCount} khách`}
+          active={t.name.toLowerCase() === want}
+          onClick={() => onChange(t.name)}
+          icon={
+            <span
+              className={cn(
+                'size-2 shrink-0 rounded-full',
+                isTagColor(t.color) ? TAG_SWATCH_CLASSES[t.color] : LEGACY_TAG_SWATCH_CLASS,
+              )}
+              aria-hidden
+            />
+          }
+        />
+      ))}
+      {missing && <FilterChip label={missing} active onClick={() => onChange(undefined)} />}
+      {tags.isPending && <span className="text-xs text-muted-foreground">Đang tải nhãn...</span>}
+      {tags.isSuccess && list.length === 0 && (
+        <span className="text-xs text-muted-foreground">Chưa có nhãn nào (tạo ở Quản trị → Nhãn khách).</span>
+      )}
+    </Section>
+  );
+}
+
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <div className="flex flex-col gap-1.5" role="group" aria-label={title}>
@@ -49,7 +100,7 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
-/** Nút "Bộ lọc" (icon) + popover: trạng thái, người phụ trách, xóa bộ lọc. */
+/** Nút "Bộ lọc" (icon) + popover: trạng thái, chatbot, nhãn khách, người phụ trách, xóa bộ lọc. */
 export function ConversationFilterPopover({
   filters,
   onChange,
@@ -113,7 +164,7 @@ export function ConversationFilterPopover({
           id={`${id}-panel`}
           role="dialog"
           aria-label="Bộ lọc hội thoại"
-          className="absolute top-full right-0 z-30 mt-1 flex w-[18rem] max-w-[calc(100vw-1.5rem)] flex-col gap-3 rounded-lg border bg-popover p-3 text-popover-foreground shadow-lg"
+          className="absolute top-full right-0 z-30 mt-1 flex max-h-[70vh] w-[18rem] max-w-[calc(100vw-1.5rem)] flex-col gap-3 overflow-y-auto rounded-lg border bg-popover p-3 text-popover-foreground shadow-lg"
         >
           <Section title="Trạng thái">
             <FilterChip label="Tất cả" active={!filters.status} onClick={() => setStatus(undefined)} />
@@ -151,6 +202,11 @@ export function ConversationFilterPopover({
             </Section>
           </Feature>
 
+          <TagFilterSection
+            value={filters.tag}
+            onChange={(tag) => onChange((f) => toggleTagFilter(f, tag))}
+          />
+
           <Section title="Người phụ trách">
             <FilterChip label="Mọi người" active={!filters.assignee} onClick={() => setAssignee(undefined)} />
             <FilterChip
@@ -170,7 +226,7 @@ export function ConversationFilterPopover({
             <button
               type="button"
               className="rounded text-xs font-medium text-brand outline-none hover:underline focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
-              disabled={!filters.status && !filters.assignee && !filters.aiState}
+              disabled={!filters.status && !filters.assignee && !filters.aiState && !filters.tag}
               onClick={() => onChange(clearPopoverFilters)}
             >
               Xóa bộ lọc

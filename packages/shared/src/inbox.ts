@@ -2,6 +2,7 @@
 // Ngày giờ trong DTO luôn là chuỗi ISO 8601 (UTC).
 import { z } from 'zod';
 import type { ChatbotRef } from './chatbots';
+import { SEARCH_QUERY_MAX } from './search';
 import {
   ATTACHMENT_TYPES,
   CHANNEL_TYPES,
@@ -321,6 +322,13 @@ export const listConversationsQuerySchema = z.object({
   unread: booleanQuery,
   /** 'handled' = "AI đang lo": hội thoại có chatbot và ai_mode 'auto'. */
   aiState: z.enum(['handled']).optional(),
+  /** Lọc theo nhãn khách (tên nhãn, không phân biệt hoa thường). */
+  tag: z.string().trim().min(1).max(50).optional(),
+  /** Tìm theo tên khách hoặc nội dung tin nhắn (bỏ dấu, không phân biệt hoa thường). Rỗng ⇒ không lọc. */
+  q: z.preprocess(
+    (v) => (typeof v === 'string' ? v.trim() || undefined : v),
+    z.string().max(SEARCH_QUERY_MAX).optional(),
+  ),
   limit: z.coerce.number().int().min(1).max(CONVERSATIONS_PAGE_MAX).default(30),
   cursor: z.string().max(200).optional(),
 });

@@ -177,6 +177,23 @@ describe('quyền xem', () => {
     expect(matchesFilters(mine, { assignee: other.id }, admin)).toBe(false);
     expect(matchesFilters(conv(), { assignee: other.id }, admin)).toBe(false);
   });
+
+  it('tìm kiếm: phía web khớp theo tên khách, bỏ dấu', () => {
+    const base = conv();
+    const named = conv({ contact: { ...base.contact, displayName: 'Đúng Văn' } });
+    expect(matchesFilters(named, { q: 'dung van' }, admin)).toBe(true);
+    expect(matchesFilters(named, { q: 'khoi' }, admin)).toBe(false);
+  });
+
+  it('bộ lọc nhãn khách: không phân biệt hoa thường', () => {
+    const base = conv();
+    const tagged = conv({ contact: { ...base.contact, tags: ['Khách hàng TN'] } });
+    expect(matchesFilters(tagged, { tag: 'khách hàng tn' }, admin)).toBe(true);
+    expect(matchesFilters(tagged, { tag: 'VIP' }, admin)).toBe(false);
+    expect(matchesFilters(conv({ contact: { ...base.contact, tags: [] } }), { tag: 'VIP' }, admin)).toBe(
+      false,
+    );
+  });
 });
 
 describe('applyConversationToList', () => {

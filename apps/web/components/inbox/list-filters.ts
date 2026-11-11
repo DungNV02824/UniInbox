@@ -71,6 +71,29 @@ export function channelFilterOptions(groups: readonly ChannelFilterGroup[]): Cha
   return out;
 }
 
+/** Chỉ các Trang/tài khoản (không có "Tất cả kênh" / "Tất cả Facebook"): hộp thư luôn xem một kênh. */
+export function channelAccountOptions(groups: readonly ChannelFilterGroup[]): ChannelFilterOption[] {
+  return groups.flatMap((g) =>
+    g.channels.map((channel) => ({ kind: 'account' as const, key: `acc:${channel.id}`, channel })),
+  );
+}
+
+/** Khóa localStorage lưu kênh nhân viên đã chọn (vào lại vẫn giữ kênh đó). */
+export const INBOX_CHANNEL_STORAGE_KEY = 'dezon.inbox.channelAccountId';
+
+/**
+ * Kênh mở mặc định: kênh đã lưu nếu vẫn còn trong danh sách, không thì kênh đầu tiên trong menu
+ * (ưu tiên kênh đang kết nối). undefined = chưa có kênh nào.
+ */
+export function defaultChannelId(
+  channels: readonly ChannelFilterChannel[],
+  storedId: string | null | undefined,
+): string | undefined {
+  if (storedId && channels.some((c) => c.id === storedId)) return storedId;
+  const flat = groupChannelsForFilter(channels).flatMap((g) => g.channels);
+  return (flat.find(isChannelActive) ?? flat[0])?.id;
+}
+
 /** Khóa của mục đang chọn ứng với bộ lọc hiện tại. */
 export function selectedChannelKey(filters: Pick<ConversationFilters, 'channelType' | 'channelAccountId'>) {
   if (filters.channelAccountId) return `acc:${filters.channelAccountId}`;
@@ -122,18 +145,26 @@ export function applyQuickTab(filters: ConversationFilters, tab: QuickTab): Conv
 
 /** Số bộ lọc đang bật trong popover (không tính phần tab "Của tôi" đã hiển thị). */
 export function countPopoverFilters(
-  filters: Pick<ConversationFilters, 'status' | 'assignee' | 'unread' | 'aiState'>,
+  filters: Pick<ConversationFilters, 'status' | 'assignee' | 'unread' | 'aiState' | 'tag'>,
 ) {
   let n = 0;
+  if (filters.tag) n += 1;
   if (filters.status) n += 1;
   if (filters.assignee && activeQuickTab(filters) !== 'mine') n += 1;
   if (filters.aiState) n += 1;
   return n;
 }
 
-/** "Xóa bộ lọc" trong popover: bỏ trạng thái + người phụ trách + lọc AI, giữ kênh và "Chưa đọc". */
+/** "Xóa bộ lọc" trong popover: bỏ trạng thái + người phụ trách + lọc AI + nhãn, giữ kênh và "Chưa đọc". */
 export function clearPopoverFilters(filters: ConversationFilters): ConversationFilters {
-  return { ...filters, status: undefined, assignee: undefined, aiState: undefined };
+  return { ...filters, status: undefined, assignee: undefined, aiState: undefined, tag: undefined };
+}
+
+/** Bấm một nhãn trong bộ lọc: chọn nhãn đó; bấm lại nhãn đang chọn thì bỏ lọc nhãn. */
+export function toggleTagFilter(filters: ConversationFilters, tag: string | undefined): ConversationFilters {
+  if (!tag) return { ...filters, tag: undefined };
+  const same = filters.tag?.toLowerCase() === tag.toLowerCase();
+  return { ...filters, tag: same ? undefined : tag };
 }
 
 // ---------- Lọc "Cần người" / "AI đang lo" ----------

@@ -48,9 +48,10 @@ import {
  */
 export const SIGNED_URL_REFRESH_MS = 20 * 60_000;
 
-export function useConversations(filters: ConversationFilters) {
+export function useConversations(filters: ConversationFilters, opts: { enabled?: boolean } = {}) {
   const normalized = normalizeFilters(filters);
   return useInfiniteQuery({
+    enabled: opts.enabled ?? true,
     queryKey: inboxKeys.list(normalized),
     queryFn: ({ pageParam }) => inboxApi.listConversations(normalized, pageParam),
     initialPageParam: undefined as string | undefined,

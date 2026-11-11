@@ -78,7 +78,12 @@ function ContactProfile({ conversation: c }: { conversation: ConversationDetail 
       </Section>
 
       <Section title="Nhãn">
-        <ContactTagsEditor conversationId={c.id} contactId={contact.id} tags={contact.tags} />
+        <ContactTagsEditor
+          conversationId={c.id}
+          contactId={contact.id}
+          tags={contact.tags}
+          assignedUserId={c.assignedUser?.id ?? null}
+        />
       </Section>
 
       {user?.role === 'admin' && (

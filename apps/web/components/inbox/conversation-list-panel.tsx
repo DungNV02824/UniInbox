@@ -1,6 +1,8 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useRouter } from 'next/navigation';
+import { SEARCH_QUERY_MAX } from '@dezon/shared';
 import { Inbox, Loader2, RefreshCw, Search, SearchX } from 'lucide-react';
 import { EmptyState } from '@/components/empty-state';
 import { Alert, AlertDescription } from '@/components/ui/alert';
@@ -9,14 +11,38 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { useAuth } from '@/lib/auth';
 import { matchesAiState } from '@/lib/inbox-ai';
 import { normalizeFilters, type ConversationFilters } from '@/lib/inbox-api';
-import { errorText, useChannels, useConversations } from '@/lib/inbox-queries';
+import { errorText, useChannels, useConversation, useConversations } from '@/lib/inbox-queries';
 import { useRealtimeStatus } from '@/lib/realtime';
 import { useNow } from '@/lib/use-now';
 import { cn } from '@/lib/utils';
 import { ChannelFilterMenu } from './channel-filter-menu';
 import { ConversationFilterPopover } from './conversation-filter-popover';
 import { ConversationRow } from './conversation-row';
-import { QUICK_TABS, activeQuickTab, applyQuickTab } from './list-filters';
+import {
+  INBOX_CHANNEL_STORAGE_KEY,
+  QUICK_TABS,
+  activeQuickTab,
+  applyQuickTab,
+  defaultChannelId,
+  toggleTagFilter,
+} from './list-filters';
+import { TagQuickTabs } from './tag-quick-tabs';
+
+function readStoredChannel(): string | null {
+  try {
+    return window.localStorage.getItem(INBOX_CHANNEL_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function storeChannel(id: string | undefined) {
+  try {
+    if (id) window.localStorage.setItem(INBOX_CHANNEL_STORAGE_KEY, id);
+  } catch {
+    // Trình duyệt chặn lưu trữ: chỉ mất phần ghi nhớ kênh.
+  }
+}
 
 /** Chấm trạng thái realtime (xanh: đang nhận tin, vàng: đang kết nối lại). */
 function ConnectionDot() {
@@ -56,9 +82,58 @@ export function ConversationListPanel({
   selectedId?: string;
 }) {
   const { user } = useAuth();
+  const router = useRouter();
   const [filters, setFilters] = useState<ConversationFilters>({});
+  // Ô tìm kiếm: gõ xong 300 ms mới gửi lên máy chủ.
+  const [searchText, setSearchText] = useState('');
+  useEffect(() => {
+    const q = searchText.trim();
+    const timer = setTimeout(
+      () => setFilters((f) => ((f.q ?? '') === q ? f : { ...f, q: q || undefined })),
+      300,
+    );
+    return () => clearTimeout(timer);
+  }, [searchText]);
   const channels = useChannels();
-  const query = useConversations(filters);
+  const channelList = channels.data;
+
+  // Hộp thư luôn xem MỘT kênh: vào trang thì mở kênh đã chọn lần trước, không thì kênh đầu tiên.
+  useEffect(() => {
+    if (!channelList) return;
+    setFilters((f) => {
+      if (f.channelAccountId && channelList.some((c) => c.id === f.channelAccountId)) return f;
+      const id = defaultChannelId(channelList, readStoredChannel());
+      return id === f.channelAccountId && !f.channelType
+        ? f
+        : { ...f, channelType: undefined, channelAccountId: id };
+    });
+  }, [channelList]);
+
+  // Mở thẳng một hội thoại (link Lark, thông báo...) thuộc kênh khác ⇒ chuyển danh sách sang kênh đó.
+  const selected = useConversation(selectedId);
+  const selectedChannelId = selected.data?.id === selectedId ? selected.data?.channel.id : undefined;
+  useEffect(() => {
+    if (!selectedChannelId) return;
+    setFilters((f) =>
+      f.channelAccountId === selectedChannelId
+        ? f
+        : { ...f, channelType: undefined, channelAccountId: selectedChannelId },
+    );
+    storeChannel(selectedChannelId);
+  }, [selectedId, selectedChannelId]);
+
+  // Chờ chọn xong kênh rồi mới tải danh sách (tránh tải "tất cả kênh" rồi đổi). Lỗi tải kênh ⇒ vẫn tải.
+  const channelReady =
+    channels.isError || (!!channelList && (!!filters.channelAccountId || channelList.length === 0));
+  const query = useConversations(filters, { enabled: channelReady });
+
+  const chooseChannel = (next: Pick<ConversationFilters, 'channelType' | 'channelAccountId'>) => {
+    if (!next.channelAccountId) return;
+    storeChannel(next.channelAccountId);
+    setFilters((f) => ({ ...f, channelType: undefined, channelAccountId: next.channelAccountId }));
+    // Đang mở hội thoại của kênh khác ⇒ đóng để khung chat khớp với kênh vừa chọn.
+    if (selectedId && selectedChannelId && selectedChannelId !== next.channelAccountId) router.push('/inbox');
+  };
   const now = useNow(30_000);
   const sentinelRef = useRef<HTMLDivElement>(null);
 
@@ -68,7 +143,10 @@ export function ConversationListPanel({
     () => (query.data?.pages.flatMap((p) => p.items) ?? []).filter((c) => matchesAiState(c, filters.aiState)),
     [query.data, filters.aiState],
   );
-  const hasFilters = Object.keys(normalizeFilters(filters)).length > 0;
+  // Kênh luôn được chọn nên không tính là "bộ lọc" khi báo danh sách trống.
+  const hasFilters =
+    Object.keys(normalizeFilters({ ...filters, channelAccountId: undefined, channelType: undefined }))
+      .length > 0;
 
   const { hasNextPage, isFetchingNextPage, fetchNextPage } = query;
   // Cuộn tới cuối danh sách thì tải trang kế (cursor).
@@ -97,7 +175,7 @@ export function ConversationListPanel({
           channels={channels.data ?? []}
           loading={channels.isPending}
           value={filters}
-          onChange={(next) => setFilters((f) => ({ ...f, ...next }))}
+          onChange={chooseChannel}
         />
       </div>
       <div className="flex shrink-0 flex-col gap-1.5 border-b px-3 py-2">
@@ -110,10 +188,18 @@ export function ConversationListPanel({
             <input
               type="search"
               placeholder="Tìm khách hàng, tin nhắn..."
-              className="h-8 w-full min-w-0 rounded-md border bg-muted/40 pr-2 pl-8 text-[13px] outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed"
-              disabled
-              title="Tìm kiếm sẽ có ở giai đoạn sau"
-              aria-label="Tìm hội thoại"
+              className="h-8 w-full min-w-0 rounded-md border bg-background pr-2 pl-8 text-[13px] outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+              value={searchText}
+              maxLength={SEARCH_QUERY_MAX}
+              onChange={(e) => setSearchText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape' && searchText) {
+                  e.preventDefault();
+                  setSearchText('');
+                }
+              }}
+              title="Tìm theo tên khách hoặc nội dung tin nhắn (gõ không dấu cũng được)"
+              aria-label="Tìm hội thoại theo tên khách hoặc nội dung tin nhắn"
             />
           </div>
           <ConversationFilterPopover
@@ -145,11 +231,12 @@ export function ConversationListPanel({
             <ConnectionDot />
           </div>
         </div>
+        <TagQuickTabs value={filters.tag} onChange={(tag) => setFilters((f) => toggleTagFilter(f, tag))} />
       </div>
 
       {/* Chỉ vùng này cuộn; `relative` để phần tử absolute (sr-only...) trong dòng không làm cả trang cuộn. */}
       <div className="relative flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain">
-        {query.isPending ? (
+        {query.isPending || !channelReady ? (
           <ListSkeleton />
         ) : query.isError ? (
           <div className="p-3">
@@ -167,14 +254,22 @@ export function ConversationListPanel({
           hasFilters ? (
             <EmptyState
               icon={SearchX}
-              title="Không có hội thoại phù hợp"
-              description="Thử bỏ bớt bộ lọc để xem thêm hội thoại."
+              title={filters.q ? `Không tìm thấy "${filters.q}"` : 'Không có hội thoại phù hợp'}
+              description={
+                filters.q
+                  ? 'Không có khách hoặc tin nhắn nào khớp trong kênh này. Thử từ khóa khác hoặc chọn kênh khác.'
+                  : 'Thử bỏ bớt bộ lọc để xem thêm hội thoại.'
+              }
             />
           ) : (
             <EmptyState
               icon={Inbox}
               title="Chưa có hội thoại"
-              description="Tin nhắn từ các kênh đã kết nối (Fanpage...) sẽ hiện ở đây."
+              description={
+                filters.channelAccountId
+                  ? 'Kênh này chưa có hội thoại. Chọn kênh khác ở ô phía trên.'
+                  : 'Tin nhắn từ các kênh đã kết nối (Fanpage...) sẽ hiện ở đây.'
+              }
             />
           )
         ) : (
