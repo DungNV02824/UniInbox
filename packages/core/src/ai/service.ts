@@ -22,6 +22,7 @@ import { resolveOpenHandoffs, type UpdateConversationResult } from '../inbox/com
 import { InboxForbiddenError, InboxNotFoundError, InboxValidationError } from '../inbox/errors';
 import { loadSummary, type DbLike } from '../inbox/read-model';
 import type { InboxContext, Viewer } from '../inbox/types';
+import { notAutomatedEcho } from '../pipeline/automation-echo';
 import { isUniqueViolation } from '../pipeline/helpers';
 import { ChatbotNameConflictError } from './errors';
 import { normalizeForMatch } from './prefilter';
@@ -415,8 +416,9 @@ export async function setConversationChatbot(
 
 /**
  * Có nên "đánh thức" chatbot ngay không (job AI_KICK_JOB_NAME): hội thoại có bot đang bật (bot is_active,
- * ai_mode 'auto'), không pending_human (trừ bot aiHandoffMode 'continue'), không đang tạm dừng, và tin cuối cùng (bỏ qua tin system) là của
- * khách — tức khách đang chờ mà chưa ai trả lời. Gọi sau bật bot / "trả lại cho AI" / "Tiếp tục AI".
+ * ai_mode 'auto'), không pending_human (trừ bot aiHandoffMode 'continue'), không đang tạm dừng, và tin cuối cùng (bỏ qua tin system
+ * và echo tự động của Page — raw.automatedEcho, như loadPendingMessages) là của khách — tức khách đang chờ mà chưa ai
+ * trả lời. Gọi sau bật bot / "trả lại cho AI" / "Tiếp tục AI".
  */
 export async function needsChatbotKick(db: DbLike, conversationId: string, now: Date): Promise<boolean> {
   const [row] = await db
@@ -425,6 +427,7 @@ export async function needsChatbotKick(db: DbLike, conversationId: string, now: 
       lastSender: sql<string | null>`(
         select m.sender_type from ${messages} m
         where m.conversation_id = ${conversations.id} and m.sender_type <> 'system'
+          and ${notAutomatedEcho(sql`m.raw`)}
         order by m.sent_at desc, m.id desc
         limit 1
       )`,

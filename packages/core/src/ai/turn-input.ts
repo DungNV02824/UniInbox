@@ -1,7 +1,8 @@
 // Đọc dữ liệu cho một lượt chatbot: tin khách chưa xử lý, lịch sử, ảnh.
 //
 // "Chưa xử lý" (loadPendingMessages) = tin KHÁCH thỏa cả ba:
-// 1. gửi trong PENDING_MAX_AGE_HOURS giờ gần đây (sent_at) — không trả lời "tồn đọng" cũ khi bật lại AI/bot;
+// 1. gửi trong PENDING_MAX_AGE_HOURS giờ gần đây (sent_at) — không trả lời "tồn đọng" cũ khi bật lại AI/bot
+//    (riêng lượt "Tái chăm sóc" admin bấm nới tới N ngày — LoadPendingOptions.maxAgeHours, xem reengage.ts);
 // 2. tạo SAU mốc = greatest(tin kích hoạt mới nhất của lần chạy gần nhất có trigger − PENDING_RACE_SLACK_SEC,
 //    tin nhân viên cuối KHÔNG phải echo tự động của Page, lần "trả lại cho AI" gần nhất — handoffs.resolved_at:
 //    tin khách nhắn trong lúc chờ người coi như nhân viên đã xử lý; bỏ qua handoff mà bot vẫn trả lời suốt lúc chờ
@@ -13,7 +14,7 @@
 // hoàn toàn trong SQL, không qua Date của JS (mất micro giây).
 import { aiRuns, handoffs, messages, users } from '@dezon/db';
 import { HANDOFF_REASON_LABELS, type HandoffReasonCode, type MessageAttachment } from '@dezon/shared';
-import { and, asc, desc, eq, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, sql, type SQL } from 'drizzle-orm';
 import type { DbLike } from '../inbox/read-model';
 import { readObjectLimited } from '../media/storage';
 import type { MediaStorage } from '../media/types';
@@ -50,10 +51,60 @@ export interface PendingMessage {
 }
 
 /**
+ * Mốc tin nhân viên cuối (không tính echo tự động của Page) của hội thoại `conv` (tham số, hoặc cột của truy vấn
+ * ngoài như `${conversations.id}`) — dùng chung cho loadPendingMessages và quét "Tái chăm sóc" (reengage.ts).
+ */
+export function lastAgentMessageAtSql(conv: SQL | string): SQL {
+  return sql`(select max(a.created_at) from ${messages} a
+    where a.conversation_id = ${conv} and a.sender_type = 'agent' and ${notAutomatedEcho(sql`a.raw`)})`;
+}
+
+/**
+ * Mốc "trả lại cho AI" gần nhất (handoffs.resolved_at): nhân viên đã lo các tin trước đó (kể cả xử lý ngoài hệ thống,
+ * không nhắn gì) — TRỪ handoff mà bot vẫn trả lời suốt lúc chờ người (aiHandoffMode 'continue': tin system của handoff
+ * có dấu handoffBotContinues và không bị dừng giữa chừng — handoffBotStopped): tin khách chưa xử lý lúc bấm là việc
+ * của bot (đang/sắp trả lời).
+ */
+export function lastResolvedHandoffAtSql(conv: SQL | string): SQL {
+  return sql`(select max(h.resolved_at) from ${handoffs} h where h.conversation_id = ${conv}
+    and not (
+      exists (select 1 from ${messages} s where s.conversation_id = ${conv} and s.sender_type = 'system'
+        and s.raw -> 'handoffBotContinues' ->> 'handoffId' = h.id::text)
+      and not exists (select 1 from ${messages} s where s.conversation_id = ${conv} and s.sender_type = 'system'
+        and s.raw -> 'handoffBotStopped' ->> 'handoffId' = h.id::text)
+    ))`;
+}
+
+/**
+ * Mốc "tin kích hoạt mới nhất của lần chạy gần nhất có trigger − PENDING_RACE_SLACK_SEC" dạng truy vấn con — để quét
+ * nhiều hội thoại trong một câu (reengage.ts). loadPendingMessages tính CÙNG mốc theo hai bước (đọc lần chạy trước).
+ */
+export function lastTriggerWatermarkSql(conv: SQL | string): SQL {
+  return sql`((select max(w.created_at) from ${messages} w where w.id = any(coalesce((
+      select r.trigger_message_ids from ${aiRuns} r
+      where r.conversation_id = ${conv} and cardinality(r.trigger_message_ids) > 0
+      order by r.created_at desc, r.id desc limit 1
+    ), '{}'::uuid[]))) - make_interval(secs => ${PENDING_RACE_SLACK_SEC}))`;
+}
+
+export interface LoadPendingOptions {
+  /**
+   * Tuổi tối đa (giờ, theo sent_at) của tin khách chưa xử lý. Mặc định PENDING_MAX_AGE_HOURS (24). Chỉ lượt "Tái
+   * chăm sóc" (AiReplyJobData.reengage) nới ra tới N ngày; mọi điều kiện khác giữ nguyên.
+   */
+  maxAgeHours?: number;
+}
+
+/**
  * Tin khách chưa xử lý, tăng dần theo created_at (mốc chống đua); ảnh/prompt xếp lại theo (sent_at, created_at,
  * id) — xem orderPendingBySentAt.
  */
-export async function loadPendingMessages(db: DbLike, conversationId: string): Promise<PendingMessage[]> {
+export async function loadPendingMessages(
+  db: DbLike,
+  conversationId: string,
+  options: LoadPendingOptions = {},
+): Promise<PendingMessage[]> {
+  const maxAgeHours = options.maxAgeHours ?? PENDING_MAX_AGE_HOURS;
   const [run] = await db
     .select({ ids: aiRuns.triggerMessageIds })
     .from(aiRuns)
@@ -68,18 +119,8 @@ export async function loadPendingMessages(db: DbLike, conversationId: string): P
           sql`, `,
         )})) - make_interval(secs => ${PENDING_RACE_SLACK_SEC}))`
       : sql`null::timestamptz`;
-  const lastAgent = sql`(select max(a.created_at) from ${messages} a
-    where a.conversation_id = ${conversationId} and a.sender_type = 'agent' and ${notAutomatedEcho(sql`a.raw`)})`;
-  // "Trả lại cho AI": nhân viên đã lo các tin trước đó (kể cả xử lý ngoài hệ thống, không nhắn gì) — TRỪ handoff mà
-  // bot vẫn trả lời suốt lúc chờ người (aiHandoffMode 'continue': tin system của handoff có dấu handoffBotContinues và
-  // không bị dừng giữa chừng — handoffBotStopped): tin khách chưa xử lý lúc bấm là việc của bot (đang/sắp trả lời).
-  const lastResolved = sql`(select max(h.resolved_at) from ${handoffs} h where h.conversation_id = ${conversationId}
-    and not (
-      exists (select 1 from ${messages} s where s.conversation_id = ${conversationId} and s.sender_type = 'system'
-        and s.raw -> 'handoffBotContinues' ->> 'handoffId' = h.id::text)
-      and not exists (select 1 from ${messages} s where s.conversation_id = ${conversationId} and s.sender_type = 'system'
-        and s.raw -> 'handoffBotStopped' ->> 'handoffId' = h.id::text)
-    ))`;
+  const lastAgent = lastAgentMessageAtSql(conversationId);
+  const lastResolved = lastResolvedHandoffAtSql(conversationId);
   return db
     .select({
       id: messages.id,
@@ -93,7 +134,7 @@ export async function loadPendingMessages(db: DbLike, conversationId: string): P
       and(
         eq(messages.conversationId, conversationId),
         eq(messages.senderType, 'customer'),
-        sql`${messages.sentAt} > now() - make_interval(hours => ${PENDING_MAX_AGE_HOURS})`,
+        sql`${messages.sentAt} > now() - make_interval(hours => ${maxAgeHours})`,
         sql`${messages.createdAt} > coalesce(greatest(${watermark}, ${lastAgent}, ${lastResolved}), '-infinity'::timestamptz)`,
         sql`not exists (select 1 from ${aiRuns} r
           where r.conversation_id = ${conversationId} and ${messages.id} = any(r.trigger_message_ids))`,

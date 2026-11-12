@@ -5,6 +5,10 @@ import type {
   ChatbotTestRequest,
   ChatbotTestResult,
   CreateChatbotRequest,
+  ReengagePreview,
+  ReengagePreviewRequest,
+  ReengageStartRequest,
+  ReengageStartResult,
   UpdateChatbotRequest,
 } from '@dezon/shared';
 import { api } from '@/lib/api';
@@ -48,6 +52,14 @@ export const chatbotsApi = {
   /** Chạy thử bot chưa lưu. */
   testDraft(body: { draft: ChatbotDraft; messages: ChatbotTestRequest['messages'] }) {
     return api.request<ChatbotTestResult>('/chatbots/test-draft', { method: 'POST', body });
+  },
+  /** Tái chăm sóc: liệt kê khách bị bỏ sót trong N ngày (không gọi AI, không gửi tin). */
+  reengagePreview(id: string, body: ReengagePreviewRequest) {
+    return api.request<ReengagePreview>(`/chatbots/${enc(id)}/reengage/preview`, { method: 'POST', body });
+  },
+  /** Tái chăm sóc: xếp hàng bot trả lời các hội thoại đã chọn (mỗi hội thoại ≈ 1 lần gọi AI). */
+  reengageStart(id: string, body: ReengageStartRequest) {
+    return api.request<ReengageStartResult>(`/chatbots/${enc(id)}/reengage/start`, { method: 'POST', body });
   },
   /** Danh sách model chọn được (Gemini) + model mặc định của server. */
   async models(): Promise<ChatbotModels> {

@@ -52,9 +52,24 @@ export interface AiReplyJobData {
    * KỲ lý do gì cũng KHÔNG coi tin khách là đã xử lý (lượt này không do sự kiện mới gây ra).
    */
   wakeup?: boolean;
+  /**
+   * Có ⇒ lượt "Tái chăm sóc khách bị bỏ sót" do admin bấm (POST /chatbots/:id/reengage/start, xem ai/reengage.ts):
+   * tin khách chưa xử lý tính tới `pendingMaxAgeHours` giờ (thay PENDING_MAX_AGE_HOURS), prompt có ghi chú "trả lời
+   * muộn"; hội thoại không còn gắn `chatbotId` hoặc bị chặn vì BẤT KỲ lý do gì ⇒ KHÔNG coi tin là đã xử lý.
+   * jobId riêng aiReengageJobId(conv) ⇒ không bao giờ đè job debounce / đánh thức của hội thoại.
+   */
+  reengage?: AiReengageJobOptions;
+}
+export interface AiReengageJobOptions {
+  /** Tuổi tối đa (giờ) của tin khách chưa xử lý = số ngày quét × 24. */
+  pendingMaxAgeHours: number;
+  /** Bot admin đã chọn lúc bấm; hội thoại đổi bot ⇒ lượt bị bỏ (không nuốt tin). */
+  chatbotId: string;
 }
 export const AI_REPLY_JOB_NAME = 'reply';
 export const aiReplyJobId = (conversationId: string): string => `ai-${conversationId}`;
+/** jobId lượt "Tái chăm sóc" — khe riêng, khác `ai-<conv>` / `ai-<conv>-next` của debounce và đánh thức. */
+export const aiReengageJobId = (conversationId: string): string => `ai-${conversationId}-reengage`;
 
 /**
  * Cùng hàng đợi `ai-reply`, job "handoff-reminder": sau HANDOFF_ESCALATE_AFTER_MIN phút nếu handoff vẫn

@@ -69,6 +69,11 @@ export interface ChatbotTurnInput {
    * "Ảnh k/N — thuộc tin lúc HH:MM:SS (tin thứ m trong lượt này):".
    */
   images?: PromptImage[];
+  /**
+   * Lượt "Tái chăm sóc" (runtime, AiReplyJobData.reengage): giờ gửi của tin khách chưa xử lý cũ nhất ⇒ prompt thêm
+   * ghi chú "trả lời muộn, mở đầu bằng lời xin lỗi ngắn" (buildChatbotPrompt lateReplySince). Thiếu ⇒ lượt thường.
+   */
+  lateReplySince?: Date;
 }
 
 /**
@@ -413,6 +418,7 @@ export async function runChatbotTurn(
       images: input.images,
       ...(notifiedKeyword ? { notifiedKeyword } : {}),
       ...(handoffContinues ? { handoffContinues } : {}),
+      ...(input.lateReplySince ? { lateReplySince: input.lateReplySince } : {}),
     });
     const sleep = deps.sleep ?? defaultSleep;
     const request: LlmRequest = {

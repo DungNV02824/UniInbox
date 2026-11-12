@@ -8,6 +8,7 @@ import {
   AlertCircle,
   ArrowLeft,
   Bot,
+  HeartHandshake,
   Loader2,
   MessageCircleQuestion,
   MessagesSquare,
@@ -41,6 +42,7 @@ import { cn } from '@/lib/utils';
 import { UNSAVED_MESSAGE, useUnsavedGuard } from '../use-unsaved-guard';
 import { ChatTestPanel, DraftInvalidError, type RunTest } from './chat-test-panel';
 import { CharCounter, Field } from './fields';
+import { ReengageDialog } from './reengage-dialog';
 import { AdvancedTab, HandoffTab, StaffTab } from './tab-behavior';
 import { ExamplesTab, InstructionsTab, KnowledgeTab } from './tab-content';
 
@@ -158,6 +160,7 @@ function ChatbotEditor({
   const [errors, setErrors] = useState<FormErrors>({});
   const [formMessage, setFormMessage] = useState<string | null>(null);
   const [tab, setTab] = useState<EditorTab>('instructions');
+  const [reengageOpen, setReengageOpen] = useState(false);
   const submitted = useRef<ChatbotFormValues | null>(null);
 
   const dirty = isFormDirty(form, baseline);
@@ -312,6 +315,18 @@ function ChatbotEditor({
           >
             <MessageCircleQuestion aria-hidden />
           </Button>
+          {savedId && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setReengageOpen(true)}
+              title="Bot trả lời khách đã nhắn mà chưa ai trả lời"
+              aria-haspopup="dialog"
+            >
+              <HeartHandshake aria-hidden />
+              <span className="sr-only sm:not-sr-only">Tái chăm sóc</span>
+            </Button>
+          )}
           <Button variant="outline" size="sm" onClick={cancel} disabled={save.isPending}>
             Hủy
           </Button>
@@ -425,6 +440,15 @@ function ChatbotEditor({
           className="h-[min(600px,80dvh)] scroll-mt-32 lg:sticky lg:top-[7.5rem] lg:h-[calc(100dvh-12rem)]"
         />
       </main>
+
+      {reengageOpen && savedId && (
+        <ReengageDialog
+          chatbotId={savedId}
+          botName={baseline.name.trim() || 'Chatbot'}
+          botActive={baseline.isActive}
+          onOpenChange={setReengageOpen}
+        />
+      )}
     </>
   );
 }

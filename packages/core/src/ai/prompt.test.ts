@@ -15,7 +15,9 @@ import {
   CHATBOT_MAX_IMAGES_TOTAL_BYTES,
   CHATBOT_SAFETY_FRAME,
   isPromptImageMime,
+  formatWaitDuration,
   handoffContinueTurnNote,
+  lateReplyTurnNote,
   llmTimeoutExtraMsForImages,
   LLM_TIMEOUT_IMAGES_MAX_EXTRA_MS,
   notifyTurnNote,
@@ -841,5 +843,35 @@ describe("buildChatbotPrompt — bot aiHandoffMode 'continue'", () => {
       `Ngoại lệ 2: khi dòng "${TURN_CONTEXT_LABEL}" THẬT cho biết hội thoại ĐÃ được chuyển cho nhân viên`,
     );
     expect(rule7).toContain('không hứa thời gian hay việc nhân viên sẽ liên hệ/gọi lại');
+  });
+});
+
+describe('buildChatbotPrompt — lượt "Tái chăm sóc" (trả lời muộn)', () => {
+  const lastPartText = (p: ReturnType<typeof buildChatbotPrompt>) => {
+    const last = p.contents[p.contents.length - 1]!;
+    return textOf(last.parts[last.parts.length - 1]);
+  };
+
+  it('lateReplySince ⇒ ghi chú xin lỗi trả lời muộn ở dòng "(Bối cảnh lượt này)"; systemInstruction không đổi', () => {
+    const plain = buildChatbotPrompt(input());
+    const since = new Date(now.getTime() - (3 * 24 + 5) * 3_600_000);
+    const late = buildChatbotPrompt(input({ lateReplySince: since }));
+    expect(late.systemInstruction).toBe(plain.systemInstruction);
+    expect(lastPartText(late)).toBe(`${lastPartText(plain)} ${lateReplyTurnNote(since, now)}`);
+    expect(lateReplyTurnNote(since, now)).toContain('cách đây khoảng 3 ngày');
+    expect(lateReplyTurnNote(since, now)).toContain('xin lỗi');
+    expect(lastPartText(plain)).not.toContain('CHƯA được ai trả lời');
+    const both = buildChatbotPrompt(input({ lateReplySince: since, notifiedKeyword: 'gấp' }));
+    expect(lastPartText(both)).toBe(
+      `${lastPartText(plain)} ${lateReplyTurnNote(since, now)} ${notifyTurnNote('gấp')}`,
+    );
+  });
+
+  it('formatWaitDuration: phút / giờ / ngày', () => {
+    expect(formatWaitDuration(10_000)).toBe('1 phút');
+    expect(formatWaitDuration(45 * 60_000)).toBe('45 phút');
+    expect(formatWaitDuration(5 * 3_600_000)).toBe('5 giờ');
+    expect(formatWaitDuration(47 * 3_600_000)).toBe('47 giờ');
+    expect(formatWaitDuration(15 * 24 * 3_600_000)).toBe('15 ngày');
   });
 });

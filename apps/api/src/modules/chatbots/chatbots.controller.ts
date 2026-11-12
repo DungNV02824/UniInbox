@@ -8,6 +8,12 @@ import {
   chatbotTestSchema,
   type CreateChatbotRequest,
   createChatbotSchema,
+  type ReengagePreview,
+  type ReengagePreviewRequest,
+  reengagePreviewSchema,
+  type ReengageStartRequest,
+  type ReengageStartResult,
+  reengageStartSchema,
   type UpdateChatbotRequest,
   updateChatbotSchema,
 } from '@dezon/shared';
@@ -19,6 +25,7 @@ import { ZodValidationPipe } from '../../common/zod-validation.pipe';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { type ChatbotModelsResponse, ChatbotModelsService } from './chatbot-models.service';
+import { ChatbotReengageService } from './chatbot-reengage.service';
 import { ChatbotTestService } from './chatbot-test.service';
 import { type DeleteChatbotResponse, ChatbotsService } from './chatbots.service';
 
@@ -32,13 +39,14 @@ const testDraftSchema = z.object({
 });
 type TestDraftRequest = z.infer<typeof testDraftSchema>;
 
-/** Chatbot AI: mọi nhân viên xem danh sách (ô chọn bot); admin tạo/sửa/xóa/chạy thử. */
+/** Chatbot AI: mọi nhân viên xem danh sách (ô chọn bot); admin tạo/sửa/xóa/chạy thử/tái chăm sóc. */
 @Controller('chatbots')
 export class ChatbotsController {
   constructor(
     private readonly chatbots: ChatbotsService,
     private readonly tester: ChatbotTestService,
     private readonly models: ChatbotModelsService,
+    private readonly reengage: ChatbotReengageService,
   ) {}
 
   /** Agent chỉ thấy bot đang bật; admin thấy cả bot tắt. */
@@ -111,5 +119,34 @@ export class ChatbotsController {
     @Body(new ZodValidationPipe(chatbotTestSchema)) body: ChatbotTestRequest,
   ): Promise<ChatbotTestResult> {
     return this.tester.testSaved(user.id, id, body);
+  }
+
+  /**
+   * "Tái chăm sóc khách bị bỏ sót" — bước 1: danh sách hội thoại đang gắn bot có khách chờ trong `days` ngày (bot sẽ
+   * trả lời / kênh không cho bot gửi). Không ghi DB, không gọi AI. Bot không có ⇒ 404; bot tắt / AI tổng tắt ⇒ 400.
+   */
+  @Roles('admin')
+  @Post(':id/reengage/preview')
+  @HttpCode(HttpStatus.OK)
+  reengagePreview(
+    @UuidParam() id: string,
+    @Body(new ZodValidationPipe(reengagePreviewSchema)) body: ReengagePreviewRequest,
+  ): Promise<ReengagePreview> {
+    return this.reengage.preview(id, body.days);
+  }
+
+  /**
+   * Bước 2: bot trả lời LẦN LƯỢT các hội thoại đã chọn (kiểm lại từng id, tối đa REENGAGE_LIMITS.maxPerRun, giãn
+   * REENGAGE_LIMITS.spacingSec giây). Audit 'chatbot.reengage'.
+   */
+  @Roles('admin')
+  @Post(':id/reengage/start')
+  @HttpCode(HttpStatus.OK)
+  reengageStart(
+    @CurrentUser() user: AuthUser,
+    @UuidParam() id: string,
+    @Body(new ZodValidationPipe(reengageStartSchema)) body: ReengageStartRequest,
+  ): Promise<ReengageStartResult> {
+    return this.reengage.start(user.id, id, body);
   }
 }

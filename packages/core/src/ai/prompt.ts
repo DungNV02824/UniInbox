@@ -70,6 +70,12 @@ export interface BuildChatbotPromptInput {
    * đã chuyển cho nhân viên, tiếp tục giúp, không escalate lại cùng yêu cầu (ngoại lệ 2 của quy tắc 7).
    */
   handoffContinues?: boolean;
+  /**
+   * Lượt "Tái chăm sóc khách bị bỏ sót" (AiReplyJobData.reengage): giờ gửi của tin khách chưa xử lý CŨ NHẤT ⇒ dòng
+   * "(Bối cảnh lượt này)" thêm lateReplyTurnNote(): tin đã gửi cách đây bao lâu và chưa được trả lời, mở đầu bằng lời
+   * xin lỗi ngắn vì trả lời muộn. Thiếu ⇒ không có ghi chú (lượt thường). Không đổi systemInstruction.
+   */
+  lateReplySince?: Date;
 }
 
 export interface BuiltPrompt {
@@ -228,6 +234,25 @@ export function notifyTurnNote(keyword: string): string {
  */
 export function handoffContinueTurnNote(): string {
   return 'Hội thoại này ĐÃ được chuyển cho nhân viên trước đó (nhân viên đã nhận yêu cầu và đang xử lý) nhưng bạn vẫn tiếp tục trả lời người nhắn: hãy giúp người nhắn bình thường theo Hướng dẫn; KHÔNG `escalate` lại vì yêu cầu đã chuyển đó; người nhắn hỏi về yêu cầu đó thì được nói đã chuyển cho nhân viên/bộ phận phụ trách (ngoại lệ 2 của quy tắc 7), không hứa thời gian. Chỉ `escalate` khi có yêu cầu MỚI cần người, và khi đó đặt câu trả lời cho người nhắn vào `messages_to_customer`.';
+}
+
+/** "45 phút" / "5 giờ" / "3 ngày" — khoảng thời gian khách đã chờ (làm tròn xuống, tối thiểu 1 đơn vị). */
+export function formatWaitDuration(ms: number): string {
+  const minutes = Math.max(1, Math.floor(ms / 60_000));
+  if (minutes < 60) return `${minutes} phút`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${hours} giờ`;
+  return `${Math.floor(hours / 24)} ngày`;
+}
+
+/**
+ * Ghi chú gắn sau turnContextLine ở lượt "Tái chăm sóc khách bị bỏ sót" (admin bấm, bot trả lời tin khách đã chờ lâu):
+ * tin cũ nhất đã gửi cách đây bao lâu và chưa được trả lời ⇒ mở đầu bằng MỘT lời xin lỗi ngắn vì trả lời muộn rồi trả
+ * lời bình thường. Chỉ ở dòng bối cảnh của lượt (systemInstruction giữ ổn định cho cache ngầm).
+ */
+export function lateReplyTurnNote(since: Date, now: Date): string {
+  const waited = formatWaitDuration(now.getTime() - since.getTime());
+  return `Tin nhắn mới của người nhắn được gửi cách đây khoảng ${waited} và đến giờ CHƯA được ai trả lời. Hãy mở đầu bằng một lời xin lỗi ngắn gọn (một câu) vì phản hồi muộn, không viện lý do, rồi trả lời người nhắn bình thường theo Hướng dẫn.`;
 }
 
 /**
@@ -531,6 +556,7 @@ export function buildChatbotPrompt(input: BuildChatbotPromptInput): BuiltPrompt 
   const notifiedKeyword = input.notifiedKeyword?.trim();
   const notes = [
     contextLine,
+    ...(input.lateReplySince ? [lateReplyTurnNote(input.lateReplySince, input.now)] : []),
     ...(input.handoffContinues ? [handoffContinueTurnNote()] : []),
     ...(notifiedKeyword ? [notifyTurnNote(notifiedKeyword)] : []),
   ];

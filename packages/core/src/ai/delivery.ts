@@ -166,6 +166,28 @@ export async function botCanSend(
   },
   ctx: InboxContext,
 ): Promise<CanSendResult> {
+  if (conv.channelStatus !== 'connected') return botCanSendWith(conv, null, ctx);
+  return botCanSendWith(
+    conv,
+    conv.windowSource === 'ads' ? await firstCustomerMessageAt(db, conv.id) : null,
+    ctx,
+  );
+}
+
+/**
+ * Như botCanSend nhưng không đọc DB: `firstCustomerAt` = tin đầu của khách (chỉ cần với window_source 'ads') do người
+ * gọi đã đọc — quét nhiều hội thoại một lần ("Tái chăm sóc", reengage.ts).
+ */
+export function botCanSendWith(
+  conv: {
+    channelType: (typeof channelAccounts.$inferSelect)['type'];
+    channelStatus: (typeof channelAccounts.$inferSelect)['status'];
+    lastCustomerMessageAt: Date | null;
+    windowSource: (typeof conversations.$inferSelect)['windowSource'];
+  },
+  firstCustomerAt: Date | null,
+  ctx: InboxContext,
+): CanSendResult {
   if (conv.channelStatus !== 'connected') {
     return { allowed: false, reason: 'Kênh đang mất kết nối', expiresAt: null };
   }
@@ -174,7 +196,7 @@ export async function botCanSend(
       channelType: conv.channelType,
       lastCustomerMessageAt: conv.lastCustomerMessageAt,
       windowSource: conv.windowSource,
-      firstCustomerMessageAt: conv.windowSource === 'ads' ? await firstCustomerMessageAt(db, conv.id) : null,
+      firstCustomerMessageAt: conv.windowSource === 'ads' ? firstCustomerAt : null,
     },
     'bot',
     ctx.now(),

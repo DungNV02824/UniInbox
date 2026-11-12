@@ -15,13 +15,14 @@ import {
   aiSettingsSchema,
   DEFAULT_AI_SETTINGS,
   HANDOFF_REASON_CODES,
+  REENGAGE_LIMITS,
   type HandoffReasonCode,
 } from '@dezon/shared';
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { isAiPausedIndefinitely, type ChannelType } from '@dezon/shared';
 import type { CredentialsCipher } from '../channels/service';
 import type { ChannelConnector } from '../connectors/types';
-import type { HandoffReminderJobData } from '../jobs';
+import type { AiReengageJobOptions, HandoffReminderJobData } from '../jobs';
 import type { DbLike } from '../inbox/read-model';
 import type { InboxContext } from '../inbox/types';
 import type { MediaStorage } from '../media/types';
@@ -56,6 +57,8 @@ import {
   loadPendingMessages,
   loadPromptImages,
   loadTurnHistory,
+  PENDING_MAX_AGE_HOURS,
+  type LoadPendingOptions,
   type PendingMessage,
 } from './turn-input';
 import type { ChatbotTurnResult } from './types';
@@ -572,6 +575,8 @@ async function raceReason(
   conversationId: string,
   botId: string,
   pending: readonly PendingMessage[],
+  pendingOptions: LoadPendingOptions = {},
+  reengage = false,
 ): Promise<RaceResult | null> {
   const [cur] = await tx
     .select({
@@ -595,10 +600,13 @@ async function raceReason(
       return { reason: 'Chatbot của hội thoại đã thay đổi', reschedule: false };
     }
   }
+  if (reengage && cur.status === 'resolved')
+    return { reason: AI_BLOCKED_REENGAGE_RESOLVED, reschedule: false };
   if (await hasAgentMessageAfter(tx, conversationId, pending[0]!.id)) {
     return { reason: 'Nhân viên vừa nhắn', reschedule: false };
   }
-  const now = await loadPendingMessages(tx, conversationId);
+  // Cùng tuổi tối đa như lúc đọc tin (lượt "Tái chăm sóc" nới tới N ngày) ⇒ không tưởng nhầm tin cũ "đã được xử lý".
+  const now = await loadPendingMessages(tx, conversationId, pendingOptions);
   const before = new Set(pending.map((m) => m.id));
   const current = new Set(now.map((m) => m.id));
   if (now.some((m) => !before.has(m.id))) return { reason: 'Khách vừa nhắn thêm', reschedule: true };
@@ -634,6 +642,9 @@ async function raceReason(
  *    escalate — gửi thay handoffMessage). Lượt khớp notifyKeywords (result.notifiedKeyword) mà không chuyển người
  *    (kể cả bị hủy) ⇒ notifyStaffKeyword (tin system + handoff.created botContinues + Lark, chống trùng 10 phút).
  * 5. Luôn (finally): cờ aiDirtyKey còn ⇒ xóa và lên lịch lại (tin đến khi cả hai khe job đều bận).
+ * Lượt "Tái chăm sóc" (options.reengage — reengage.ts): bước 1–3 dùng tuổi tối đa pendingMaxAgeHours cho tin chưa xử lý
+ * (cả bước chống đua), không xóa khóa debounce, hội thoại đã đổi bot hoặc đã đánh dấu "Đã xử lý" (cả lúc bắt đầu lẫn
+ * dưới khóa — AI_BLOCKED_REENGAGE_RESOLVED) ⇒ chặn; MỌI lần chặn/hủy (kể cả công tắc dưới khóa) ghi trigger rỗng; prompt có ghi chú "trả lời muộn" (lateReplySince = giờ gửi tin chờ cũ nhất).
  * Lỗi hạ tầng (DB/Redis) ⇒ ném (BullMQ retry); lỗi LLM không bao giờ ném (decision 'error').
  */
 /**
@@ -663,7 +674,30 @@ async function scheduleWakeupAfterPause(db: Db, deps: AiRuntimeDeps, conversatio
 export interface AiReplyJobOptions {
   /** Lượt "đánh thức" sau tạm nghỉ (AiReplyJobData.wakeup): bị chặn ⇒ không coi tin là đã xử lý. */
   wakeup?: boolean;
+  /**
+   * Lượt "Tái chăm sóc khách bị bỏ sót" (AiReplyJobData.reengage, admin bấm — reengage.ts): tin chưa xử lý tính tới
+   * pendingMaxAgeHours giờ (kẹp trong [PENDING_MAX_AGE_HOURS, REENGAGE_LIMITS.daysMax × 24]); hội thoại không còn gắn
+   * chatbotId, đã đánh dấu "Đã xử lý", hoặc bị chặn vì BẤT KỲ lý do gì (kể cả công tắc dưới khóa) ⇒ không coi tin là đã xử lý; prompt có ghi
+   * chú "trả lời muộn" (lateReplyTurnNote); không xóa khóa debounce của luồng thường.
+   */
+  reengage?: AiReengageJobOptions;
 }
+
+/** Tuổi tối đa (giờ, số nguyên) của tin chưa xử lý cho lượt "Tái chăm sóc" — dữ liệu job lạ cũng không vượt khung. */
+export function reengagePendingMaxAgeHours(reengage: AiReengageJobOptions): number {
+  const hours = Math.ceil(Number(reengage.pendingMaxAgeHours));
+  if (!Number.isFinite(hours)) return PENDING_MAX_AGE_HOURS;
+  return Math.min(REENGAGE_LIMITS.daysMax * 24, Math.max(PENDING_MAX_AGE_HOURS, hours));
+}
+
+/** Lý do chặn lượt "Tái chăm sóc" khi hội thoại đã đổi/gỡ bot sau lúc admin bấm. */
+export const AI_BLOCKED_REENGAGE_BOT_CHANGED = 'Hội thoại đã đổi chatbot sau khi bấm tái chăm sóc';
+/**
+ * Lý do chặn lượt "Tái chăm sóc" khi nhân viên đã đánh dấu hội thoại "Đã xử lý" (sau lúc bấm, hoặc trong lúc gọi AI):
+ * tin khách mới luôn mở lại hội thoại (inbound) nên "đã xử lý" = nhân viên đã lo các tin đang chờ — không nhắn xin lỗi
+ * muộn về việc đã xong. Lượt thường không chặn (chỉ chạy khi có tin khách mới, lúc đó hội thoại đã mở lại).
+ */
+export const AI_BLOCKED_REENGAGE_RESOLVED = 'Hội thoại đã được đánh dấu đã xử lý';
 
 export async function processAiReplyJob(
   db: Db,
@@ -684,9 +718,16 @@ async function runAiReplyJob(
   conversationId: string,
   options: AiReplyJobOptions,
 ): Promise<AiReplyOutcome> {
-  const keys = debounceKeys(conversationId);
-  await deps.redis.del(keys.first, keys.last);
+  const reengage = options.reengage;
+  // Lượt "Tái chăm sóc" không thuộc chuỗi debounce của tin khách mới ⇒ để nguyên khóa debounce (job thường tự xóa).
+  if (!reengage) {
+    const keys = debounceKeys(conversationId);
+    await deps.redis.del(keys.first, keys.last);
+  }
   await recoverLostSideEffects(db, deps, conversationId);
+  const pendingOptions: LoadPendingOptions = reengage
+    ? { maxAgeHours: reengagePendingMaxAgeHours(reengage) }
+    : {};
   const skipped = (reason: string, aiRunId: string | null = null): AiReplyOutcome => ({
     status: 'skipped',
     reason,
@@ -697,7 +738,7 @@ async function runAiReplyJob(
   const [ai, conv, pending] = await Promise.all([
     getAiSettings(db),
     loadJobConversation(db, conversationId),
-    loadPendingMessages(db, conversationId),
+    loadPendingMessages(db, conversationId, pendingOptions),
   ]);
   // Không chạy ⇒ tắt chỉ báo sớm do hook tin khách bật (nếu chưa job nào nhận).
   const release = async () => {
@@ -715,15 +756,21 @@ async function runAiReplyJob(
 
   const triggerMessageIds = pending.map((m) => m.id);
   const model = conv.bot?.model ?? deps.config.defaultModel;
-  const blocked = await blockedReason(db, deps, conv);
+  const blocked =
+    reengage && conv.bot?.id !== reengage.chatbotId
+      ? AI_BLOCKED_REENGAGE_BOT_CHANGED
+      : reengage && conv.status === 'resolved'
+        ? AI_BLOCKED_REENGAGE_RESOLVED
+        : await blockedReason(db, deps, conv);
   if (blocked || !conv.bot) {
     const reason = blocked ?? 'Hội thoại không bật chatbot';
     const id = await insertRun(db, {
       conversationId,
       chatbotId: conv.bot?.id ?? null,
       // Đang pause ⇒ không coi là đã xử lý (resume/kick còn thấy tin để trả lời); lý do khác ⇒ coi như đã xử lý.
-      // Lượt "đánh thức" (không do sự kiện mới) bị chặn vì lý do khác (bot vừa gỡ/tắt, đủ lượt/giờ…) cũng không.
-      triggerMessageIds: reason === AI_BLOCKED_PAUSED || options.wakeup ? [] : triggerMessageIds,
+      // Lượt "đánh thức" / "Tái chăm sóc" (không do sự kiện mới) bị chặn vì lý do khác (bot vừa gỡ/tắt, đủ lượt/giờ,
+      // ngoài cửa sổ…) cũng không.
+      triggerMessageIds: reason === AI_BLOCKED_PAUSED || options.wakeup || reengage ? [] : triggerMessageIds,
       model,
       decision: 'no_reply',
       error: reason,
@@ -741,7 +788,10 @@ async function runAiReplyJob(
   const typing = startAiTyping(db, deps, typingTarget(conv));
   let botReplyQueued = false;
   try {
-    const outcome = await runChatbotTurnAndCommit(db, deps, conv, bot, pending);
+    const outcome = await runChatbotTurnAndCommit(db, deps, conv, bot, pending, {
+      pendingOptions,
+      reengage: reengage !== undefined,
+    });
     botReplyQueued = outcome.botReplyQueued;
     return outcome.result;
   } finally {
@@ -756,6 +806,7 @@ async function runChatbotTurnAndCommit(
   conv: JobConversation,
   bot: NonNullable<JobConversation['bot']>,
   pending: readonly PendingMessage[],
+  turn: { pendingOptions: LoadPendingOptions; reengage: boolean },
 ): Promise<{ result: AiReplyOutcome; botReplyQueued: boolean }> {
   const conversationId = conv.id;
   const triggerMessageIds = pending.map((m) => m.id);
@@ -779,11 +830,12 @@ async function runChatbotTurnAndCommit(
       channelName: conv.channelName,
       businessHours,
       ...(images.length > 0 ? { images } : {}),
+      ...(turn.reengage ? { lateReplySince: oldestSentAt(pending) ?? deps.ctx.now() } : {}),
     },
   );
 
   const saved = await db.transaction(async (tx) => {
-    const race = await raceReason(tx, conversationId, bot.id, pending);
+    const race = await raceReason(tx, conversationId, bot.id, pending, turn.pendingOptions, turn.reengage);
     const base = { conversationId, chatbotId: bot.id, model, result };
     if (race) {
       const aiRunId = await insertRun(tx, {
@@ -798,7 +850,8 @@ async function runChatbotTurnAndCommit(
     if (kill) {
       const aiRunId = await insertRun(tx, {
         ...base,
-        triggerMessageIds: kill.consume ? triggerMessageIds : [],
+        // Lượt "Tái chăm sóc" bị chặn dưới khóa (bot vừa tắt, đủ lượt/giờ) cũng không nuốt tin khách.
+        triggerMessageIds: kill.consume && !turn.reengage ? triggerMessageIds : [],
         decision: 'no_reply',
         error: `Đã hủy: ${kill.reason}`,
       });
@@ -842,6 +895,13 @@ async function runChatbotTurnAndCommit(
       });
     }
   }
+}
+
+/** Giờ gửi sớm nhất trong các tin chưa xử lý (ghi chú "trả lời muộn" của lượt "Tái chăm sóc"). */
+function oldestSentAt(pending: readonly PendingMessage[]): Date | null {
+  let oldest: Date | null = null;
+  for (const m of pending) if (m.sentAt && (!oldest || m.sentAt < oldest)) oldest = m.sentAt;
+  return oldest;
 }
 
 /** Báo nhân viên (notifyStaffKeyword); lỗi chỉ log warn — lượt bot đã commit, không ném để BullMQ chạy lại. */

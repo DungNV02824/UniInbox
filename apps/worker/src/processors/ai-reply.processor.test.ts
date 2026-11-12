@@ -32,6 +32,36 @@ describe('ai-reply processor', () => {
     expect(result).toEqual({ status: 'done', decision: 'reply', aiRunId: 'run-1' });
   });
 
+  it('job "reply" đánh thức (wakeup) truyền { wakeup: true }', async () => {
+    const h = handlers();
+    const run = createAiReplyProcessor(h, createSilentLogger());
+    await run(job(AI_REPLY_JOB_NAME, { conversationId: 'c1', scheduledAt: 'x', wakeup: true }));
+    expect(h.reply).toHaveBeenCalledWith('c1', { wakeup: true });
+  });
+
+  it('job "reply" tái chăm sóc truyền reengage (tuổi tin chờ + bot) cho core, log có cờ reengage', async () => {
+    const logger = createSilentLogger();
+    const info = vi.spyOn(logger, 'info');
+    const h = handlers();
+    const run = createAiReplyProcessor(h, logger);
+    const reengage = { pendingMaxAgeHours: 360, chatbotId: 'bot-1' };
+    await run(job(AI_REPLY_JOB_NAME, { conversationId: 'c1', scheduledAt: 'x', reengage }));
+    expect(h.reply).toHaveBeenCalledWith('c1', { reengage });
+    const [fields] = info.mock.calls[0] as unknown as [Record<string, unknown>];
+    expect(fields.reengage).toBe(true);
+  });
+
+  it('job tái chăm sóc thiếu dữ liệu ⇒ bỏ qua, không chạy như lượt thường', async () => {
+    const h = handlers();
+    const run = createAiReplyProcessor(h, createSilentLogger());
+    for (const reengage of [{ pendingMaxAgeHours: 360 }, { chatbotId: 'b', pendingMaxAgeHours: 'x' }, null]) {
+      expect(
+        await run(job(AI_REPLY_JOB_NAME, { conversationId: 'c1', scheduledAt: 'x', reengage })),
+      ).toBeNull();
+    }
+    expect(h.reply).not.toHaveBeenCalled();
+  });
+
   it('job "handoff-reminder" gọi processHandoffReminderJob với data', async () => {
     const h = handlers();
     const run = createAiReplyProcessor(h, createSilentLogger());

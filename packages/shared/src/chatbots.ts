@@ -1,7 +1,7 @@
 // Hợp đồng tính năng "Chatbot AI" — dùng chung giữa api, worker, core và web.
 // Ngày giờ trong DTO luôn là chuỗi ISO 8601 (UTC).
 import { z } from 'zod';
-import { HANDOFF_REASON_CODES, type AiRunDecision, type HandoffReasonCode } from './enums';
+import { HANDOFF_REASON_CODES, type AiRunDecision, type ChannelType, type HandoffReasonCode } from './enums';
 
 // ---------- Giới hạn ----------
 
@@ -546,3 +546,91 @@ export interface AiRunDto {
 // ---------- Handoff ----------
 
 export const handoffReasonCodeSchema = z.enum(HANDOFF_REASON_CODES);
+
+// ---------- Tái chăm sóc khách bị bỏ sót ----------
+
+/**
+ * "Tái chăm sóc": admin quét các hội thoại ĐANG GẮN bot này có khách bị bỏ sót trong N ngày gần nhất (tin cuối không
+ * tính system là của khách, còn tin khách chưa xử lý — sau tin nhân viên cuối, chưa nằm trong ai_runs) rồi cho bot trả
+ * lời LẦN LƯỢT (giãn cách spacingSec). Khách mà kênh không cho bot gửi (Messenger quá 24 giờ / quảng cáo quá 7 ngày,
+ * Zalo OA quá hạn, kênh mất kết nối) ⇒ chỉ liệt kê cho nhân viên, bot không gửi.
+ */
+export const REENGAGE_LIMITS = {
+  daysMin: 1,
+  daysMax: 30,
+  daysDefault: 15,
+  /** Tối đa số hội thoại bot trả lời mỗi lần bấm "Bắt đầu" (mỗi hội thoại ≈ 1 lần gọi AI). */
+  maxPerRun: 100,
+  /**
+   * Khoảng cách giữa hai hội thoại (giây) để không dồn tin lên Fanpage — áp cho hàng CHUNG của mọi lần bấm (mọi bot,
+   * mọi admin): lần bấm sau nối tiếp sau các khách còn chờ, không chạy song song.
+   */
+  spacingSec: 15,
+  /** Tối đa số dòng mỗi danh sách trong kết quả kiểm tra (còn lại ⇒ truncated). */
+  previewMaxItems: 300,
+} as const;
+
+const reengageDaysSchema = z.number().int().min(REENGAGE_LIMITS.daysMin).max(REENGAGE_LIMITS.daysMax);
+
+/** POST /chatbots/:id/reengage/preview (admin). */
+export const reengagePreviewSchema = z.object({ days: reengageDaysSchema });
+export type ReengagePreviewRequest = z.infer<typeof reengagePreviewSchema>;
+
+/** POST /chatbots/:id/reengage/start (admin): chỉ các hội thoại đã chọn từ danh sách "eligible" của preview. */
+export const reengageStartSchema = z.object({
+  days: reengageDaysSchema,
+  conversationIds: z.array(z.uuid()).min(1).max(REENGAGE_LIMITS.maxPerRun),
+});
+export type ReengageStartRequest = z.infer<typeof reengageStartSchema>;
+
+export interface ReengageConversationItem {
+  conversationId: string;
+  contactName: string | null;
+  channelName: string;
+  channelType: ChannelType;
+  /** ISO — tin khách cuối cùng. */
+  lastCustomerMessageAt: string;
+  /** Số tin khách đang chờ (chưa xử lý) trong N ngày. */
+  waitingMessages: number;
+  /** Trích tin khách cuối (≤ 120 ký tự; null = chỉ có tệp). */
+  lastCustomerText: string | null;
+  /** Vì sao bot không gửi được (chỉ ở outsideWindow), tiếng Việt. */
+  reason?: string;
+}
+
+export interface ReengagePreview {
+  days: number;
+  /** Bot sẽ trả lời (kênh còn cho bot gửi). Không gồm khách đã xếp hàng từ lần bấm trước (alreadyQueued). */
+  eligible: ReengageConversationItem[];
+  /**
+   * Kênh không cho bot gửi (quá khung giờ / mất kết nối) hoặc khung gửi sắp đóng ⇒ nhân viên tự xử lý. Có thể gồm cả
+   * khách đã xếp hàng nhưng khung đã đóng trước lượt của bot.
+   */
+  outsideWindow: ReengageConversationItem[];
+  /** Số khách đã được xếp hàng từ lần bấm trước và đang chờ bot trả lời (không nằm trong eligible). */
+  alreadyQueued: number;
+  /** Danh sách bị cắt ở previewMaxItems. */
+  truncated: boolean;
+}
+
+export interface ReengageStartResult {
+  /** Số hội thoại vừa được xếp hàng MỚI (bot sẽ trả lời). */
+  queued: number;
+  /** Số id đã có lượt tái chăm sóc đang chờ từ lần bấm trước (không xếp thêm, không tính vào queued/skipped). */
+  alreadyQueued: number;
+  /** Số id gửi lên nhưng không xếp hàng: đã có người trả lời, gỡ bot, quá/sắp hết khung giờ (gồm outsideWindow)… */
+  skipped: number;
+  /**
+   * Khách đã chọn mà bot KHÔNG gửi được: khung gửi đã đóng từ lúc kiểm tra, hoặc sẽ đóng trước lượt của bot trong
+   * hàng (kèm reason) ⇒ nhân viên tự trả lời.
+   */
+  outsideWindow: ReengageConversationItem[];
+  spacingSec: number;
+  /**
+   * Ước tính phút tới khi bot trả lời xong khách cuối của lần này. Mọi lần bấm (mọi bot, mọi admin) dùng chung MỘT hàng
+   * giãn cách spacingSec nên đã tính cả các khách còn chờ từ lần trước.
+   */
+  estimatedMinutes: number;
+  /** Phút tới lượt đầu tiên của lần này: > 0 khi nối sau các khách tái chăm sóc còn chờ từ trước (0 = bắt đầu ngay). */
+  startsInMinutes: number;
+}

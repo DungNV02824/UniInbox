@@ -10,6 +10,7 @@ import {
   processHandoffReminderJob,
   type AiKickJobData,
   type AiReplyJobData,
+  type AiReplyJobOptions,
   type AiReplyOutcome,
   type HandoffReminderJobData,
 } from '@dezon/core';
@@ -23,8 +24,11 @@ export const AI_REPLY_QUEUE = QUEUE_NAMES.aiReply;
 export interface AiReplyHandlers {
   /** false khi thiếu GEMINI_API_KEY: job "reply" bị bỏ qua (không gọi core, không escalate). */
   enabled: boolean;
-  /** wakeup = lượt "đánh thức" sau tạm nghỉ (AiReplyJobData.wakeup). */
-  reply: (conversationId: string, options?: { wakeup?: boolean }) => Promise<AiReplyOutcome>;
+  /**
+   * wakeup = lượt "đánh thức" sau tạm nghỉ (AiReplyJobData.wakeup); reengage = lượt "Tái chăm sóc khách bị bỏ sót"
+   * (AiReplyJobData.reengage, API đẩy với jobId aiReengageJobId).
+   */
+  reply: (conversationId: string, options?: AiReplyJobOptions) => Promise<AiReplyOutcome>;
   handoffReminder: (data: HandoffReminderJobData) => Promise<boolean>;
   /** Job "kick": lên lịch job "reply" (debounce) nếu bot còn bật; true nếu đã lên lịch. */
   kick: (conversationId: string) => Promise<boolean>;
@@ -48,6 +52,33 @@ type AiQueueJob = Pick<
   'id' | 'name' | 'data' | 'attemptsMade'
 >;
 
+/** data.reengage đủ trường hợp lệ (API đẩy — startChatbotReengage). */
+function isValidReengage(
+  reengage: AiReplyJobData['reengage'],
+): reengage is NonNullable<AiReplyJobData['reengage']> {
+  return (
+    typeof reengage?.chatbotId === 'string' &&
+    reengage.chatbotId !== '' &&
+    typeof reengage.pendingMaxAgeHours === 'number' &&
+    Number.isFinite(reengage.pendingMaxAgeHours)
+  );
+}
+
+/** Tùy chọn processAiReplyJob từ data job; undefined ⇒ lượt thường. */
+function jobOptions(
+  wakeup: boolean | undefined,
+  reengage: AiReplyJobData['reengage'],
+): AiReplyJobOptions | undefined {
+  const withReengage = isValidReengage(reengage);
+  if (!wakeup && !withReengage) return undefined;
+  return {
+    ...(wakeup ? { wakeup: true } : {}),
+    ...(withReengage
+      ? { reengage: { pendingMaxAgeHours: reengage.pendingMaxAgeHours, chatbotId: reengage.chatbotId } }
+      : {}),
+  };
+}
+
 /** Chỉ log id/trạng thái/lý do — không log nội dung tin nhắn. */
 export function createAiReplyProcessor(handlers: AiReplyHandlers, logger: Logger) {
   return async (
@@ -55,7 +86,7 @@ export function createAiReplyProcessor(handlers: AiReplyHandlers, logger: Logger
   ): Promise<AiReplyOutcome | { reminded: boolean } | { scheduled: boolean } | null> => {
     switch (job.name) {
       case AI_REPLY_JOB_NAME: {
-        const { conversationId, wakeup } = job.data as AiReplyJobData;
+        const { conversationId, wakeup, reengage } = job.data as AiReplyJobData;
         if (!handlers.enabled) {
           logger.debug(
             { jobId: job.id, conversationId },
@@ -63,8 +94,14 @@ export function createAiReplyProcessor(handlers: AiReplyHandlers, logger: Logger
           );
           return null;
         }
-        const outcome = wakeup
-          ? await handlers.reply(conversationId, { wakeup: true })
+        // Job "Tái chăm sóc" hỏng data ⇒ bỏ hẳn (chạy như lượt thường có thể "nuốt" tin khách khi bị chặn).
+        if (reengage !== undefined && !isValidReengage(reengage)) {
+          logger.warn({ jobId: job.id, conversationId }, 'Job tái chăm sóc thiếu dữ liệu: bỏ qua');
+          return null;
+        }
+        const options = jobOptions(wakeup, reengage);
+        const outcome = options
+          ? await handlers.reply(conversationId, options)
           : await handlers.reply(conversationId);
         logger.info(
           {
@@ -74,6 +111,7 @@ export function createAiReplyProcessor(handlers: AiReplyHandlers, logger: Logger
             ...(outcome.status === 'done' ? { decision: outcome.decision } : { reason: outcome.reason }),
             aiRunId: outcome.aiRunId,
             attemptsMade: job.attemptsMade,
+            ...(options?.reengage ? { reengage: true } : {}),
           },
           'Chatbot đã xử lý hội thoại',
         );
