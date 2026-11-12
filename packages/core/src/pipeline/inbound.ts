@@ -16,8 +16,11 @@ import type { InboundJobData } from '../jobs';
 import { DEFAULT_MIME } from '../media/mime';
 import { downloadToBuffer, storeMedia } from '../media/storage';
 import {
+  isAdReplyNoticeText,
   isLikelyAutomatedEcho,
+  lockConversationEchoClassification,
   reclassifyEchoesAfterCustomer,
+  reclassifyEchoesNearAdNotice,
   recordEchoPause,
   withAutomatedFlag,
 } from './automation-echo';
@@ -29,7 +32,13 @@ import { isOwnSentCopy, recordSentExternalId } from './own-sent';
 import { processDelivery, processRead, ReceiptNotReadyError } from './receipts';
 import type { InboundMessageResult, InboundProcessOptions, PipelineDeps } from './types';
 
-export { AUTOMATED_ECHO_RAW_KEY, AUTOMATION_ECHO_WINDOW_SEC } from './automation-echo';
+export {
+  AD_GREETING_ECHO_WINDOW_SEC,
+  AUTOMATED_ECHO_RAW_KEY,
+  AUTOMATION_ECHO_WINDOW_SEC,
+  repairAdGreetingEchoes,
+  type AdGreetingRepairResult,
+} from './automation-echo';
 export { isOwnEcho } from './echo';
 export { ReceiptNotReadyError } from './receipts';
 
@@ -207,9 +216,13 @@ async function storeInboundMessage(
   const isCustomer = msg.direction === 'in';
 
   const saved = await db.transaction(async (tx) => {
-    // Echo từ nền tảng gửi ngay sau tin khách ⇒ tin tự động của Page (Instant Reply/Away...), xem automation-echo.ts.
+    // Echo từ nền tảng gửi ngay sau tin khách (Instant Reply/Away...) hoặc ngay trước tin khách vào từ quảng cáo
+    // (lời chào của quảng cáo) ⇒ tin tự động của Page, xem automation-echo.ts.
     const isPlatformEcho = !isCustomer && msg.senderType === 'agent';
-    const automatedEcho = isPlatformEcho && (await isLikelyAutomatedEcho(tx, conversation.id, msg.sentAt));
+    // Echo và tin khách của cùng hội thoại phân loại lần lượt (hai job inbound chạy song song).
+    if (isPlatformEcho || isCustomer) await lockConversationEchoClassification(tx, conversation.id);
+    const automatedEcho =
+      isPlatformEcho && (await isLikelyAutomatedEcho(tx, conversation.id, msg.sentAt, msg.text));
     const [row] = await tx
       .insert(messages)
       .values({
@@ -247,7 +260,15 @@ async function storeInboundMessage(
     }
     // Tin khách đến sau echo tự động (thứ tự xử lý đảo) ⇒ đánh dấu lại echo, gỡ pause echo đã đặt.
     if (updated && isCustomer) await reclassifyEchoesAfterCustomer(tx, conversation.id, msg.sentAt);
-    return updated ? { messageId: row.id, conversation: updated } : null;
+    // Echo "… đã trả lời một quảng cáo." tới sau cùng ⇒ lời chào quảng cáo lưu trước đó (bị coi là nhân viên) được
+    // đánh dấu lại; có đánh dấu thì hẹn chatbot sau commit (lượt của tin khách có thể đã bị pause chặn/hủy).
+    const greetingsReclassified =
+      updated && isPlatformEcho && automatedEcho && isAdReplyNoticeText(msg.text)
+        ? await reclassifyEchoesNearAdNotice(tx, conversation.id, msg.sentAt)
+        : 0;
+    return updated
+      ? { messageId: row.id, conversation: updated, reschedule: greetingsReclassified > 0 }
+      : null;
   });
 
   if (!saved) {
@@ -260,7 +281,7 @@ async function storeInboundMessage(
   }
   // Lên lịch chatbot TRƯỚC (đường trễ của câu trả lời bot), rồi mới tới việc chậm (avatar) và phát realtime.
   // Avatar chạy trước message.created để summary của tin đầu tiên đã có ảnh đại diện (như trước).
-  if (isCustomer && !backfill && deps.onCustomerMessageStored) {
+  if ((isCustomer || saved.reschedule) && !backfill && deps.onCustomerMessageStored) {
     try {
       await deps.onCustomerMessageStored({
         conversationId: saved.conversation.id,

@@ -375,3 +375,40 @@ Yêu cầu của chủ dự án: "gom tất cả tin nhắn về". Webhook khôn
   - Lượt `wakeup` bị chặn vì BẤT KỲ lý do gì (bot vừa gỡ/tắt, đủ lượt/giờ, ngoài cửa sổ…) ghi ai_run với
     trigger rỗng ⇒ không "nuốt" tin khách; gắn lại bot ⇒ kick vẫn trả lời. Lượt thường giữ hành vi cũ.
   - "Dừng hẳn" (mốc 9999) và pause đã gỡ ⇒ không hẹn. Lỗi DB/Redis khi hẹn chỉ log.
+
+### 2026-11-12 — Echo lời chào quảng cáo Click-to-Messenger không phải nhân viên (bot không còn "im" với khách từ quảng cáo)
+
+- **Lỗi production:** khách bấm quảng cáo Click-to-Messenger, Meta (app "Meta Business Suite") gửi 2 echo đầu hội
+  thoại — "<Tên> đã trả lời một quảng cáo." và lời chào của quảng cáo — với `sent_at` TRƯỚC hoặc BẰNG tin khách (quick
+  reply cùng giây) nhưng webhook echo tới SAU tin khách. Heuristic 15 giây chỉ bắt echo gửi SAU tin khách ⇒ echo bị coi
+  là nhân viên: pause/"dừng hẳn", lượt bot đang chạy bị hủy "Nhân viên vừa nhắn", và mốc tin nhân viên cuối "cắt" tin
+  khách khỏi danh sách chưa xử lý ⇒ bot không bao giờ trả lời.
+- **Quy tắc mới** (`packages/core/src/pipeline/automation-echo.ts`, `adGreetingSql`): echo nền tảng (sender 'agent',
+  không `sender_user_id`, không `raw.outbound`) là echo tự động nếu có tin khách gửi trong [echo.sent_at, echo.sent_at +
+  **60 giây**] (`AD_GREETING_ECHO_WINDOW_SEC`) **và khách vào từ quảng cáo đúng lúc đó**: tin khách ấy mang referral
+  ADS trong raw (event gốc: `referral` / `message.referral` / `postback.referral`, `source` = ADS), **hoặc** có echo
+  nền tảng chứa "đã trả lời một quảng cáo" / "replied to an ad" trong [echo − 60 s, echo + 60 s] (khách đã có hội thoại
+  cũ: Meta gửi referral bằng `messaging_referrals` đứng riêng — chưa xử lý — nên tin khách không mang referral).
+- **KHÔNG dựa vào `conversations.window_source = 'ads'`:** cờ này giữ 'ads' suốt đời hội thoại ⇒ nếu dùng, mọi tin
+  nhân viên thật gửi từ Business Suite mà khách trả lời trong 60 giây đều bị coi là tự động (gỡ "tạm nghỉ"/"dừng hẳn",
+  bot trả lời đè nhân viên và trả lời lại cả tin nhân viên đã lo). Chỉ tin khách vào từ quảng cáo mới mang referral ⇒
+  về sau hội thoại quảng cáo hành xử như hội thoại thường.
+- **Ba thứ tự đến:** lưu echo sau tin khách (`isLikelyAutomatedEcho`); lưu tin khách sau echo
+  (`reclassifyEchoesAfterCustomer` đánh dấu echo trong [khách − 60 s, khách] và gỡ pause echo đã đặt theo điều kiện an
+  toàn cũ; tin khách tự lên lịch bot sau commit); echo thông báo tới sau cùng (`reclassifyEchoesNearAdNotice` đánh dấu
+  lại lời chào quanh nó, gỡ pause, rồi gọi `onCustomerMessageStored` để hẹn lại bot — lượt trước có thể đã bị pause
+  chặn/hủy).
+- **Đánh đổi còn lại:** tin nhân viên thật gửi trong 60 giây TRƯỚC đúng tin khách vào từ quảng cáo (hoặc quanh echo
+  thông báo) bị coi là tự động — hiếm. Khách vào từ quảng cáo mà trả lời lời chào sau hơn 60 giây thì lời chào vẫn bị
+  coi là nhân viên (như trước bản sửa).
+- **Chống đua giữa hai job inbound:** echo và tin khách của cùng hội thoại xử lý song song có thể không thấy nhau (chưa
+  commit) ⇒ transaction lưu tin lấy `pg_advisory_xact_lock(ECHO, hashtext(conversation_id))` trước bước phân loại
+  (khóa advisory, không phải khóa dòng ⇒ không đổi thứ tự khóa với job AI). Chống đua 6.4 (`hasAgentMessageAfter`) và
+  mốc tin chưa xử lý vốn đã bỏ qua `automatedEcho` ⇒ echo được đánh dấu ngay khi lưu thì lượt bot không bị hủy.
+- **Sửa hội thoại đã kẹt:** `repairAdGreetingEchoes(db)` (idempotent) áp đúng quy tắc trên (không dùng
+  `window_source` hiện tại) cho echo gửi trong [now − 7 ngày (`AD_GREETING_REPAIR_DAYS`), mốc cố định
+  `AD_GREETING_REPAIR_BEFORE` = 2026-11-16) — echo sau mốc đã được đường sống phân loại bằng cùng điều kiện; quá mốc + 7
+  ngày thì repair không làm gì dù worker gọi mỗi lần khởi động. Gỡ pause echo đặt (chỉ khi pause vẫn đúng giá trị echo
+  đặt và không có tin nhân viên thật sau echo). Worker gọi lúc khởi động, không chặn, log số lượng, lỗi chỉ log warn.
+  KHÔNG gửi/lên lịch gì: tin khách chỉ hết bị "cắt" ⇒ "Tiếp tục AI" / chọn lại bot / tin khách kế tiếp trả lời như
+  thường (tin trong 24 giờ).

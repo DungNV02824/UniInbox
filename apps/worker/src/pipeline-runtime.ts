@@ -16,6 +16,7 @@ import type { Redis } from 'ioredis';
 import {
   createAiRuntime,
   createCustomerMessageHook,
+  runAdGreetingEchoRepair,
   startBotOutboundSweeper,
   type AiRuntime,
 } from './ai/runtime';
@@ -125,6 +126,8 @@ export function createPipelineRuntime(env: Env, logger: Logger): PipelineRuntime
 
   // Tin bot 'queued' bị bỏ rơi (worker chết giữa commit và enqueue) ⇒ xếp hàng lại định kỳ.
   const sweeper = startBotOutboundSweeper(handle.db, ai.deps.scheduler, logger.child({ component: 'ai' }));
+  // Hội thoại quảng cáo bị kẹt trước bản sửa echo lời chào quảng cáo ⇒ sửa một lần, không chặn khởi động.
+  void runAdGreetingEchoRepair(handle.db, logger.child({ component: 'ai' }));
 
   return {
     db: handle.db,

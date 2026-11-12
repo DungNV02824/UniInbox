@@ -16,6 +16,7 @@ import {
   startBotOutboundSweeper,
   createLlmClient,
   larkFallbackFromEnv,
+  runAdGreetingEchoRepair,
   type BuildAiDepsInput,
 } from './runtime';
 
@@ -190,6 +191,22 @@ describe('startBotOutboundSweeper', () => {
     } finally {
       sweeper.stop();
     }
+  });
+});
+
+describe('runAdGreetingEchoRepair', () => {
+  it('log số lượng khi xong; lỗi chỉ log warn, không ném', async () => {
+    const info = vi.fn();
+    const warn = vi.fn();
+    const result = { echoes: 3, conversations: 2, pausesReleased: 1 };
+    const repair = vi.fn(async () => result);
+    await runAdGreetingEchoRepair({} as Db, { info, warn }, repair as never);
+    expect(repair).toHaveBeenCalledWith({});
+    expect(info).toHaveBeenCalledWith(result, expect.any(String));
+
+    repair.mockImplementationOnce(() => Promise.reject(new Error('db down')));
+    await expect(runAdGreetingEchoRepair({} as Db, { info, warn }, repair as never)).resolves.toBeUndefined();
+    expect(warn).toHaveBeenCalledWith({ err: 'db down' }, expect.any(String));
   });
 });
 

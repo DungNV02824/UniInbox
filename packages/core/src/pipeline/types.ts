@@ -27,7 +27,8 @@ export interface PipelineDeps {
   /**
    * Chatbot AI: gọi SAU khi lưu (commit) một tin KHÁCH mới với source 'webhook' | 'sync-incremental'
    * (KHÔNG gọi với 'sync-backfill'). Worker cài bằng maybeScheduleChatbotReply. Lỗi hook chỉ log warn,
-   * không làm hỏng pipeline. Thiếu ⇒ không làm gì.
+   * không làm hỏng pipeline. Thiếu ⇒ không làm gì. Cũng gọi (messageId = echo thông báo) khi echo "… đã trả lời
+   * một quảng cáo." tới sau cùng và đánh dấu lại lời chào quảng cáo (gỡ pause) ⇒ hẹn lại bot cho tin khách đang chờ.
    */
   onCustomerMessageStored?: (event: CustomerMessageStoredEvent) => Promise<void>;
 }

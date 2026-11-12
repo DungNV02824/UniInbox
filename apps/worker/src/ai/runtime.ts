@@ -5,6 +5,7 @@ import {
   createGeminiClient,
   LlmError,
   maybeScheduleChatbotReply,
+  repairAdGreetingEchoes,
   requeueQueuedBotMessages,
   type AiJobScheduler,
   type AiRuntimeDeps,
@@ -196,6 +197,28 @@ export function startBotOutboundSweeper(
   const timer = setInterval(() => void sweep(), intervalMs);
   timer.unref();
   return { sweep, stop: () => clearInterval(timer) };
+}
+
+/**
+ * Sửa lúc worker khởi động (2026-11-12): echo lời chào quảng cáo Click-to-Messenger trước bản sửa bị coi là nhân
+ * viên ⇒ tin khách bị coi là đã xử lý (repairAdGreetingEchoes, idempotent, không gửi gì; chỉ echo trước mốc cố định
+ * AD_GREETING_REPAIR_BEFORE ⇒ quá mốc + 7 ngày thì không làm gì). Không chặn khởi động: gọi không await; luôn
+ * resolve, lỗi chỉ log warn.
+ */
+export async function runAdGreetingEchoRepair(
+  db: Db,
+  logger: Pick<PipelineLogger, 'info' | 'warn'>,
+  repair: typeof repairAdGreetingEchoes = repairAdGreetingEchoes,
+): Promise<void> {
+  try {
+    const result = await repair(db);
+    logger.info(result, 'Sửa echo lời chào quảng cáo (một lần lúc khởi động) xong');
+  } catch (error) {
+    logger.warn(
+      { err: error instanceof Error ? error.message : String(error) },
+      'Sửa echo lời chào quảng cáo lỗi',
+    );
+  }
 }
 
 /** Cờ ai-dirty (SET EX) — dùng làm markDirty của scheduler. */
