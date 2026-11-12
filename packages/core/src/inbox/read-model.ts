@@ -27,6 +27,7 @@ import type {
 import { asc, eq, sql, type SQL } from 'drizzle-orm';
 import type { NodePgQueryResultHKT } from 'drizzle-orm/node-postgres';
 import type { PgDatabase } from 'drizzle-orm/pg-core';
+import { isAttachmentRetryPending } from '../pipeline/attachment-retry-policy';
 import { firstCustomerMessageAtSql } from '../pipeline/window-anchor';
 import { sendWindowInfo } from '../policy';
 import type { InboxContext } from './types';
@@ -279,7 +280,11 @@ export function selectMessageRows(db: DbLike, where: SQL | undefined, orderBy: S
 
 export type MessageRow = Awaited<ReturnType<typeof selectMessageRows>>[number];
 
-async function toAttachmentDto(a: MessageAttachment, ctx: InboxContext): Promise<MessageAttachmentDto> {
+async function toAttachmentDto(
+  a: MessageAttachment,
+  msg: { sentAt: Date; createdAt: Date },
+  ctx: InboxContext,
+): Promise<MessageAttachmentDto> {
   return {
     type: a.type,
     mime: a.mime,
@@ -287,6 +292,8 @@ async function toAttachmentDto(a: MessageAttachment, ctx: InboxContext): Promise
     ...(a.width !== undefined ? { width: a.width } : {}),
     ...(a.height !== undefined ? { height: a.height } : {}),
     ...(a.name !== undefined ? { name: a.name } : {}),
+    // Tệp tải hỏng mà worker còn đang tự tải lại (pipeline/attachment-retry.ts).
+    ...(!a.storage_key && isAttachmentRetryPending(a, msg, ctx.now()) ? { retrying: true as const } : {}),
   };
 }
 
@@ -308,7 +315,7 @@ export async function toMessageDto(row: MessageRow, ctx: InboxContext): Promise<
       row.senderUserId && row.senderUserName ? { id: row.senderUserId, name: row.senderUserName } : null,
     senderLabel: senderLabel(row),
     text: row.text,
-    attachments: await Promise.all((row.attachments ?? []).map((a) => toAttachmentDto(a, ctx))),
+    attachments: await Promise.all((row.attachments ?? []).map((a) => toAttachmentDto(a, row, ctx))),
     status: row.status,
     error: row.error,
     sentAt: row.sentAt.toISOString(),

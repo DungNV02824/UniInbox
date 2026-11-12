@@ -85,8 +85,18 @@ export function MessageAttachments({
     <div className={cn('flex flex-wrap gap-1.5', outbound ? 'justify-end' : 'justify-start')}>
       {attachments.map((a, i) => {
         const key = `${a.url ?? a.name ?? 'att'}-${i}`;
-        // Không có URL = tải tệp từ nền tảng thất bại; hệ thống không thử lại nên báo rõ cách xử lý.
+        // Không có URL = tải tệp từ nền tảng thất bại. Worker tự tải lại một thời gian (retrying; xong thì
+        // message.updated đưa URL tới); hết lượt / link hết hạn thì báo rõ cách xử lý.
         if (!a.url) {
+          if (a.retrying) {
+            return (
+              <Unavailable
+                key={key}
+                label="Đang tải lại tệp…"
+                title={a.name ? `Tệp: ${a.name}` : undefined}
+              />
+            );
+          }
           return outbound ? (
             <Unavailable key={key} label="Không hiển thị được tệp" />
           ) : (

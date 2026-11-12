@@ -1,6 +1,7 @@
 // Tiện ích dùng chung của pipeline inbound/outbound.
 import type { Db } from '@dezon/db';
 import type { ChannelType } from '@dezon/shared';
+import { DrizzleQueryError } from 'drizzle-orm';
 import { getConversationSummary, getMessageDto } from '../inbox/queries';
 import { roomsForConversation } from '../realtime';
 import type { PipelineDeps } from './types';
@@ -16,6 +17,25 @@ export function isUniqueViolation(error: unknown): boolean {
 
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+const URL_RE = /https?:\/\/[^\s"'<>]+/gi;
+
+/**
+ * Thông điệp lỗi an toàn để LOG: DrizzleQueryError mang cả câu SQL + params (attachments có URL CDN kèm token,
+ * nội dung tin, tên khách…) ⇒ chỉ lấy mã + thông điệp lỗi gốc của Postgres; mọi URL còn sót bị che.
+ */
+export function safeErrorMessage(error: unknown): string {
+  if (
+    error instanceof DrizzleQueryError ||
+    (error instanceof Error && 'query' in error && 'params' in error)
+  ) {
+    const cause = error.cause as { code?: unknown; message?: unknown } | undefined;
+    const code = typeof cause?.code === 'string' ? ` [${cause.code}]` : '';
+    const detail = typeof cause?.message === 'string' ? `: ${cause.message}` : '';
+    return `Lỗi truy vấn DB${code}${detail}`.replace(URL_RE, '<url>');
+  }
+  return errorMessage(error).replace(URL_RE, '<url>');
 }
 
 const CHANNEL_LABELS: Record<ChannelType, string> = {
@@ -46,13 +66,13 @@ export async function emitMessageCreated(
       conversation: summary,
     });
   } catch (error) {
-    deps.logger.error({ messageId, err: errorMessage(error) }, 'Không phát được message.created');
+    deps.logger.error({ messageId, err: safeErrorMessage(error) }, 'Không phát được message.created');
   }
 }
 
 export async function emitMessageUpdated(
   db: Db,
-  deps: PipelineDeps,
+  deps: Pick<PipelineDeps, 'ctx' | 'publisher' | 'logger'>,
   messageId: string,
   conversation: { assignedUserId: string | null },
 ): Promise<void> {
@@ -60,7 +80,7 @@ export async function emitMessageUpdated(
     const message = await getMessageDto(db, messageId, deps.ctx);
     deps.publisher.emit(roomsForConversation(conversation), 'message.updated', { message });
   } catch (error) {
-    deps.logger.error({ messageId, err: errorMessage(error) }, 'Không phát được message.updated');
+    deps.logger.error({ messageId, err: safeErrorMessage(error) }, 'Không phát được message.updated');
   }
 }
 
@@ -77,7 +97,7 @@ export async function emitConversationUpdated(
     });
   } catch (error) {
     deps.logger.error(
-      { conversationId: conversation.id, err: errorMessage(error) },
+      { conversationId: conversation.id, err: safeErrorMessage(error) },
       'Không phát được conversation.updated',
     );
   }

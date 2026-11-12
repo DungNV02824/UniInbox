@@ -13,8 +13,7 @@ import { and, eq, ne, sql } from 'drizzle-orm';
 import { DEFAULT_AI_PAUSE_AFTER_AGENT_MIN, pauseAiAfterAgentMessage } from '../ai/agent-pause';
 import type { AccountResolver, InboundEvent } from '../connectors/types';
 import type { InboundJobData } from '../jobs';
-import { DEFAULT_MIME } from '../media/mime';
-import { downloadToBuffer, storeMedia } from '../media/storage';
+import { downloadAndStoreAttachment, failedAttachment } from './attachment-download';
 import {
   isAdReplyNoticeText,
   isLikelyAutomatedEcho,
@@ -363,7 +362,7 @@ async function upsertConversation(
 
 /**
  * Tải từng tệp về S3 (prefix media). Tệp lỗi vẫn giữ trong tin với storage_key = '' và original_url
- * (DTO trả url = null) để nhân viên biết khách có gửi tệp.
+ * (DTO trả url = null) để nhân viên biết khách có gửi tệp; worker tự tải lại sau (attachment-retry.ts).
  */
 async function downloadAttachments(
   deps: PipelineDeps,
@@ -372,32 +371,13 @@ async function downloadAttachments(
   return Promise.all(
     msg.attachments.map(async (att): Promise<MessageAttachment> => {
       try {
-        const file = await downloadToBuffer(att.url, {
-          maxBytes: deps.maxMediaBytes,
-          ...(deps.fetch ? { fetch: deps.fetch } : {}),
-        });
-        const mime = file.mime && file.mime !== DEFAULT_MIME ? file.mime : (att.mime ?? file.mime);
-        const stored = await storeMedia(deps.storage, {
-          data: file.data,
-          ...(mime ? { mime } : {}),
-          ...(att.name ? { filename: att.name } : {}),
-          type: att.type,
-          prefix: 'media',
-          originalUrl: att.url,
-        });
-        return stored;
+        return await downloadAndStoreAttachment(deps, att);
       } catch (error) {
         deps.logger.warn(
           { channelAccountId: msg.channelAccountId, type: att.type, err: errorMessage(error) },
           'Không tải được tệp đính kèm',
         );
-        return {
-          type: att.type,
-          storage_key: '',
-          mime: att.mime ?? DEFAULT_MIME,
-          original_url: att.url,
-          ...(att.name ? { name: att.name } : {}),
-        };
+        return failedAttachment(att);
       }
     }),
   );

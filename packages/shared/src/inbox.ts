@@ -368,6 +368,8 @@ export interface MessageAttachmentDto {
   width?: number;
   height?: number;
   name?: string;
+  /** Chỉ có (true) khi url = null và worker vẫn đang tự tải lại tệp (chưa hết lượt, link chưa hết hạn). */
+  retrying?: true;
 }
 
 export interface MessageDto {

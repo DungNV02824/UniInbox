@@ -3,6 +3,22 @@ import { normalizeMime } from './mime';
 
 export const DEFAULT_DOWNLOAD_TIMEOUT_MS = 30_000;
 
+/**
+ * Lỗi tải tệp (thông điệp KHÔNG chứa URL). `reason` để phân loại (thử lại hay bỏ hẳn); `status` = mã HTTP khi máy
+ * chủ trả lỗi.
+ */
+export class DownloadError extends Error {
+  override readonly name = 'DownloadError';
+  constructor(
+    message: string,
+    readonly reason: 'http' | 'too_large' | 'timeout' | 'network',
+    readonly status?: number,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+  }
+}
+
 export interface DownloadOptions {
   maxBytes: number;
   fetch?: typeof fetch;
@@ -10,7 +26,7 @@ export interface DownloadOptions {
 }
 
 /**
- * Đọc stream và dừng ngay khi vượt maxBytes (không tin Content-Length). Lỗi KHÔNG chứa URL
+ * Đọc stream và dừng ngay khi vượt maxBytes (không tin Content-Length). Lỗi (DownloadError) KHÔNG chứa URL
  * (URL CDN của nền tảng có token).
  */
 export async function downloadToBuffer(
@@ -24,7 +40,7 @@ export async function downloadToBuffer(
     const res = await doFetch(url, { signal, redirect: 'follow' });
     if (!res.ok) {
       await res.body?.cancel().catch(() => undefined);
-      throw new Error(`Tải tệp thất bại: HTTP ${res.status}`);
+      throw new DownloadError(`Tải tệp thất bại: HTTP ${res.status}`, 'http', res.status);
     }
     const declared = Number(res.headers.get('content-length'));
     if (Number.isFinite(declared) && declared > opts.maxBytes) {
@@ -36,18 +52,26 @@ export async function downloadToBuffer(
     return mime ? { data, mime } : { data };
   } catch (error) {
     if (signal.aborted || (error instanceof Error && error.name === 'TimeoutError')) {
-      throw new Error(`Tải tệp quá thời gian (${Math.round(timeoutMs / 1000)}s)`, { cause: error });
+      throw new DownloadError(
+        `Tải tệp quá thời gian (${Math.round(timeoutMs / 1000)}s)`,
+        'timeout',
+        undefined,
+        { cause: error },
+      );
     }
-    if (error instanceof Error && error.message.startsWith('Tải tệp')) throw error;
-    throw new Error(`Tải tệp thất bại: ${error instanceof Error ? error.message : String(error)}`, {
-      cause: error,
-    });
+    if (error instanceof DownloadError) throw error;
+    throw new DownloadError(
+      `Tải tệp thất bại: ${error instanceof Error ? error.message : String(error)}`,
+      'network',
+      undefined,
+      { cause: error },
+    );
   }
 }
 
-function tooLarge(maxBytes: number): Error {
+function tooLarge(maxBytes: number): DownloadError {
   const limit = maxBytes >= 1024 * 1024 ? `${Math.floor(maxBytes / 1024 / 1024)} MB` : `${maxBytes} byte`;
-  return new Error(`Tải tệp thất bại: tệp vượt quá ${limit}`);
+  return new DownloadError(`Tải tệp thất bại: tệp vượt quá ${limit}`, 'too_large');
 }
 
 async function readLimited(res: Response, maxBytes: number): Promise<Buffer> {

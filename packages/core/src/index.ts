@@ -16,5 +16,6 @@ export * from './channels/delete';
 export * from './pipeline/types';
 export * from './pipeline/inbound';
 export * from './pipeline/outbound';
+export * from './pipeline/attachment-retry';
 export * from './sync';
 export * from './ai';

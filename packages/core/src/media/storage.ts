@@ -23,7 +23,7 @@ import {
 } from './mime';
 import type { MediaStorage, MediaStorageConfig, StoreMediaInput, StoredMedia } from './types';
 
-export { downloadToBuffer } from './download';
+export { downloadToBuffer, DownloadError } from './download';
 
 export function createS3Storage(config: MediaStorageConfig): MediaStorage {
   const base: S3ClientConfig = {
@@ -56,6 +56,7 @@ export function createS3Storage(config: MediaStorageConfig): MediaStorage {
           ContentType: contentType,
           ...(options?.contentDisposition ? { ContentDisposition: options.contentDisposition } : {}),
         }),
+        options?.signal ? { abortSignal: options.signal } : {},
       );
     },
     async get(key) {

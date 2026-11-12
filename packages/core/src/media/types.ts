@@ -17,6 +17,8 @@ export interface MediaStorageConfig {
 export interface PutOptions {
   /** Content-Disposition lưu cùng object (ví dụ 'attachment' cho tệp không phải ảnh/video/audio). */
   contentDisposition?: string;
+  /** Hủy lệnh ghi (vd. quá thời gian) — kho S3 hủy request HTTP đang treo. */
+  signal?: AbortSignal;
 }
 
 export interface MediaStorage {

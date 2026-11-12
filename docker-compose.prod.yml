@@ -79,6 +79,9 @@ services:
   # S3-compatible (SeaweedFS). Cấu hình khóa sinh từ env lúc khởi động (KHÔNG dùng khóa dev trong infra/).
   # Có mặt trên mạng edge để Caddy chung phục vụ URL ký /<bucket>/* (giữ nguyên Host => chữ ký SigV4 hợp lệ).
   # -ip=<tên container>: container ở 2 mạng nên phải quảng bá tên (phân giải được trên cả hai) thay vì 1 IP.
+  # -volume.max: mặc định 8 volume (7 bị collection hệ thống chiếm) ⇒ volume ảnh đầy 1 GB là hết chỗ ghi
+  # ("No writable volumes"), mọi tệp mới lỗi. 200 × 1 GB; giới hạn thật là ổ đĩa: -volume.minFreeSpace=3GiB khóa
+  # ghi (chỉ đọc) trước khi ổ chung của VPS đầy.
   s3:
     image: chrislusf/seaweedfs:4.50
     container_name: dezon-inbox-s3
@@ -92,7 +95,7 @@ services:
       - |
         umask 077
         printf '{"identities":[{"name":"dezon-prod","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":["Admin","Read","Write","List","Tagging"]}]}' "$$S3_ACCESS_KEY" "$$S3_SECRET_KEY" > /tmp/s3.json
-        exec weed server -ip=dezon-inbox-s3 -ip.bind=0.0.0.0 -dir=/data -s3 -s3.port=8333 -s3.config=/tmp/s3.json -master.volumeSizeLimitMB=1024
+        exec weed server -ip=dezon-inbox-s3 -ip.bind=0.0.0.0 -dir=/data -s3 -s3.port=8333 -s3.config=/tmp/s3.json -master.volumeSizeLimitMB=1024 -volume.max=200 -volume.minFreeSpace=3GiB
     volumes:
       - s3data:/data
     networks: [backend, edge]

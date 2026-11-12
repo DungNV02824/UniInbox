@@ -1,7 +1,13 @@
 import { z } from 'zod';
 import { ATTACHMENT_TYPES, CHANNEL_TYPES, SENDER_TYPES } from './enums';
 
-/** Phần tử của cột messages.attachments (jsonb) — mục 5. File đã được lưu trên S3. */
+/**
+ * Phần tử của cột messages.attachments (jsonb) — mục 5. File đã được lưu trên S3.
+ * Ngoại lệ: tệp tin đến tải hỏng lúc nhận được lưu với storage_key = '' + original_url (URL CDN của nền tảng; DTO
+ * trả url = null) — schema này chỉ dùng làm kiểu, không parse dữ liệu đọc từ DB. Worker tự tải lại các tệp đó
+ * (pipeline/attachment-retry.ts) và ghi số lần thử vào retry_count / last_retry_at / retry_exhausted /
+ * store_error_count.
+ */
 export const messageAttachmentSchema = z.object({
   type: z.enum(ATTACHMENT_TYPES),
   storage_key: z.string().min(1),
@@ -11,6 +17,14 @@ export const messageAttachmentSchema = z.object({
   original_url: z.url().optional(),
   /** Tên tệp gốc (tệp nhân viên tải lên / tệp khách gửi), để hiển thị và gửi đi. */
   name: z.string().optional(),
+  /** Tệp tải hỏng (storage_key ''): số lần worker đã thử tải lại. */
+  retry_count: z.number().int().nonnegative().optional(),
+  /** Tệp tải hỏng: lần thử tải lại gần nhất (ISO). */
+  last_retry_at: z.string().optional(),
+  /** Tệp tải hỏng: không thử lại nữa (link hết hạn 403/404/410, tệp quá lớn, hoặc hết lượt). */
+  retry_exhausted: z.boolean().optional(),
+  /** Tệp tải hỏng: số lần tải được nhưng GHI KHO lỗi (không tính vào retry_count tới một trần). */
+  store_error_count: z.number().int().nonnegative().optional(),
 });
 export type MessageAttachment = z.infer<typeof messageAttachmentSchema>;
 

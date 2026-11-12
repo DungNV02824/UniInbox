@@ -20,6 +20,7 @@ import {
   startBotOutboundSweeper,
   type AiRuntime,
 } from './ai/runtime';
+import { startAttachmentRetry } from './attachment-retry';
 import { INBOUND_MAX_MEDIA_BYTES } from './config';
 import type { Logger } from './logger';
 import { closeRedis, createRedisConnection } from './redis';
@@ -128,6 +129,13 @@ export function createPipelineRuntime(env: Env, logger: Logger): PipelineRuntime
   const sweeper = startBotOutboundSweeper(handle.db, ai.deps.scheduler, logger.child({ component: 'ai' }));
   // Hội thoại quảng cáo bị kẹt trước bản sửa echo lời chào quảng cáo ⇒ sửa một lần, không chặn khởi động.
   void runAdGreetingEchoRepair(handle.db, logger.child({ component: 'ai' }));
+  // Tệp tin đến tải hỏng (kho S3 lỗi, CDN chập chờn) ⇒ tự tải lại lúc khởi động và mỗi 2 phút. Chỉ ghi kho +
+  // message.updated, không đụng chatbot.
+  const attachmentRetry = startAttachmentRetry(
+    handle.db,
+    deps,
+    logger.child({ component: 'attachment-retry' }),
+  );
 
   return {
     db: handle.db,
@@ -135,6 +143,7 @@ export function createPipelineRuntime(env: Env, logger: Logger): PipelineRuntime
     ai,
     close: async () => {
       sweeper.stop();
+      await attachmentRetry.stop();
       await Promise.allSettled([handle.close(), closeRedis(redis), ai.close()]);
     },
   };
