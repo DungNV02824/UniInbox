@@ -47,6 +47,11 @@ export interface AiReplyJobData {
   conversationId: string;
   /** ISO lúc lên lịch (debug). */
   scheduledAt: string;
+  /**
+   * true = lượt "đánh thức" hẹn lúc hết tạm nghỉ sau tin nhân viên (AiJobScheduler.scheduleWakeup). Bị chặn vì BẤT
+   * KỲ lý do gì cũng KHÔNG coi tin khách là đã xử lý (lượt này không do sự kiện mới gây ra).
+   */
+  wakeup?: boolean;
 }
 export const AI_REPLY_JOB_NAME = 'reply';
 export const aiReplyJobId = (conversationId: string): string => `ai-${conversationId}`;

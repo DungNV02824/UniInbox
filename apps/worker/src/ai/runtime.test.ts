@@ -33,6 +33,7 @@ const env: BuildAiDepsInput['env'] = {
 const fakeLlm: LlmClient = { generate: vi.fn() };
 const scheduler: AiJobScheduler = {
   scheduleReply: vi.fn(async () => undefined),
+  scheduleWakeup: vi.fn(async () => undefined),
   scheduleHandoffReminder: vi.fn(async () => undefined),
   enqueueOutbound: vi.fn(async () => undefined),
 };

@@ -39,6 +39,8 @@ export function createFakeRedis(): FakeRedis {
 
 export interface FakeScheduler extends AiJobScheduler {
   replies: { conversationId: string; delayMs: number }[];
+  /** Lượt "đánh thức" sau tạm nghỉ (scheduleWakeup). */
+  wakeups: { conversationId: string; delayMs: number }[];
   reminders: { data: HandoffReminderJobData; delayMs: number }[];
   outbound: { messageId: string; delayMs: number }[];
 }
@@ -46,10 +48,14 @@ export interface FakeScheduler extends AiJobScheduler {
 export function createFakeScheduler(): FakeScheduler {
   const s: FakeScheduler = {
     replies: [],
+    wakeups: [],
     reminders: [],
     outbound: [],
     async scheduleReply(conversationId, delayMs) {
       s.replies.push({ conversationId, delayMs });
+    },
+    async scheduleWakeup(conversationId, delayMs) {
+      s.wakeups.push({ conversationId, delayMs });
     },
     async scheduleHandoffReminder(data, delayMs) {
       s.reminders.push({ data, delayMs });

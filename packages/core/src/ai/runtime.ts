@@ -18,7 +18,7 @@ import {
   type HandoffReasonCode,
 } from '@dezon/shared';
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
-import type { ChannelType } from '@dezon/shared';
+import { isAiPausedIndefinitely, type ChannelType } from '@dezon/shared';
 import type { CredentialsCipher } from '../channels/service';
 import type { ChannelConnector } from '../connectors/types';
 import type { HandoffReminderJobData } from '../jobs';
@@ -109,6 +109,13 @@ export interface AiJobScheduler {
    * aiDirtyKey(conv) (TTL AI_DIRTY_TTL_SEC) để job kết thúc lên lịch lại.
    */
   scheduleReply(conversationId: string, delayMs: number): Promise<void>;
+  /**
+   * Hẹn lượt "đánh thức" (AiReplyJobData.wakeup = true) sau delayMs — dùng khi job bị chặn vì tạm nghỉ có giờ.
+   * KHÔNG BAO GIỜ thay một job ai-reply đang chờ/delayed của hội thoại (vd. job "kick" sau "Tiếp tục AI", hay job
+   * debounce của tin khách mới): có job chờ ⇒ bỏ qua (job đó chạy; còn nghỉ thì nó lại tự hẹn). Cả hai khe đang
+   * chạy ⇒ đặt cờ ai-dirty.
+   */
+  scheduleWakeup(conversationId: string, delayMs: number): Promise<void>;
   /** Lên lịch job HANDOFF_REMINDER_JOB_NAME, jobId = handoffReminderJobId(handoffId). */
   scheduleHandoffReminder(data: HandoffReminderJobData, delayMs: number): Promise<void>;
   /** Thêm job outbound (OUTBOUND_JOB_NAME, jobId outboundJobId) cho tin bot với delay (giãn bong bóng). */
@@ -348,6 +355,8 @@ async function insertRun(db: DbLike, r: RunRecord): Promise<string> {
  * thấy tin khách đang chờ để trả lời. Xem processAiReplyJob bước 1.
  */
 export const AI_BLOCKED_PAUSED = 'AI đang tạm dừng vì nhân viên vừa nhắn';
+/** Job bị chặn vì tạm nghỉ có giờ ⇒ hẹn chạy lại sau mốc hết nghỉ thêm chừng này (tránh chạy sát mốc rồi lại bị chặn). */
+export const PAUSE_WAKEUP_GRACE_MS = 2000;
 
 /** Điều kiện 6.3 (trừ AI tổng và "có tin mới"). Trả lý do tiếng Việt nếu không được chạy. */
 async function blockedReason(db: Db, deps: AiRuntimeDeps, conv: JobConversation): Promise<string | null> {
@@ -627,19 +636,54 @@ async function raceReason(
  * 5. Luôn (finally): cờ aiDirtyKey còn ⇒ xóa và lên lịch lại (tin đến khi cả hai khe job đều bận).
  * Lỗi hạ tầng (DB/Redis) ⇒ ném (BullMQ retry); lỗi LLM không bao giờ ném (decision 'error').
  */
+/**
+ * Job bị chặn vì tạm nghỉ sau tin nhân viên ⇒ hẹn lượt "đánh thức" ngay sau mốc hết nghỉ, để bot tự trả lời các tin
+ * khách đến trong lúc nghỉ (không phải chờ khách nhắn thêm). Đọc LẠI ai_paused_until (nhân viên có thể vừa bấm "Tiếp
+ * tục AI" / nhắn thêm): đã gỡ hoặc "dừng hẳn" ⇒ không hẹn. scheduleWakeup không thay job đang chờ (kick, debounce).
+ * Lỗi DB/Redis chỉ log.
+ */
+async function scheduleWakeupAfterPause(db: Db, deps: AiRuntimeDeps, conversationId: string): Promise<void> {
+  try {
+    const [row] = await db
+      .select({ aiPausedUntil: conversations.aiPausedUntil })
+      .from(conversations)
+      .where(eq(conversations.id, conversationId));
+    const until = row?.aiPausedUntil;
+    if (!until || isAiPausedIndefinitely(until.toISOString())) return;
+    const delayMs = Math.max(0, until.getTime() - deps.ctx.now().getTime()) + PAUSE_WAKEUP_GRACE_MS;
+    await deps.scheduler.scheduleWakeup(conversationId, delayMs);
+  } catch (error) {
+    deps.logger.warn(
+      { conversationId, err: errorText(error) },
+      'Không hẹn được lượt trả lời sau khi hết tạm nghỉ',
+    );
+  }
+}
+
+export interface AiReplyJobOptions {
+  /** Lượt "đánh thức" sau tạm nghỉ (AiReplyJobData.wakeup): bị chặn ⇒ không coi tin là đã xử lý. */
+  wakeup?: boolean;
+}
+
 export async function processAiReplyJob(
   db: Db,
   deps: AiRuntimeDeps,
   conversationId: string,
+  options: AiReplyJobOptions = {},
 ): Promise<AiReplyOutcome> {
   try {
-    return await runAiReplyJob(db, deps, conversationId);
+    return await runAiReplyJob(db, deps, conversationId, options);
   } finally {
     await rescheduleIfDirty(db, deps, conversationId);
   }
 }
 
-async function runAiReplyJob(db: Db, deps: AiRuntimeDeps, conversationId: string): Promise<AiReplyOutcome> {
+async function runAiReplyJob(
+  db: Db,
+  deps: AiRuntimeDeps,
+  conversationId: string,
+  options: AiReplyJobOptions,
+): Promise<AiReplyOutcome> {
   const keys = debounceKeys(conversationId);
   await deps.redis.del(keys.first, keys.last);
   await recoverLostSideEffects(db, deps, conversationId);
@@ -678,13 +722,15 @@ async function runAiReplyJob(db: Db, deps: AiRuntimeDeps, conversationId: string
       conversationId,
       chatbotId: conv.bot?.id ?? null,
       // Đang pause ⇒ không coi là đã xử lý (resume/kick còn thấy tin để trả lời); lý do khác ⇒ coi như đã xử lý.
-      triggerMessageIds: reason === AI_BLOCKED_PAUSED ? [] : triggerMessageIds,
+      // Lượt "đánh thức" (không do sự kiện mới) bị chặn vì lý do khác (bot vừa gỡ/tắt, đủ lượt/giờ…) cũng không.
+      triggerMessageIds: reason === AI_BLOCKED_PAUSED || options.wakeup ? [] : triggerMessageIds,
       model,
       decision: 'no_reply',
       error: reason,
     });
     deps.logger.info({ conversationId, reason }, 'Chatbot không chạy');
     await release();
+    if (reason === AI_BLOCKED_PAUSED) await scheduleWakeupAfterPause(db, deps, conversationId);
     return skipped(reason, id);
   }
   const bot = conv.bot;

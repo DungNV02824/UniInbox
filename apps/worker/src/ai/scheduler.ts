@@ -68,6 +68,19 @@ async function isActive(queue: Queue, jobId: string): Promise<boolean> {
   return job ? (await job.getState()) === 'active' : false;
 }
 
+/** Trạng thái job theo jobId; không có ⇒ null. */
+async function jobState(queue: Queue, jobId: string): Promise<string | null> {
+  const job = await queue.getJob(jobId);
+  return job ? String(await job.getState()) : null;
+}
+
+/** Job còn chờ chạy (chưa active, chưa xong/lỗi). */
+function isPendingState(state: string | null): boolean {
+  return (
+    state === 'waiting' || state === 'delayed' || state === 'prioritized' || state === 'waiting-children'
+  );
+}
+
 /** Xóa job nếu còn chờ (không active); bỏ qua lỗi nếu nó vừa chuyển active. */
 async function removeIfPending(queue: Queue, jobId: string): Promise<void> {
   const job = await queue.getJob(jobId);
@@ -117,6 +130,27 @@ export function createBullAiJobScheduler(options: BullAiJobSchedulerOptions): Ai
       if (result === 'active') {
         await markDirty?.(conversationId);
         logger.debug({ conversationId }, 'ai-reply: job của hội thoại đang chạy, đánh dấu ai-dirty');
+      }
+    },
+
+    async scheduleWakeup(conversationId, delayMs) {
+      const delay = Math.max(0, Math.round(delayMs));
+      const data: AiReplyJobData = { conversationId, scheduledAt: new Date().toISOString(), wakeup: true };
+      const opts: JobsOptions = { ...AI_REPLY_JOB_OPTIONS, delay };
+      const primary = aiReplyJobId(conversationId);
+      const followUp = aiReplyFollowUpJobId(conversationId);
+      const [primaryState, followUpState] = await Promise.all([
+        jobState(aiReplyQueue, primary),
+        jobState(aiReplyQueue, followUp),
+      ]);
+      // Đã có job chờ (kick sau "Tiếp tục AI", debounce tin khách mới…) ⇒ không thay: job đó chạy trước; còn nghỉ
+      // thì nó bị chặn và lại tự hẹn lượt đánh thức.
+      if (isPendingState(primaryState) || isPendingState(followUpState)) return;
+      const slot = primaryState !== 'active' ? primary : followUpState !== 'active' ? followUp : null;
+      const result = slot ? await upsertJob(aiReplyQueue, AI_REPLY_JOB_NAME, slot, data, opts) : 'active';
+      if (result === 'active') {
+        await markDirty?.(conversationId);
+        logger.debug({ conversationId }, 'ai-reply: không còn khe cho lượt đánh thức, đánh dấu ai-dirty');
       }
     },
 

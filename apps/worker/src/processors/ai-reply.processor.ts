@@ -23,7 +23,8 @@ export const AI_REPLY_QUEUE = QUEUE_NAMES.aiReply;
 export interface AiReplyHandlers {
   /** false khi thiếu GEMINI_API_KEY: job "reply" bị bỏ qua (không gọi core, không escalate). */
   enabled: boolean;
-  reply: (conversationId: string) => Promise<AiReplyOutcome>;
+  /** wakeup = lượt "đánh thức" sau tạm nghỉ (AiReplyJobData.wakeup). */
+  reply: (conversationId: string, options?: { wakeup?: boolean }) => Promise<AiReplyOutcome>;
   handoffReminder: (data: HandoffReminderJobData) => Promise<boolean>;
   /** Job "kick": lên lịch job "reply" (debounce) nếu bot còn bật; true nếu đã lên lịch. */
   kick: (conversationId: string) => Promise<boolean>;
@@ -33,7 +34,7 @@ export function aiReplyHandlers(runtime: PipelineRuntime): AiReplyHandlers {
   const { db, ai } = runtime;
   return {
     enabled: ai.enabled,
-    reply: (conversationId) => processAiReplyJob(db, ai.deps, conversationId),
+    reply: (conversationId, options) => processAiReplyJob(db, ai.deps, conversationId, options),
     handoffReminder: (data) => processHandoffReminderJob(db, ai.deps, data),
     // Không truyền typing deps: "kick" có thể không còn gì để trả lời (job sẽ skip no_new_messages) —
     // chỉ báo "đang soạn tin" sẽ bật khi job reply thật sự chạy và qua các điều kiện.
@@ -54,7 +55,7 @@ export function createAiReplyProcessor(handlers: AiReplyHandlers, logger: Logger
   ): Promise<AiReplyOutcome | { reminded: boolean } | { scheduled: boolean } | null> => {
     switch (job.name) {
       case AI_REPLY_JOB_NAME: {
-        const { conversationId } = job.data as AiReplyJobData;
+        const { conversationId, wakeup } = job.data as AiReplyJobData;
         if (!handlers.enabled) {
           logger.debug(
             { jobId: job.id, conversationId },
@@ -62,7 +63,9 @@ export function createAiReplyProcessor(handlers: AiReplyHandlers, logger: Logger
           );
           return null;
         }
-        const outcome = await handlers.reply(conversationId);
+        const outcome = wakeup
+          ? await handlers.reply(conversationId, { wakeup: true })
+          : await handlers.reply(conversationId);
         logger.info(
           {
             jobId: job.id,

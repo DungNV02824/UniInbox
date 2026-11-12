@@ -128,6 +128,29 @@ describe('AiJobScheduler BullMQ (Redis thật)', () => {
     expect(await delayOf(aiReplyQueue, aiReplyJobId('c3'))).toBe(15_000);
   });
 
+  it('lượt đánh thức: khe trống ⇒ thêm job wakeup; đã có job chờ (kick / debounce) ⇒ KHÔNG thay', async () => {
+    // Khe trống ⇒ thêm job ở khe chính, data.wakeup = true, đúng delay.
+    await scheduler.scheduleWakeup('w1', 120_000);
+    const wake = await aiReplyQueue.getJob(aiReplyJobId('w1'));
+    expect(wake?.data).toMatchObject({ conversationId: 'w1', wakeup: true });
+    expect(wake?.opts.delay).toBe(120_000);
+    expect(await wake?.getState()).toBe('delayed');
+
+    // Đã có job chờ ngắn (vd. kick sau "Tiếp tục AI") ⇒ lượt đánh thức dài KHÔNG đè lên.
+    await scheduler.scheduleReply('w2', 5_000);
+    await scheduler.scheduleWakeup('w2', 86_400_000);
+    const kept = await aiReplyQueue.getJob(aiReplyJobId('w2'));
+    expect(kept?.opts.delay).toBe(5_000);
+    expect(kept?.data.wakeup).toBeUndefined();
+    expect(await aiReplyQueue.getJob(aiReplyFollowUpJobId('w2'))).toBeUndefined();
+
+    // Tin khách mới sau khi đã hẹn đánh thức ⇒ debounce thường thay job (job đó chạy, còn nghỉ thì tự hẹn lại).
+    await scheduler.scheduleReply('w1', 3_000);
+    const replaced = await aiReplyQueue.getJob(aiReplyJobId('w1'));
+    expect(replaced?.opts.delay).toBe(3_000);
+    expect(replaced?.data.wakeup).toBeUndefined();
+  });
+
   it('nhắc handoff: jobId theo handoff, lên lịch lại thay job cũ', async () => {
     const data = { conversationId: 'c4', handoffId: 'h4' };
     await scheduler.scheduleHandoffReminder(data, 15 * 60_000);

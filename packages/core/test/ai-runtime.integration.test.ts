@@ -17,6 +17,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { putAiSettings } from '../src/ai/settings';
 import {
   AI_BLOCKED_PAUSED,
+  PAUSE_WAKEUP_GRACE_MS,
   aiDirtyKey,
   debounceKeys,
   escalateConversation,
@@ -1525,5 +1526,83 @@ describe('tạm dừng sau tin nhân viên không "nuốt" tin khách đang ch�
     });
     const last = (await runsOf(conv.id)).at(-1)!;
     expect([...last.triggerMessageIds].sort()).toEqual([during, next].sort());
+  });
+
+  it('tạm nghỉ có giờ ⇒ job bị chặn tự hẹn chạy lại lúc hết nghỉ; tới giờ bot tự trả lời tin đang chờ (không cần khách nhắn thêm)', async () => {
+    const bot = await createBot({ agentReplyMode: 'pause', agentPauseMinutes: 2 });
+    const conv = await botConversation(bot);
+    const staff = await sendStaff(conv.id, 'a');
+    const pausedUntil = new Date(staff.conversation.aiPausedUntil!);
+    const hello = await addMessage(t.db, conv, { text: 'hello', sentAt: new Date() });
+
+    const t0 = Date.now();
+    expect(await processAiReplyJob(t.db, kit.deps, conv.id)).toMatchObject({ reason: AI_BLOCKED_PAUSED });
+    const t1 = Date.now();
+    expect(kit.scheduler.wakeups).toHaveLength(1);
+    const wake = kit.scheduler.wakeups[0]!;
+    expect(wake.conversationId).toBe(conv.id);
+    // delay = (mốc hết nghỉ − lúc job chạy) + PAUSE_WAKEUP_GRACE_MS, lúc job chạy nằm trong [t0, t1].
+    expect(wake.delayMs).toBeGreaterThanOrEqual(pausedUntil.getTime() - t1 + PAUSE_WAKEUP_GRACE_MS);
+    expect(wake.delayMs).toBeLessThanOrEqual(pausedUntil.getTime() - t0 + PAUSE_WAKEUP_GRACE_MS);
+    // Không dùng scheduleReply (lượt đánh thức không được đè job đang chờ).
+    expect(kit.scheduler.replies).toHaveLength(0);
+
+    // Tới giờ hẹn (pause đã hết) ⇒ job chạy, trả lời đúng tin "hello".
+    await t.db
+      .update(conversations)
+      .set({ aiPausedUntil: new Date(Date.now() - 1000) })
+      .where(eq(conversations.id, conv.id));
+    const out = await processAiReplyJob(t.db, kit.deps, conv.id);
+    expect(out).toMatchObject({ status: 'done', decision: 'reply' });
+    expect((await runsOf(conv.id)).at(-1)!.triggerMessageIds).toEqual([hello]);
+  });
+
+  it("'stop' (dừng hẳn) ⇒ job bị chặn KHÔNG tự hẹn chạy lại", async () => {
+    const bot = await createBot({ agentReplyMode: 'stop' });
+    const conv = await botConversation(bot);
+    await sendStaff(conv.id, 'a');
+    await addMessage(t.db, conv, { text: 'hello', sentAt: new Date() });
+    expect(await processAiReplyJob(t.db, kit.deps, conv.id)).toMatchObject({ reason: AI_BLOCKED_PAUSED });
+    expect(kit.scheduler.wakeups).toEqual([]);
+  });
+
+  it('lượt đánh thức bị chặn vì lý do khác (bot vừa bị gỡ) ⇒ KHÔNG coi tin khách là đã xử lý', async () => {
+    const bot = await createBot({ agentReplyMode: 'pause', agentPauseMinutes: 2 });
+    const conv = await botConversation(bot);
+    await sendStaff(conv.id, 'a');
+    const hello = await addMessage(t.db, conv, { text: 'hello', sentAt: new Date() });
+    // Nhân viên gỡ bot trong lúc nghỉ; tới giờ lượt đánh thức chạy.
+    await t.db
+      .update(conversations)
+      .set({ chatbotId: null, aiMode: 'off', aiPausedUntil: null })
+      .where(eq(conversations.id, conv.id));
+    const out = await processAiReplyJob(t.db, kit.deps, conv.id, { wakeup: true });
+    expect(out.status).toBe('skipped');
+    const [run] = await runsOf(conv.id);
+    expect(run).toMatchObject({ decision: 'no_reply', triggerMessageIds: [] });
+    expect((await loadPendingMessages(t.db, conv.id)).map((m) => m.id)).toEqual([hello]);
+
+    // Gắn lại bot ⇒ tin "hello" vẫn chờ ⇒ kick trả lời được.
+    await t.db
+      .update(conversations)
+      .set({ chatbotId: bot.id, aiMode: 'auto' })
+      .where(eq(conversations.id, conv.id));
+    const reply = await processAiReplyJob(t.db, kit.deps, conv.id);
+    expect(reply).toMatchObject({ status: 'done', decision: 'reply' });
+    const replied = (await runsOf(conv.id)).find((r) => r.decision === 'reply');
+    expect(replied!.triggerMessageIds).toEqual([hello]);
+  });
+
+  it('lượt THƯỜNG bị chặn vì bot đã gỡ ⇒ vẫn coi là đã xử lý như trước (không đổi)', async () => {
+    const bot = await createBot();
+    const conv = await botConversation(bot);
+    const msg = await addMessage(t.db, conv, { text: 'hello', sentAt: new Date() });
+    await t.db
+      .update(conversations)
+      .set({ chatbotId: null, aiMode: 'off' })
+      .where(eq(conversations.id, conv.id));
+    await processAiReplyJob(t.db, kit.deps, conv.id);
+    const [run] = await runsOf(conv.id);
+    expect(run!.triggerMessageIds).toEqual([msg]);
   });
 });

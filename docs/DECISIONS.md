@@ -361,3 +361,17 @@ Yêu cầu của chủ dự án: "gom tất cả tin nhắn về". Webhook khôn
 - **Prompt:** `systemInstruction` (theo cấu hình bot, ổn định giữa các lượt) thêm dòng Bối cảnh cho bot 'continue': sau `escalate` bot vẫn trả lời ⇒ đặt câu trả lời vào `messages_to_customer`. Lịch sử luôn có dòng `[Hệ thống] Hội thoại đã được chuyển cho nhân viên …` của handoff CÒN MỞ (kể cả tạo trước cửa sổ 30 tin; `ChatHistoryItem.handoffOpen`). Bot 'continue' + dòng đó ⇒ "(Bối cảnh lượt này)" thêm `handoffContinueTurnNote()`: đã chuyển, cứ giúp, không escalate lại cùng yêu cầu, yêu cầu MỚI cần người thì escalate kèm `messages_to_customer`. Quy tắc 7 của khung an toàn nay có "Ngoại lệ 2": được nói yêu cầu đã chuyển trước đó đã được chuyển cho nhân viên/bộ phận, không hứa thời gian/việc liên hệ.
 - **Bộ chặn "tự nói đã chuyển"** (`claimsHandoffInReply(…, { allowHandedOff })`): cùng điều kiện ⇒ bỏ qua lời chuyển/gửi/báo cho nhân viên/bộ phận ở thì QUÁ KHỨ (dấu hiệu thì gần động từ nhất là "đã"/"vừa" — "Dạ" đầu mệnh đề không tính — hoặc "… rồi" sau lời chuyển); lời hứa chuyển yêu cầu mới ("em sẽ/đang/sắp chuyển …", "em báo quản lý ngay", không có dấu hiệu thì) vẫn bị chặn; lời hứa "nhân viên sẽ liên hệ/gọi lại", "bộ phận … sẽ duyệt" vẫn bị gọi lại/đổi thành escalate (mà khi handoff đã mở thì chỉ là gửi tin, không tạo handoff mới).
 - **Hộp thư / Chat thử:** `ChatbotRef.aiHandoffContinues = true` khi bot gắn với hội thoại đặt 'continue' (chỉ kèm khi true). `ChatbotTestResult.botContinuesAfterHandoff = true` khi kết quả chat thử là AI tự chuyển (escalate không phải từ khóa, hoặc lỗi) và bot nháp/đã lưu đặt 'continue'. Lượt thử sau: web gắn `handoffOpened: <lý do>` vào tin ngay trước lượt chuyển đầu tiên đó (`chatbotTestMessageSchema`), API chèn dòng `[Hệ thống]` handoff còn mở (`handoffOpen`) vào lịch sử ⇒ Chat thử chạy như thật (ghi chú lượt + bộ chặn nới cho lời đã chuyển); đánh dấu rơi vào tin khách (lượt chuyển không có tin bot) thì các tin tới đó thành lịch sử.
+
+### 2026-11-12 — Hết tạm nghỉ (sau tin nhân viên) ⇒ bot tự trả lời tin đang chờ
+
+- Trước: job ai-reply bị chặn vì `ai_paused_until` (tạm nghỉ sau tin nhân viên) không "nuốt" tin khách, nhưng khi
+  pause hết hạn tự nhiên thì không có gì đánh thức bot — tin "hello" khách nhắn trong lúc nghỉ chỉ được trả lời khi
+  khách nhắn thêm (chủ sản phẩm gặp thực tế: nhân viên nhắn "a" ⇒ bot nghỉ 2 phút ⇒ khách "hello" ⇒ bot im luôn).
+- Nay: job bị chặn bởi tạm nghỉ CÓ GIỜ đọc LẠI `ai_paused_until` rồi gọi `scheduler.scheduleWakeup(conv,
+  ai_paused_until − now + PAUSE_WAKEUP_GRACE_MS)` (2 s). Job hẹn mang `AiReplyJobData.wakeup = true`.
+  - `scheduleWakeup` KHÔNG BAO GIỜ thay job ai-reply đang chờ/delayed (kick sau "Tiếp tục AI", debounce tin mới):
+    có job chờ ⇒ bỏ qua — job đó chạy, còn nghỉ thì bị chặn và tự hẹn lại. Hết khe (cả hai đang chạy) ⇒ ai-dirty.
+    (Bản đầu dùng scheduleReply ⇒ có thể đè job kick ngắn bằng job hẹn tới 24 giờ — đã sửa trước khi deploy.)
+  - Lượt `wakeup` bị chặn vì BẤT KỲ lý do gì (bot vừa gỡ/tắt, đủ lượt/giờ, ngoài cửa sổ…) ghi ai_run với
+    trigger rỗng ⇒ không "nuốt" tin khách; gắn lại bot ⇒ kick vẫn trả lời. Lượt thường giữ hành vi cũ.
+  - "Dừng hẳn" (mốc 9999) và pause đã gỡ ⇒ không hẹn. Lỗi DB/Redis khi hẹn chỉ log.
