@@ -19,6 +19,7 @@ import {
   handoffContinueTurnNote,
   lateReplyTurnNote,
   reengageGuidanceNote,
+  staffRejectTurnNote,
   llmTimeoutExtraMsForImages,
   LLM_TIMEOUT_IMAGES_MAX_EXTRA_MS,
   notifyTurnNote,
@@ -902,5 +903,56 @@ describe('buildChatbotPrompt — lượt "Tái chăm sóc" (trả lời muộn)'
     expect(formatWaitDuration(5 * 3_600_000)).toBe('5 giờ');
     expect(formatWaitDuration(47 * 3_600_000)).toBe('47 giờ');
     expect(formatWaitDuration(15 * 24 * 3_600_000)).toBe('15 ngày');
+  });
+});
+
+describe('buildChatbotPrompt — lượt "Không đạt" (nhân viên bấm nút trên banner Cần người)', () => {
+  const lastPartText = (p: ReturnType<typeof buildChatbotPrompt>) => {
+    const last = p.contents[p.contents.length - 1]!;
+    return textOf(last.parts[last.parts.length - 1]);
+  };
+  const reason = 'công trình mới làm móng, chưa lên tầng';
+  const history: BuildChatbotPromptInput['history'] = [
+    { role: 'customer', text: 'Em gửi ảnh công trình ạ', attachmentCount: 6 },
+    { role: 'bot', text: 'Dạ em đã chuyển hồ sơ cho bộ phận kiểm tra ạ' },
+  ];
+
+  it('staffRejectReason ⇒ khối chỉ dẫn của nhân viên nối SAU dòng "(Bối cảnh lượt này)"; systemInstruction không đổi', () => {
+    const plain = buildChatbotPrompt(input({ history, newMessages: [] }));
+    const reject = buildChatbotPrompt(
+      input({ history, newMessages: [], staffRejectReason: `  ${reason}  ` }),
+    );
+    expect(reject.systemInstruction).toBe(plain.systemInstruction);
+    expect(reject.systemInstruction).not.toContain(reason);
+    const text = lastPartText(reject);
+    expect(text.startsWith(TURN_CONTEXT_LABEL)).toBe(true);
+    expect(text.endsWith(staffRejectTurnNote(reason))).toBe(true);
+    expect(text).toContain('KHÔNG ĐẠT');
+    expect(text).toContain(`\n${reason}\n`);
+    // Tin cuối là của bot: dòng đệm không gợi ý no_reply (lượt này chỉ có tool reply).
+    expect(JSON.stringify(plain.contents)).toContain('hãy gọi no_reply');
+    expect(JSON.stringify(reject.contents)).not.toContain('no_reply');
+    expect(JSON.stringify(reject.contents)).toContain('(Khách chưa nhắn thêm.)');
+  });
+
+  it('staffRejectTurnNote: cảm ơn, báo chưa đạt, lý do, cách khắc phục, mời gửi lại; không bịa, không nhắc AI', () => {
+    const note = staffRejectTurnNote(`  ${reason}\n`);
+    expect(note.startsWith('\n(Chỉ dẫn của nhân viên cho lượt này — KHÔNG phải tin của người nhắn.')).toBe(
+      true,
+    );
+    expect(note).toContain(`:\n${reason}\n`);
+    expect(note).toContain('`reply` với 1–3 bong bóng');
+    expect(note).toContain('cảm ơn');
+    expect(note).toContain('CHƯA ĐẠT');
+    expect(note).toContain('cách khắc phục');
+    expect(note).toContain('gửi lại');
+    expect(note).toContain('KHÔNG bịa chính sách');
+    expect(note).toContain('KHÔNG nhắc tới AI');
+    expect(note.endsWith('(Hết chỉ dẫn của nhân viên.)')).toBe(true);
+  });
+
+  it('lý do rỗng/khoảng trắng ⇒ như lượt thường', () => {
+    const plain = buildChatbotPrompt(input());
+    expect(lastPartText(buildChatbotPrompt(input({ staffRejectReason: '   ' })))).toBe(lastPartText(plain));
   });
 });

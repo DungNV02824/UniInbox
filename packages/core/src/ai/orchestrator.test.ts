@@ -13,7 +13,7 @@ import {
   type ChatbotTurnDeps,
   type ChatbotTurnInput,
 } from './orchestrator';
-import { handoffContinueTurnNote } from './prompt';
+import { handoffContinueTurnNote, staffRejectTurnNote } from './prompt';
 import { CHATBOT_TOOLS } from './tools';
 import type { ChatbotConfig } from './types';
 
@@ -1014,5 +1014,58 @@ describe("runChatbotTurn — bot aiHandoffMode 'continue' khi handoff còn mở"
     const r = await runChatbotTurn(deps(llm).d, input);
     expect(requests).toHaveLength(2);
     expect(r).toMatchObject({ decision: 'reply', messages: ['Dạ hồ sơ của anh đang được kiểm tra ạ.'] });
+  });
+});
+
+describe('runChatbotTurn — lượt "Không đạt" (staffRejectReason)', () => {
+  const reason = 'công trình mới làm móng, chưa lên tầng';
+  const rejectInput: ChatbotTurnInput = {
+    ...baseInput,
+    history: [
+      { role: 'customer', text: 'Em gửi ảnh, cho em gặp nhân viên với ạ', attachmentCount: 3 },
+      { role: 'system', text: 'Hội thoại đã được chuyển cho nhân viên (lý do: Khác).', handoffOpen: true },
+    ],
+    newMessages: [],
+    chatbot: { ...chatbot, aiHandoffMode: 'continue', notifyKeywords: ['gặp nhân viên'] },
+    staffRejectReason: reason,
+  };
+  const lastText = (req: LlmRequest) => {
+    const last = req.contents[req.contents.length - 1]!;
+    const part = last.parts[last.parts.length - 1];
+    return part && 'text' in part ? part.text : '';
+  };
+
+  it('chỉ tool reply; độ tự tin thấp vẫn là reply (không escalate); có ghi chú Không đạt, không ghi chú continue', async () => {
+    const { llm, requests } = fakeLlm([
+      res({
+        functionCall: {
+          name: 'reply',
+          args: { messages: ['Dạ em cảm ơn anh', 'Lần này chưa đạt ạ'], confidence: 0.1 },
+        },
+      }),
+    ]);
+    const r = await runChatbotTurn(deps(llm, { minConfidence: 0.6 }).d, rejectInput);
+    expect(r).toMatchObject({ decision: 'reply', messages: ['Dạ em cảm ơn anh', 'Lần này chưa đạt ạ'] });
+    expect(r.notifiedKeyword).toBeUndefined();
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.tools.map((t) => t.name)).toEqual(['reply']);
+    expect(lastText(requests[0]!).endsWith(staffRejectTurnNote(reason))).toBe(true);
+    expect(lastText(requests[0]!)).not.toContain(handoffContinueTurnNote());
+  });
+
+  it('reply tự nói "đã chuyển nhân viên" ⇒ KHÔNG chạy bộ chặn (không gọi lại, không đổi thành escalate)', async () => {
+    const said = ['Dạ em đã chuyển cho nhân viên rồi ạ, lần này chưa đạt ạ.'];
+    const { llm, requests } = fakeLlm([
+      res({ functionCall: { name: 'reply', args: { messages: said, confidence: 0.9 } } }),
+    ]);
+    const r = await runChatbotTurn(deps(llm).d, rejectInput);
+    expect(requests).toHaveLength(1);
+    expect(r).toMatchObject({ decision: 'reply', messages: said });
+  });
+
+  it('lỗi gọi AI ⇒ decision error (không ném)', async () => {
+    const { llm } = fakeLlm([new LlmError('Gemini 400', false, 400)]);
+    const r = await runChatbotTurn(deps(llm).d, rejectInput);
+    expect(r.decision).toBe('error');
   });
 });

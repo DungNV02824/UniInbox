@@ -1,12 +1,13 @@
 // ConversationAiService.ackHandoff / resolveHandoff: tin bot của nút banner "Cần người" (thứ tự với kick + Lark,
-// lỗi không làm hỏng request). Lõi (@dezon/core) giả một phần; DB/hàng đợi giả.
+// lỗi không làm hỏng request); rejectHandoff ("Không đạt": thiếu GEMINI_API_KEY ⇒ 503, Lark kèm lý do). Lõi (@dezon/core) giả một phần; DB/hàng đợi giả.
 import * as core from '@dezon/core';
 import type { Db } from '@dezon/db';
 import type { Queue } from 'bullmq';
+import { ServiceUnavailableException } from '@nestjs/common';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AppConfig } from '../../config';
 import type { RealtimeService } from '../realtime/realtime.service';
-import { ConversationAiService } from './conversation-ai.service';
+import { ConversationAiService, LLM_REJECT_NOT_CONFIGURED_MESSAGE } from './conversation-ai.service';
 
 vi.mock('@dezon/core', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@dezon/core')>();
@@ -17,6 +18,7 @@ vi.mock('@dezon/core', async (importOriginal) => {
     needsChatbotKick: vi.fn(),
     sendHandoffActionMessage: vi.fn(),
     loadHandoffActionNotice: vi.fn(),
+    rejectHandoffWithAiReply: vi.fn(),
   };
 });
 
@@ -28,7 +30,9 @@ const summary = { id: CONV, assignedUser: null } as unknown as core.UpdateConver
 let order: string[];
 let outboundAdds: { name: string; data: unknown; opts: unknown }[];
 
-function makeService(opts: { outboundFails?: boolean } = {}) {
+const fakeLlm: core.LlmClient = { generate: vi.fn() };
+
+function makeService(opts: { outboundFails?: boolean; llm?: core.LlmClient | null } = {}) {
   outboundAdds = [];
   const aiReply = {
     add: vi.fn(async () => {
@@ -56,9 +60,10 @@ function makeService(opts: { outboundFails?: boolean } = {}) {
     realtime,
     aiReply,
     outbound,
-    { APP_URL: 'https://inbox.test' } as AppConfig,
+    { APP_URL: 'https://inbox.test', GEMINI_MODEL: 'gemini-default' } as AppConfig,
     {} as core.CredentialsCipher,
     vi.fn() as unknown as typeof fetch,
+    opts.llm === undefined ? fakeLlm : opts.llm,
   );
 }
 
@@ -165,5 +170,55 @@ describe('ackHandoff', () => {
       return { status: 'sent', messageIds: ['m1'], queued: 1 };
     });
     await expect(makeService({ outboundFails: true }).ackHandoff(viewer, CONV)).resolves.toBe(summary);
+  });
+});
+
+describe('rejectHandoff ("Không đạt")', () => {
+  it('chưa có GEMINI_API_KEY ⇒ 503, không gọi core', async () => {
+    const err = await makeService({ llm: null })
+      .rejectHandoff(viewer, CONV, 'Chưa lên tầng')
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ServiceUnavailableException);
+    expect((err as Error).message).toBe(LLM_REJECT_NOT_CONFIGURED_MESSAGE);
+    expect(mocked.rejectHandoffWithAiReply).not.toHaveBeenCalled();
+  });
+
+  it('thành công ⇒ core nhận llm + GEMINI_MODEL + hàng đợi outbound; phát conversation.updated; Lark kèm lý do', async () => {
+    mocked.rejectHandoffWithAiReply.mockImplementation(async (_db, _viewer, _id, _reason, deps) => {
+      order.push('reject');
+      expect(deps.llm).toBe(fakeLlm);
+      expect(deps.defaultModel).toBe('gemini-default');
+      await deps.scheduler.enqueueOutbound('m1', 0);
+      return {
+        conversation: summary,
+        previousAssigneeId: null,
+        handoffId: 'h1',
+        aiRunId: 'r1',
+        systemMessageId: 's1',
+        messageIds: ['m1'],
+        queued: 1,
+      };
+    });
+    await expect(makeService().rejectHandoff(viewer, CONV, 'Chưa lên tầng')).resolves.toBe(summary);
+    expect(mocked.rejectHandoffWithAiReply).toHaveBeenCalledWith(
+      expect.anything(),
+      viewer,
+      CONV,
+      'Chưa lên tầng',
+      expect.anything(),
+    );
+    expect(order).toEqual(['reject', 'outbound:m1', 'lark']);
+    expect(mocked.loadHandoffActionNotice).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: 'reject', handoffIds: ['h1'], rejectReason: 'Chưa lên tầng' }),
+    );
+  });
+
+  it('core ném lỗi (AI không soạn được / kênh chặn) ⇒ lỗi trả về, không báo Lark', async () => {
+    mocked.rejectHandoffWithAiReply.mockRejectedValue(new core.ChatbotComposeError());
+    await expect(makeService().rejectHandoff(viewer, CONV, 'x')).rejects.toThrow(
+      'AI không soạn được tin, vui lòng thử lại',
+    );
+    expect(mocked.loadHandoffActionNotice).not.toHaveBeenCalled();
   });
 });

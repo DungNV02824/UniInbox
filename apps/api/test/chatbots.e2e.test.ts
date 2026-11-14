@@ -3,6 +3,7 @@ import {
   AI_KICK_JOB_NAME,
   aiKickJobId,
   type LlmClient,
+  outboundJobId,
   type LlmRequest,
   type LlmResponse,
 } from '@dezon/core';
@@ -39,7 +40,7 @@ import {
 } from '@dezon/shared';
 import type { NestFastifyApplication } from '@nestjs/platform-fastify';
 import type { Queue } from 'bullmq';
-import { and, eq, inArray, isNull } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.factory';
 import { SlidingWindowLimiter } from '../src/common/rate-limiter';
@@ -244,6 +245,7 @@ describe('phân quyền', () => {
     ['POST', `/conversations/${RANDOM_ID}/ai/resume`],
     ['POST', `/conversations/${RANDOM_ID}/handoff/ack`],
     ['POST', `/conversations/${RANDOM_ID}/handoff/resolve`],
+    ['POST', `/conversations/${RANDOM_ID}/handoff/reject`, { reason: 'Chưa đạt' }],
     ...ADMIN_ONLY,
   ];
 
@@ -1236,6 +1238,80 @@ describe('chatbot trên hội thoại', () => {
     await aiReply.obliterate({ force: true });
     await resetConversation(conversationId);
     await db.update(conversations).set({ assignedUserId: null }).where(eq(conversations.id, conversationId));
+  });
+
+  it('"Không đạt": AI (bot đang gắn) soạn tin gửi thẳng; handoff giữ nguyên; Lark ❌ kèm lý do; lỗi 400', async () => {
+    const bot = await createBot({
+      name: 'Bot Vua Thầu',
+      instructions: 'HUONG-DAN-VUA-THAU',
+      handoffActionLark: true,
+    });
+    const conversationId = seed.unassignedConversationId;
+    await makePendingHuman(conversationId, bot.id);
+    larkCalls.length = 0;
+
+    // Thiếu lý do ⇒ 400 (Zod); hội thoại không có handoff mở ⇒ 400 tiếng Việt. Không gọi AI.
+    const blank = await asAgent('POST', `/conversations/${conversationId}/handoff/reject`, { reason: '   ' });
+    expect(blank.statusCode).toBe(400);
+    const noHandoff = await asAgent('POST', `/conversations/${seed.agentConversationId}/handoff/reject`, {
+      reason: 'Chưa đạt',
+    });
+    expect(noHandoff.statusCode).toBe(400);
+    expect(noHandoff.json<{ message: string }>().message).toBe(
+      'Hội thoại không có yêu cầu chuyển người nào đang mở',
+    );
+    expect(llmRequests).toHaveLength(0);
+
+    nextLlmResponse = replyResponse(
+      ['Dạ em cảm ơn anh ạ', 'Lần này công trình chưa đạt vì mới làm móng ạ'],
+      0.1,
+    );
+    const updates = spyUpdates();
+    const res = await asAgent('POST', `/conversations/${conversationId}/handoff/reject`, {
+      reason: ' Mới làm móng, chưa lên tầng ',
+    });
+    nextLlmResponse = replyResponse(['Dạ em chào anh/chị ạ']);
+    expect(res.statusCode).toBe(200);
+    expect(res.json<ConversationSummary>()).toMatchObject({
+      status: 'pending_human',
+      aiMode: 'off',
+      handoff: { reasonCode: 'discount', acknowledgedBy: null },
+    });
+    expect(updates()).toHaveLength(1);
+    expect(llmRequests).toHaveLength(1);
+    expect(llmRequests[0]!.systemInstruction).toContain('HUONG-DAN-VUA-THAU');
+    expect(llmRequests[0]!.tools.map((t) => t.name)).toEqual(['reply']);
+    expect(await openHandoffsOf(conversationId)).toHaveLength(1);
+
+    const sent = await db
+      .select()
+      .from(messages)
+      .where(and(eq(messages.conversationId, conversationId), eq(messages.status, 'queued')));
+    expect(sent.map((m) => [m.senderType, m.text])).toEqual([
+      ['bot', 'Dạ em cảm ơn anh ạ'],
+      ['bot', 'Lần này công trình chưa đạt vì mới làm móng ạ'],
+    ]);
+    for (const m of sent) expect(await outbound.getJob(outboundJobId(m.id))).toBeTruthy();
+    const [note] = await db
+      .select()
+      .from(messages)
+      .where(and(eq(messages.conversationId, conversationId), eq(messages.senderType, 'system')))
+      .orderBy(desc(messages.sentAt))
+      .limit(1);
+    expect(note!.text).toBe(`Nhân viên ${AGENT.name} đánh dấu Không đạt: Mới làm móng, chưa lên tầng`);
+
+    expect(larkCalls).toHaveLength(1);
+    const card = JSON.stringify(larkCalls[0]!.body);
+    expect(card).toContain('❌ Không đạt');
+    expect(card).toContain('Mới làm móng, chưa lên tầng');
+
+    // Trả lại trạng thái ban đầu (tin cuối của khách) cho các test "kick" phía sau.
+    await db.delete(messages).where(inArray(messages.id, [...sent.map((m) => m.id), note!.id]));
+    await db
+      .update(handoffs)
+      .set({ resolvedAt: new Date() })
+      .where(eq(handoffs.conversationId, conversationId));
+    await resetConversation(conversationId);
   });
 
   it('nhật ký AI (admin) trả các lần chạy mới nhất', async () => {

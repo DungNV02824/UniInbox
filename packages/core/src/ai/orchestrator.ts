@@ -22,6 +22,7 @@ import {
   noReplyArgsSchema,
   replyArgsSchema,
   sanitizeAgentSummary,
+  STAFF_REJECT_TOOLS,
   truncateAtWord,
 } from './tools';
 import type { ChatHistoryItem, ChatbotConfig, ChatbotTurnResult, PromptImage } from './types';
@@ -76,6 +77,12 @@ export interface ChatbotTurnInput {
   lateReplySince?: Date;
   /** Lượt "Tái chăm sóc": chỉ dẫn admin gõ tay lúc bấm (buildChatbotPrompt reengageGuidance). Thiếu ⇒ không có. */
   reengageGuidance?: ReengageGuidance;
+  /**
+   * Lượt "Không đạt" (rejectHandoffWithAiReply): lý do nhân viên gõ ⇒ prompt thêm staffRejectTurnNote, tools CHỈ
+   * `reply` (STAFF_REJECT_TOOLS), KHÔNG escalate vì độ tự tin thấp, không pre-filter từ khóa, không ghi chú handoff
+   * 'continue', không chạy bộ chặn "tự nói đã chuyển" (không bao giờ đổi thành escalate). Thiếu ⇒ lượt thường.
+   */
+  staffRejectReason?: string;
 }
 
 /**
@@ -356,6 +363,8 @@ function toolCallEntries(response: LlmResponse): unknown[] {
  *    - Lỗi LLM sau khi hết lượt thử (hoặc lỗi không retryable) ⇒ decision 'error', reasonCode 'other',
  *      reason 'Lỗi gọi AI: <message>'.
  * 4. latencyMs = deps.now() cuối − đầu; toolCalls = [{ name, args }] model trả về; model = response.model.
+ * Lượt "Không đạt" (input.staffRejectReason): bỏ bước 1/1b, tools = STAFF_REJECT_TOOLS (chỉ reply), không escalate
+ * low_confidence, không chạy bước 3b ⇒ kết quả chỉ là 'reply' / 'error' (hoặc quyết định lạ nếu model vẫn gọi tool khác).
  * KHÔNG bao giờ ném lỗi (mọi lỗi ⇒ decision 'error').
  */
 export async function runChatbotTurn(
@@ -363,6 +372,7 @@ export async function runChatbotTurn(
   input: ChatbotTurnInput,
 ): Promise<ChatbotTurnResult> {
   const { chatbot } = input;
+  const staffRejectReason = input.staffRejectReason?.trim() || undefined;
   const model = chatbot.model?.trim() || deps.defaultModel;
   const usage: LlmUsage = { inputTokens: 0, outputTokens: 0 };
   let startedAt = 0;
@@ -377,8 +387,8 @@ export async function runChatbotTurn(
   };
 
   try {
-    // 1. Pre-filter từ khóa chuyển người.
-    for (const msg of input.newMessages) {
+    // 1. Pre-filter từ khóa chuyển người (lượt "Không đạt" không có tin khách mới ⇒ bỏ qua).
+    for (const msg of staffRejectReason ? [] : input.newMessages) {
       if (msg.role !== 'customer' || !msg.text) continue;
       const keyword = matchHandoffKeyword(msg.text, chatbot.handoffKeywords);
       if (keyword) {
@@ -397,7 +407,9 @@ export async function runChatbotTurn(
     }
 
     // 1b. Từ khóa "Báo nhân viên, bot VẪN trả lời": nhớ lại rồi vẫn gọi LLM.
-    const notifiedKeyword = matchNotifyKeyword(input.newMessages, chatbot.notifyKeywords);
+    const notifiedKeyword = staffRejectReason
+      ? null
+      : matchNotifyKeyword(input.newMessages, chatbot.notifyKeywords);
     const notified = notifiedKeyword ? { notifiedKeyword } : {};
     const notifyCalls: unknown[] = notifiedKeyword
       ? [{ name: NOTIFY_PREFILTER, args: { keyword: notifiedKeyword } }]
@@ -409,7 +421,7 @@ export async function runChatbotTurn(
     // 2. Gọi LLM có retry.
     const now = deps.now();
     startedAt = now.getTime();
-    const handoffContinues = handoffContinuesInTurn(chatbot, input.history);
+    const handoffContinues = !staffRejectReason && handoffContinuesInTurn(chatbot, input.history);
     const prompt = buildChatbotPrompt({
       chatbot,
       history: input.history,
@@ -422,13 +434,14 @@ export async function runChatbotTurn(
       ...(handoffContinues ? { handoffContinues } : {}),
       ...(input.lateReplySince ? { lateReplySince: input.lateReplySince } : {}),
       ...(input.reengageGuidance ? { reengageGuidance: input.reengageGuidance } : {}),
+      ...(staffRejectReason ? { staffRejectReason } : {}),
     });
     const sleep = deps.sleep ?? defaultSleep;
     const request: LlmRequest = {
       model,
       systemInstruction: prompt.systemInstruction,
       contents: prompt.contents,
-      tools: buildChatbotTools(chatbot),
+      tools: staffRejectReason ? STAFF_REJECT_TOOLS : buildChatbotTools(chatbot),
       temperature: chatbot.temperature,
       // Ảnh làm Gemini chậm hơn: +3 s mỗi ảnh thật sự đính kèm (tối đa +30 s).
       timeoutMs: (deps.timeoutMs ?? LLM_TIMEOUT_MS) + llmTimeoutExtraMsForImages(input.images),
@@ -473,7 +486,11 @@ export async function runChatbotTurn(
     const toolCalls: unknown[] = [...notifyCalls, ...toolCallEntries(response)];
 
     // 3. Quyết định.
-    const minConfidence = chatbot.escalateWhenUnsure ? (deps.minConfidence ?? DEFAULT_MIN_CONFIDENCE) : null;
+    // Lượt "Không đạt": nhân viên đã quyết định ⇒ độ tự tin thấp không bao giờ thành escalate.
+    const minConfidence =
+      chatbot.escalateWhenUnsure && !staffRejectReason
+        ? (deps.minConfidence ?? DEFAULT_MIN_CONFIDENCE)
+        : null;
     let decided = decide(response, minConfidence);
     let finalModel = response.model || model;
 
@@ -486,7 +503,8 @@ export async function runChatbotTurn(
       allowStaffNotified: historyHasStaffNotified(input.history),
       allowHandedOff: handoffContinues,
     };
-    if (!notifiedKeyword && isClaimingReply(decided, tolerance)) {
+    // Lượt "Không đạt" không chạy bộ chặn: chỉ có tool `reply`, và không bao giờ được đổi thành escalate.
+    if (!notifiedKeyword && !staffRejectReason && isClaimingReply(decided, tolerance)) {
       toolCalls.push({ name: HANDOFF_CLAIM_GUARD, args: { action: 'retry' } });
       let claim = decided;
       const second = await call({

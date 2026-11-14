@@ -1,9 +1,9 @@
 'use client';
 
 // Hook dữ liệu của tính năng Chatbot AI trong hộp thư: danh sách bot cho ô chọn, nhật ký AI,
-// các thao tác (gắn bot, tiếp tục AI, nhận / xong handoff) cập nhật lạc quan + báo lỗi bằng toast.
+// các thao tác (gắn bot, tiếp tục AI, nhận / xong / không đạt handoff) cập nhật lạc quan + báo lỗi bằng toast.
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { ChatbotRef, ConversationSummary } from '@dezon/shared';
+import type { ChatbotRef, ConversationSummary, RejectHandoffRequest } from '@dezon/shared';
 import { useToast } from '@/components/ui/toast';
 import { useAuth } from '@/lib/auth';
 import {
@@ -100,5 +100,25 @@ export function useResolveHandoff(conversationId: string) {
     run: () => inboxApi.resolveHandoff(conversationId),
     optimistic: (c) => withHandoffResolved(c),
     errorTitle: 'Không trả lại cho AI được',
+  });
+}
+
+/**
+ * "Không đạt": AI soạn tin báo khách rồi gửi ngay (tin bot về qua socket). Không cập nhật lạc quan — banner Cần
+ * người giữ nguyên; lỗi hiện trong hộp thoại (giữ lý do đã gõ) nên không bắn toast.
+ */
+export function useRejectHandoff(conversationId: string) {
+  const qc = useQueryClient();
+  const { user } = useAuth();
+  return useMutation({
+    mutationFn: (body: RejectHandoffRequest) => inboxApi.rejectHandoff(conversationId, body),
+    onSuccess: (data) => {
+      const conv = extractConversation(data, looksLikeConversation);
+      if (conv && user) applyConversationUpdate(qc, conv, user);
+    },
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: inboxKeys.detail(conversationId) });
+      void qc.invalidateQueries({ queryKey: inboxKeys.lists() });
+    },
   });
 }

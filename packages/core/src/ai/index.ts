@@ -13,6 +13,7 @@ export * from './service';
 export * from './settings';
 export * from './lark';
 export * from './handoff-action';
+export * from './handoff-reject';
 export * from './runtime';
 export * from './reengage';
 // Dòng [Hệ thống] mốc chuyển người (Chat thử dựng lại lịch sử có handoff mở).

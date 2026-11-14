@@ -148,6 +148,24 @@ describe('buildHandoffActionLarkCard', () => {
     const none = buildHandoffActionLarkCard({ ...actionInput, summaries: [] }).card as unknown as ActionCard;
     expect(none.elements[0].fields[5]?.text.content).toBe('**Nội dung:**\n—');
   });
+
+  it('reject ("Không đạt") ⇒ header đỏ "❌ <tên nút>" + dòng "Lý do không đạt" (escape); ack/resolve không có dòng đó', () => {
+    const reject = buildHandoffActionLarkCard({
+      ...actionInput,
+      action: 'reject',
+      buttonLabel: 'Không đạt',
+      rejectReason: 'Mới làm *móng*, chưa lên tầng',
+    }).card as unknown as ActionCard;
+    expect(reject.header).toEqual({ title: { tag: 'plain_text', content: '❌ Không đạt' }, template: 'red' });
+    expect(reject.elements[0].fields).toHaveLength(7);
+    expect(reject.elements[0].fields[6]).toEqual({
+      is_short: false,
+      text: { tag: 'lark_md', content: '**Lý do không đạt:**\nMới làm &#42;móng&#42;, chưa lên tầng' },
+    });
+    const ack = buildHandoffActionLarkCard({ ...actionInput, rejectReason: 'x' })
+      .card as unknown as ActionCard;
+    expect(ack.elements[0].fields).toHaveLength(6);
+  });
 });
 
 describe('formatVnDateTime', () => {

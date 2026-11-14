@@ -1,5 +1,6 @@
 import {
   ChannelDeleteConflictError,
+  ChatbotComposeError,
   ChatbotNameConflictError,
   ContactTagConflictError,
   InboxForbiddenError,
@@ -21,5 +22,7 @@ export function domainErrorStatus(exception: unknown): number | null {
   if (exception instanceof ContactTagConflictError) return HttpStatus.CONFLICT;
   // Webhook Lark từ chối / không tới được: lỗi ở dịch vụ bên ngoài, thông điệp tiếng Việt không chứa secret.
   if (exception instanceof LarkNotifyError) return HttpStatus.BAD_GATEWAY;
+  // AI (Gemini) không soạn được tin cho thao tác của nhân viên (vd. nút "Không đạt") — chưa gửi gì cho khách.
+  if (exception instanceof ChatbotComposeError) return HttpStatus.BAD_GATEWAY;
   return null;
 }

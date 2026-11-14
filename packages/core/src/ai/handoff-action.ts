@@ -1,5 +1,6 @@
 // Hai nút trên banner "Cần người": thông báo Lark (bot bật handoff_action_lark) và tin bot gửi khách
-// (chatbots.handoff_ack_message / handoff_resolve_message).
+// (chatbots.handoff_ack_message / handoff_resolve_message). Nút thứ ba "Không đạt" (AI soạn tin) ở handoff-reject.ts —
+// thẻ Lark của nút đó cũng dựng ở đây (loadHandoffActionNotice action 'reject').
 import {
   channelAccounts,
   chatbots,
@@ -14,6 +15,7 @@ import {
   DEFAULT_HANDOFF_ACK_LABEL,
   DEFAULT_HANDOFF_RESOLVE_LABEL,
   HANDOFF_MESSAGE_CONTACT_PLACEHOLDER,
+  HANDOFF_REJECT_LABEL,
 } from '@dezon/shared';
 import { asc, eq, inArray, sql } from 'drizzle-orm';
 import type { InboxContext } from '../inbox/types';
@@ -40,13 +42,16 @@ export function formatVnDateTime(d: Date): string {
 
 export interface HandoffActionNoticeInput {
   conversationId: string;
-  action: 'ack' | 'resolve';
-  /** Handoff vừa ack / vừa đóng ở lần bấm này; rỗng ⇒ không báo (bấm lại). */
+  /** 'reject' = nút "Không đạt" (HANDOFF_REJECT_LABEL — handoff-reject.ts). */
+  action: 'ack' | 'resolve' | 'reject';
+  /** Handoff vừa ack / vừa đóng / vừa đánh dấu Không đạt ở lần bấm này; rỗng ⇒ không báo (bấm lại). */
   handoffIds: readonly string[];
   actorUserId: string;
   now: Date;
   /** `${APP_URL}` — nút "Mở hội thoại". */
   appUrl: string;
+  /** Nút "Không đạt": lý do nhân viên gõ (thẻ Lark có dòng "Lý do không đạt"). */
+  rejectReason?: string;
 }
 
 /**
@@ -84,12 +89,17 @@ export async function loadHandoffActionNotice(
   ]);
 
   const buttonLabel =
-    input.action === 'ack'
-      ? (row.ackLabel ?? DEFAULT_HANDOFF_ACK_LABEL)
-      : (row.resolveLabel ?? DEFAULT_HANDOFF_RESOLVE_LABEL);
+    input.action === 'reject'
+      ? HANDOFF_REJECT_LABEL
+      : input.action === 'ack'
+        ? (row.ackLabel ?? DEFAULT_HANDOFF_ACK_LABEL)
+        : (row.resolveLabel ?? DEFAULT_HANDOFF_RESOLVE_LABEL);
   return {
     action: input.action,
     buttonLabel,
+    ...(input.action === 'reject' && input.rejectReason !== undefined
+      ? { rejectReason: input.rejectReason }
+      : {}),
     contactName: row.contactName ?? 'Khách',
     channelName: row.channelName,
     chatbotName: row.chatbotName,

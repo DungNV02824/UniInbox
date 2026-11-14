@@ -12,11 +12,14 @@ import {
   PauseCircle,
   Play,
   Siren,
+  XCircle,
 } from 'lucide-react';
-import { isAiPausedIndefinitely, type ConversationSummary } from '@dezon/shared';
+import { HANDOFF_REJECT_LABEL, isAiPausedIndefinitely, type ConversationSummary } from '@dezon/shared';
+import { HandoffRejectDialog } from '@/components/inbox/handoff-reject-dialog';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/lib/auth';
 import { useHandoffBannerCollapsed } from '@/lib/handoff-banner-pref';
+import { canRejectHandoff } from '@/lib/handoff-reject';
 import {
   aiPausedText,
   botContinuesDuringHandoff,
@@ -32,6 +35,7 @@ import {
 import {
   useAckHandoff,
   useChatbotOptions,
+  useRejectHandoff,
   useResolveHandoff,
   useResumeAi,
   useSetConversationChatbot,
@@ -182,13 +186,17 @@ function AiPausedNotice({ conversation: c }: { conversation: ConversationSummary
 /**
  * Banner đỏ "Cần người: <lý do> — <tóm tắt>" + "Nhận xử lý" / "Đã xong, trả lại cho AI" (bot có thể đặt tên
  * riêng cho hai nút, vd. "Nghiệm thu" / "Đã chuyển tiền"). Bot đặt "vẫn trả lời khách" ⇒ thêm dòng "Bot vẫn đang
- * trả lời khách" (nút nhận chỉ ghi nhận; nút xong đóng yêu cầu, bot vốn đã bật).
+ * trả lời khách" (nút nhận chỉ ghi nhận; nút xong đóng yêu cầu, bot vốn đã bật). Nút "Không đạt" (đứng trước, chỉ
+ * khi có chatbot gắn — canRejectHandoff) mở hộp thoại gõ lý do ⇒ AI báo khách khéo léo, yêu cầu chuyển người giữ
+ * nguyên.
  */
 function HandoffBanner({ conversation: c }: { conversation: ConversationSummary }) {
   const { user } = useAuth();
   const now = useNow(30_000);
   const ack = useAckHandoff(c.id);
   const resolve = useResolveHandoff(c.id);
+  const reject = useRejectHandoff(c.id);
+  const [rejectOpen, setRejectOpen] = useState(false);
   const [expanded, setExpanded] = useState(false);
   // Ẩn/hiện cả banner (chỉ còn dòng tiêu đề + nút) — nhớ trên trình duyệt, chung mọi hội thoại.
   const [collapsed, setCollapsed] = useHandoffBannerCollapsed();
@@ -196,7 +204,7 @@ function HandoffBanner({ conversation: c }: { conversation: ConversationSummary 
   const botNote = handoffBotNote(c, now);
   const h = c.handoff ?? null;
   const ackedBy = h?.acknowledgedBy ?? null;
-  const busy = ack.isPending || resolve.isPending;
+  const busy = ack.isPending || resolve.isPending || reject.isPending;
   const labels = handoffButtonLabels(c.chatbot);
   const summary = h?.summary?.trim() || null;
   const longSummary = !!summary && summary.length > SUMMARY_CLAMP_CHARS;
@@ -254,6 +262,19 @@ function HandoffBanner({ conversation: c }: { conversation: ConversationSummary 
         </div>
       </div>
       <div className="flex shrink-0 flex-wrap items-center gap-2 sm:justify-end">
+        {canRejectHandoff(c) && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 border-red-300 bg-background text-red-700 hover:bg-red-50 hover:text-red-800"
+            disabled={busy}
+            title="Báo khách là chưa đạt (AI soạn tin theo lý do bạn nhập) — vẫn giữ yêu cầu Cần người"
+            onClick={() => setRejectOpen(true)}
+          >
+            {reject.isPending ? <Loader2 className="animate-spin" aria-hidden /> : <XCircle aria-hidden />}
+            {HANDOFF_REJECT_LABEL}
+          </Button>
+        )}
         {h && !ackedBy && (
           <Button
             size="sm"
@@ -291,6 +312,7 @@ function HandoffBanner({ conversation: c }: { conversation: ConversationSummary 
           {collapsed ? <ChevronDown aria-hidden /> : <ChevronUp aria-hidden />}
         </Button>
       </div>
+      {rejectOpen && <HandoffRejectDialog reject={reject} onClose={() => setRejectOpen(false)} />}
     </div>
   );
 }

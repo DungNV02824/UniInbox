@@ -108,6 +108,12 @@ export const CHATBOT_TOOLS: LlmFunctionDeclaration[] = [
   },
 ];
 
+/**
+ * Tool của lượt "Không đạt" (nhân viên bấm nút, bot báo người nhắn lần gửi chưa đạt — handoff-reject.ts): CHỈ `reply`
+ * (Gemini mode ANY + allowedFunctionNames ⇒ model không thể escalate / no_reply).
+ */
+export const STAFF_REJECT_TOOLS: LlmFunctionDeclaration[] = CHATBOT_TOOLS.filter((t) => t.name === 'reply');
+
 /** Lý do escalate chỉ dành cho bot "không chắc ⇒ chuyển người" (escalateWhenUnsure = true). */
 export const UNSURE_REASON_CODES: readonly HandoffReasonCode[] = ['out_of_scope', 'low_confidence'];
 

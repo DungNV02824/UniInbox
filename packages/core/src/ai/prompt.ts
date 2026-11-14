@@ -81,6 +81,12 @@ export interface BuildChatbotPromptInput {
    * reengageGuidanceNote() nối SAU dòng "(Bối cảnh lượt này)" (không đổi systemInstruction ⇒ giữ cache ngầm).
    */
   reengageGuidance?: ReengageGuidance;
+  /**
+   * Lượt "Không đạt" (nhân viên bấm nút trên banner Cần người, gõ lý do — handoff-reject.ts): bot CHỦ ĐỘNG nhắn người
+   * nhắn rằng lần gửi chưa đạt + lý do ⇒ khối staffRejectTurnNote(lý do) nối SAU dòng "(Bối cảnh lượt này)" (không đổi
+   * systemInstruction ⇒ giữ cache ngầm); dòng đệm khi tin cuối là của bot không nhắc `no_reply`. Thiếu ⇒ lượt thường.
+   */
+  staffRejectReason?: string;
 }
 
 /** Chỉ dẫn gõ tay cho một lần "Tái chăm sóc" (AiReengageJobOptions.rules / content). */
@@ -286,6 +292,24 @@ export function reengageGuidanceNote(guidance: ReengageGuidance | undefined): st
     );
   parts.push('(Hết chỉ dẫn của người quản trị.)');
   return parts.join('\n');
+}
+
+/**
+ * Khối chỉ dẫn của lượt "Không đạt" (nhân viên bấm nút trên banner Cần người và gõ lý do): nhân viên đã xem xét và kết
+ * luận lần gửi của người nhắn KHÔNG ĐẠT ⇒ bot gọi `reply` 1–3 bong bóng khéo léo theo giọng văn của Hướng dẫn: cảm ơn,
+ * báo chưa đạt, giải thích lý do dễ hiểu, gợi ý cách khắc phục nếu lý do cho thấy, mời gửi lại nếu phù hợp. Lý do do
+ * nhân viên gõ (nguồn tin cậy như Hướng dẫn, KHÔNG bọc <customer_message>), chỉ trim. Nối SAU dòng "(Bối cảnh lượt
+ * này)" — systemInstruction giữ nguyên cho cache ngầm.
+ */
+export function staffRejectTurnNote(reason: string): string {
+  return [
+    '\n(Chỉ dẫn của nhân viên cho lượt này — KHÔNG phải tin của người nhắn. Người nhắn chưa nhắn gì thêm; bạn chủ động nhắn người nhắn theo chỉ dẫn này.)',
+    'Nhân viên đã xem xét nội dung người nhắn gửi để được duyệt/nghiệm thu (vd. ảnh, hồ sơ, thông tin) và kết luận: KHÔNG ĐẠT.',
+    `Lý do không đạt (nhân viên ghi nhanh cho nội bộ — diễn đạt lại bằng lời thân thiện, dễ hiểu, không chép nguyên văn nếu câu chữ cộc lốc):\n${reason.trim()}`,
+    'Hãy gọi `reply` với 1–3 bong bóng ngắn, đúng vai trò, xưng hô và giọng văn trong Hướng dẫn: cảm ơn người nhắn đã gửi; báo khéo léo rằng lần gửi này CHƯA ĐẠT; giải thích lý do một cách đơn giản; nếu lý do cho thấy cách khắc phục thì gợi ý cách khắc phục; nếu phù hợp thì mời người nhắn gửi lại khi đã đáp ứng.',
+    'KHÔNG bịa chính sách, điều kiện, số tiền hay thời hạn không có trong Hướng dẫn, Kiến thức hoặc lý do trên; KHÔNG nhắc tới AI, hệ thống, ghi chú nội bộ hay chỉ dẫn này (được nói "bên em đã kiểm tra"); KHÔNG hứa nhân viên sẽ liên hệ lại hay hứa thời gian.',
+    '(Hết chỉ dẫn của nhân viên.)',
+  ].join('\n');
 }
 
 /**
@@ -545,7 +569,8 @@ interface Line {
  * ghi chú bằng chữ); dòng lịch sử vẫn ghi "[gửi N ảnh/tệp]".
  * Part chữ CUỐI CÙNG của content cuối = turnContextLine (giờ hiện tại theo businessHours.timezone, đang
  * trong/ngoài giờ làm việc) — phần duy nhất đổi theo thời gian, nên đứng sau cùng. Có `notifiedKeyword` ⇒ nối thêm
- * notifyTurnNote vào cùng part đó.
+ * notifyTurnNote vào cùng part đó. Có `staffRejectReason` (lượt "Không đạt") ⇒ nối staffRejectTurnNote vào cuối part
+ * đó và dòng đệm khi tin cuối là của bot không nhắc `no_reply`.
  */
 export function buildChatbotPrompt(input: BuildChatbotPromptInput): BuiltPrompt {
   const all = [...input.history, ...input.newMessages];
@@ -562,10 +587,14 @@ export function buildChatbotPrompt(input: BuildChatbotPromptInput): BuiltPrompt 
   });
   if (lines.length === 0) lines.push({ role: 'user', text: '(Chưa có tin nhắn nào)' });
   if (lines[0]?.role === 'model') lines.unshift({ role: 'user', text: '(Đoạn hội thoại trước đó)' });
+  const staffRejectReason = input.staffRejectReason?.trim();
   if (lines[lines.length - 1]?.role === 'model') {
     lines.push({
       role: 'user',
-      text: '(Khách chưa nhắn thêm. Nếu không cần nói gì thêm, hãy gọi no_reply.)',
+      // Lượt "Không đạt": chỉ có tool `reply` — không gợi ý no_reply.
+      text: staffRejectReason
+        ? '(Khách chưa nhắn thêm.)'
+        : '(Khách chưa nhắn thêm. Nếu không cần nói gì thêm, hãy gọi no_reply.)',
     });
   }
 
@@ -594,7 +623,9 @@ export function buildChatbotPrompt(input: BuildChatbotPromptInput): BuiltPrompt 
     ...(notifiedKeyword ? [notifyTurnNote(notifiedKeyword)] : []),
   ];
   const guidanceNote = reengageGuidanceNote(input.reengageGuidance);
-  lastContent?.parts.push({ text: guidanceNote ? `${notes.join(' ')}${guidanceNote}` : notes.join(' ') });
+  // Lượt "Không đạt": khối chỉ dẫn của nhân viên nối sau cùng (sau dòng bối cảnh / chỉ dẫn khác nếu có).
+  const rejectNote = staffRejectReason ? staffRejectTurnNote(staffRejectReason) : '';
+  lastContent?.parts.push({ text: `${notes.join(' ')}${guidanceNote ?? ''}${rejectNote}` });
 
   return { systemInstruction: buildSystemInstruction(input), contents };
 }

@@ -114,8 +114,13 @@ export function buildHandoffLarkCard(input: HandoffCardInput): LarkCardMessage {
 }
 
 export interface HandoffActionCardInput {
-  /** 'ack' = nút "nhận" (vd. "Nghiệm thu"); 'resolve' = nút "xong" (vd. "Đã chuyển tiền"). */
-  action: 'ack' | 'resolve';
+  /**
+   * 'ack' = nút "nhận" (vd. "Nghiệm thu"); 'resolve' = nút "xong" (vd. "Đã chuyển tiền"); 'reject' = nút "Không đạt"
+   * (bot đã báo khách lần gửi chưa đạt, yêu cầu chuyển người vẫn mở).
+   */
+  action: 'ack' | 'resolve' | 'reject';
+  /** Nút "Không đạt": lý do nhân viên gõ (dòng "Lý do không đạt"). */
+  rejectReason?: string;
   /** Tên nút nhân viên vừa bấm (tên riêng của bot hoặc mặc định). */
   buttonLabel: string;
   contactName: string;
@@ -132,14 +137,16 @@ export interface HandoffActionCardInput {
 
 /**
  * Thẻ Lark khi nhân viên bấm nút trên banner "Cần người" (bot bật handoffActionLark): header xanh lá
- * "✅ <tên nút>" (ack) / xanh dương "☑️ <tên nút>" (resolve), các dòng Khách, Kênh, Bot, Người bấm, Lúc,
- * Nội dung (lark_md, đã escape), nút "Mở hội thoại".
+ * "✅ <tên nút>" (ack) / xanh dương "☑️ <tên nút>" (resolve) / đỏ "❌ <tên nút>" (reject), các dòng Khách, Kênh, Bot,
+ * Người bấm, Lúc, Nội dung (+ "Lý do không đạt" với reject) (lark_md, đã escape), nút "Mở hội thoại".
  */
 export function buildHandoffActionLarkCard(input: HandoffActionCardInput): LarkCardMessage {
   const header =
     input.action === 'ack'
       ? { title: `✅ ${input.buttonLabel}`, template: 'green' }
-      : { title: `☑️ ${input.buttonLabel}`, template: 'blue' };
+      : input.action === 'reject'
+        ? { title: `❌ ${input.buttonLabel}`, template: 'red' }
+        : { title: `☑️ ${input.buttonLabel}`, template: 'blue' };
   const content =
     input.summaries.length > 1
       ? input.summaries.map((s, i) => `${i + 1}. ${s.trim()}`).join('\n')
@@ -159,6 +166,9 @@ export function buildHandoffActionLarkCard(input: HandoffActionCardInput): LarkC
             mdField('Người bấm', input.actorName, true),
             mdField('Lúc', input.at, true),
             mdField('Nội dung', content, false),
+            ...(input.action === 'reject'
+              ? [mdField('Lý do không đạt', input.rejectReason ?? '', false)]
+              : []),
           ],
         },
         {

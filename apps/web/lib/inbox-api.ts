@@ -15,6 +15,7 @@ import type {
   FacebookLoginStartResponse,
   MessageDto,
   Page,
+  RejectHandoffRequest,
   SendMessageRequest,
   SyncChannelRequest,
   UpdateChannelRequest,
@@ -118,6 +119,10 @@ export const inboxApi = {
   },
   resolveHandoff(id: string) {
     return api.request<unknown>(`/conversations/${enc(id)}/handoff/resolve`, { method: 'POST' });
+  },
+  /** "Không đạt": AI soạn tin báo khách theo lý do rồi gửi ngay; yêu cầu chuyển người giữ nguyên. */
+  rejectHandoff(id: string, body: RejectHandoffRequest) {
+    return api.request<unknown>(`/conversations/${enc(id)}/handoff/reject`, { method: 'POST', body });
   },
   /** Nhật ký AI (admin): 20 lần chạy gần nhất. */
   listAiRuns(id: string) {

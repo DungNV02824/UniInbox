@@ -427,6 +427,29 @@ export const setConversationChatbotSchema = z.object({
 });
 export type SetConversationChatbotRequest = z.infer<typeof setConversationChatbotSchema>;
 
+/** Nút "Không đạt" trên banner Cần người (cạnh nút nhận / nút xong). */
+export const HANDOFF_REJECT_LABEL = 'Không đạt';
+export const HANDOFF_REJECT_LIMITS = {
+  /** Độ dài tối đa (ký tự, đếm theo code point — Array.from) của lý do nhân viên gõ. */
+  reasonMaxChars: 1000,
+} as const;
+
+/**
+ * POST /conversations/:id/handoff/reject ("Không đạt"): nhân viên gõ lý do ⇒ AI (giọng văn của bot đang gắn) soạn
+ * 1–3 tin khéo léo báo khách là chưa đạt + lý do, rồi GỬI THẲNG cho khách (tin bot, qua outbound). Yêu cầu chuyển
+ * người GIỮ NGUYÊN (không ack, không resolve). Trả về ConversationSummary.
+ */
+export const rejectHandoffSchema = z.object({
+  reason: z
+    .string()
+    .trim()
+    .min(1, { message: 'Nhập lý do không đạt' })
+    .refine((v) => Array.from(v).length <= HANDOFF_REJECT_LIMITS.reasonMaxChars, {
+      message: `Tối đa ${HANDOFF_REJECT_LIMITS.reasonMaxChars} ký tự`,
+    }),
+});
+export type RejectHandoffRequest = z.input<typeof rejectHandoffSchema>;
+
 // ---------- Cài đặt: giờ làm việc ----------
 
 export const WEEKDAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'] as const;

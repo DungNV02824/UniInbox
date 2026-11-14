@@ -2,6 +2,8 @@ import {
   type AiRunDto,
   type AuthUser,
   type ConversationSummary,
+  type RejectHandoffRequest,
+  rejectHandoffSchema,
   type SetConversationChatbotRequest,
   setConversationChatbotSchema,
 } from '@dezon/shared';
@@ -47,6 +49,20 @@ export class ConversationAiController {
   @HttpCode(HttpStatus.OK)
   resolve(@CurrentUser() user: AuthUser, @UuidParam() id: string): Promise<ConversationSummary> {
     return this.ai.resolveHandoff(toViewer(user), id);
+  }
+
+  /**
+   * "Không đạt": nhân viên gõ lý do ⇒ AI (bot đang gắn) soạn 1–3 tin báo khách lần gửi chưa đạt và GỬI THẲNG.
+   * Yêu cầu chuyển người giữ nguyên (không ack / resolve).
+   */
+  @Post(':id/handoff/reject')
+  @HttpCode(HttpStatus.OK)
+  reject(
+    @CurrentUser() user: AuthUser,
+    @UuidParam() id: string,
+    @Body(new ZodValidationPipe(rejectHandoffSchema)) body: RejectHandoffRequest,
+  ): Promise<ConversationSummary> {
+    return this.ai.rejectHandoff(toViewer(user), id, body.reason);
   }
 
   /** "Nhật ký AI": 20 lần chạy gần nhất. */

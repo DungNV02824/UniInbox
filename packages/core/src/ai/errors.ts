@@ -13,3 +13,14 @@ export class ChatbotNameConflictError extends Error {
 export class LarkNotifyError extends Error {
   override readonly name = 'LarkNotifyError';
 }
+
+/**
+ * AI không soạn được tin cho thao tác của nhân viên (vd. nút "Không đạt": lỗi gọi Gemini, model không gọi `reply`).
+ * Chưa gửi gì cho khách. API ánh xạ sang 502.
+ */
+export class ChatbotComposeError extends Error {
+  override readonly name = 'ChatbotComposeError';
+  constructor(message = 'AI không soạn được tin, vui lòng thử lại') {
+    super(message);
+  }
+}

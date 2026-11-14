@@ -11,7 +11,9 @@ import {
   type HandoffActionMessageDeps,
   type InboxContext,
   listAiRuns,
+  type LlmClient,
   needsChatbotKick,
+  rejectHandoffWithAiReply,
   OUTBOUND_JOB_NAME,
   type OutboundJobData,
   outboundJobId,
@@ -25,16 +27,19 @@ import {
 } from '@dezon/core';
 import type { Db } from '@dezon/db';
 import { type AiRunDto, type ConversationSummary, REALTIME_EVENTS } from '@dezon/shared';
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
 import type { Queue } from 'bullmq';
 import { withTimeout } from '../../common/with-timeout';
 import { APP_CONFIG, type AppConfig } from '../../config';
-import { HTTP_FETCH } from '../../infra/ai/ai.constants';
+import { HTTP_FETCH, LLM_CLIENT } from '../../infra/ai/ai.constants';
 import { DB } from '../../infra/db/db.constants';
 import { CREDENTIALS_CIPHER, INBOX_CONTEXT } from '../../infra/inbox/inbox.constants';
 import { AI_REPLY_QUEUE, ENQUEUE_TIMEOUT_MS, OUTBOUND_QUEUE } from '../../infra/queue/queue.constants';
 import { RealtimeService } from '../realtime/realtime.service';
 import { roomsOfSummary } from '../realtime/rooms';
+
+/** Nút "Không đạt" khi server chưa có GEMINI_API_KEY (503). */
+export const LLM_REJECT_NOT_CONFIGURED_MESSAGE = 'Chưa cấu hình AI (GEMINI_API_KEY)';
 
 /** Chatbot / tạm dừng AI / chuyển người thật trên một hội thoại; phát conversation.updated sau mỗi thao tác. */
 @Injectable()
@@ -50,6 +55,7 @@ export class ConversationAiService {
     @Inject(APP_CONFIG) private readonly config: AppConfig,
     @Inject(CREDENTIALS_CIPHER) private readonly cipher: CredentialsCipher,
     @Inject(HTTP_FETCH) private readonly fetchFn: typeof fetch,
+    @Inject(LLM_CLIENT) private readonly llm: LlmClient | null,
   ) {}
 
   async setChatbot(viewer: Viewer, id: string, chatbotId: string | null): Promise<ConversationSummary> {
@@ -86,6 +92,24 @@ export class ConversationAiService {
     return summary;
   }
 
+  /**
+   * "Không đạt": AI (bot đang gắn) soạn 1–3 tin báo khách lần gửi chưa đạt + lý do rồi gửi thẳng (core
+   * rejectHandoffWithAiReply). Yêu cầu chuyển người giữ nguyên. Chưa có GEMINI_API_KEY ⇒ 503. Lỗi nghiệp vụ của core
+   * (400 / 403 / 404 / 422 kênh không gửi được / 502 AI không soạn được) trả thẳng cho web — khi đó chưa gửi gì.
+   * Thành công ⇒ phát conversation.updated rồi báo Lark (bot bật "Gửi Lark khi bấm nút"; lỗi chỉ log).
+   */
+  async rejectHandoff(viewer: Viewer, id: string, reason: string): Promise<ConversationSummary> {
+    if (!this.llm) throw new ServiceUnavailableException(LLM_REJECT_NOT_CONFIGURED_MESSAGE);
+    const result = await rejectHandoffWithAiReply(this.db, viewer, id, reason, {
+      ...this.messageDeps,
+      llm: this.llm,
+      defaultModel: this.config.GEMINI_MODEL,
+    });
+    const summary = await this.publish(Promise.resolve(result));
+    await this.notifyHandoffAction(viewer, id, 'reject', [result.handoffId], reason.trim());
+    return summary;
+  }
+
   aiRuns(id: string): Promise<AiRunDto[]> {
     return listAiRuns(this.db, id);
   }
@@ -103,15 +127,16 @@ export class ConversationAiService {
   }
 
   /**
-   * Bot của hội thoại bật "Gửi Lark khi bấm nút" ⇒ gửi thẻ Lark (vd. "✅ Nghiệm thu" / "☑️ Đã chuyển tiền") kèm
+   * Bot của hội thoại bật "Gửi Lark khi bấm nút" ⇒ gửi thẻ Lark (vd. "✅ Nghiệm thu" / "☑️ Đã chuyển tiền" / "❌ Không đạt" kèm lý do) kèm
    * tóm tắt yêu cầu chuyển người. Chỉ báo khi lần bấm này thật sự đổi trạng thái (bấm lại không gửi trùng).
    * Lỗi Lark chỉ log: thao tác của nhân viên đã lưu. Env LARK_* chỉ dùng khi admin chưa từng lưu cấu hình Lark.
    */
   private async notifyHandoffAction(
     viewer: Viewer,
     conversationId: string,
-    action: 'ack' | 'resolve',
+    action: 'ack' | 'resolve' | 'reject',
     handoffIds: string[],
+    rejectReason?: string,
   ): Promise<void> {
     if (handoffIds.length === 0) return;
     try {
@@ -122,6 +147,7 @@ export class ConversationAiService {
         actorUserId: viewer.id,
         now: this.ctx.now(),
         appUrl: this.config.APP_URL,
+        ...(rejectReason !== undefined ? { rejectReason } : {}),
       });
       if (!card) return;
       const lark = await getLarkConfig(this.db, this.cipher, {

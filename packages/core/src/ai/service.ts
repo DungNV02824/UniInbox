@@ -311,7 +311,7 @@ export async function deleteChatbot(db: Db, actorUserId: string, id: string): Pr
 
 type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
 
-interface LockedConversation {
+export interface LockedConversation {
   id: string;
   assignedUserId: string | null;
   chatbotId: string | null;
@@ -320,8 +320,10 @@ interface LockedConversation {
 
 /**
  * Khóa dòng hội thoại (FOR UPDATE), kiểm quyền xem, chạy `fn` trong cùng transaction rồi trả summary mới.
+ * Không có ⇒ InboxNotFoundError; không xem được (canViewConversation) ⇒ InboxForbiddenError. Dùng chung cho các nút
+ * trên banner Cần người (kể cả "Không đạt" — handoff-reject.ts).
  */
-async function withConversation(
+export async function withConversation(
   db: Db,
   viewer: Viewer,
   conversationId: string,
