@@ -1,10 +1,22 @@
 'use client';
 
 import { useState } from 'react';
-import { AlertTriangle, Bot, CheckCircle2, Hand, Loader2, PauseCircle, Play, Siren } from 'lucide-react';
+import {
+  AlertTriangle,
+  Bot,
+  CheckCircle2,
+  ChevronDown,
+  ChevronUp,
+  Hand,
+  Loader2,
+  PauseCircle,
+  Play,
+  Siren,
+} from 'lucide-react';
 import { isAiPausedIndefinitely, type ConversationSummary } from '@dezon/shared';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/lib/auth';
+import { useHandoffBannerCollapsed } from '@/lib/handoff-banner-pref';
 import {
   aiPausedText,
   botContinuesDuringHandoff,
@@ -178,6 +190,8 @@ function HandoffBanner({ conversation: c }: { conversation: ConversationSummary 
   const ack = useAckHandoff(c.id);
   const resolve = useResolveHandoff(c.id);
   const [expanded, setExpanded] = useState(false);
+  // Ẩn/hiện cả banner (chỉ còn dòng tiêu đề + nút) — nhớ trên trình duyệt, chung mọi hội thoại.
+  const [collapsed, setCollapsed] = useHandoffBannerCollapsed();
   if (c.status !== 'pending_human') return null;
   const botNote = handoffBotNote(c, now);
   const h = c.handoff ?? null;
@@ -189,16 +203,19 @@ function HandoffBanner({ conversation: c }: { conversation: ConversationSummary 
 
   return (
     <div
-      className="flex flex-col gap-2 border-b border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900 sm:flex-row sm:items-center sm:px-4"
+      className={cn(
+        'flex gap-2 border-b border-blue-200 bg-blue-50 px-3 text-sm text-blue-900 sm:px-4',
+        collapsed ? 'flex-wrap items-center py-1.5' : 'flex-col py-2 sm:flex-row sm:items-center',
+      )}
       role="alert"
     >
-      <div className="flex min-w-0 flex-1 items-start gap-2">
-        <Siren className="mt-0.5 size-4 shrink-0 text-blue-600" aria-hidden />
+      <div className={cn('flex min-w-0 flex-1 gap-2', collapsed ? 'items-center' : 'items-start')}>
+        <Siren className={cn('size-4 shrink-0 text-blue-600', !collapsed && 'mt-0.5')} aria-hidden />
         <div className="flex min-w-0 flex-col gap-0.5">
-          <p className="font-semibold">
+          <p className={cn('font-semibold', collapsed && 'truncate')}>
             Cần người: {h ? handoffReasonLabel(h.reasonCode) : 'Hội thoại đang chờ nhân viên xử lý'}
           </p>
-          {summary && (
+          {!collapsed && summary && (
             <div className="text-sm">
               {/* Tóm tắt dài (bot cộng dồn nhiều lần chuyển) đẩy khung chat xuống: mặc định 2 dòng, mở ra thì
                   cuộn trong khung có giới hạn chiều cao. */}
@@ -223,12 +240,12 @@ function HandoffBanner({ conversation: c }: { conversation: ConversationSummary 
               )}
             </div>
           )}
-          {ackedBy && (
+          {!collapsed && ackedBy && (
             <p className="text-xs text-blue-800/80">
               {handoffAckedText(labels, ackedBy.id === user?.id ? 'bạn' : ackedBy.name)}
             </p>
           )}
-          {botNote && (
+          {!collapsed && botNote && (
             <p className="flex items-center gap-1 text-xs text-violet-800">
               <Bot className="size-3.5 shrink-0" aria-hidden />
               {botNote}
@@ -261,6 +278,17 @@ function HandoffBanner({ conversation: c }: { conversation: ConversationSummary 
             <CheckCircle2 aria-hidden />
           )}
           {labels.resolve}
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="size-8 p-0 text-blue-700 hover:bg-blue-100 hover:text-blue-900"
+          aria-expanded={!collapsed}
+          aria-label={collapsed ? 'Hiện chi tiết thông báo Cần người' : 'Ẩn chi tiết thông báo Cần người'}
+          title={collapsed ? 'Hiện chi tiết thông báo' : 'Ẩn bớt thông báo'}
+          onClick={() => setCollapsed(!collapsed)}
+        >
+          {collapsed ? <ChevronDown aria-hidden /> : <ChevronUp aria-hidden />}
         </Button>
       </div>
     </div>
