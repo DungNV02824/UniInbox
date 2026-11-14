@@ -89,7 +89,8 @@ function EditorTabs({
       role="tablist"
       aria-label="Phần cấu hình chatbot"
       onKeyDown={onKeyDown}
-      className="-mb-px flex gap-1 overflow-x-auto px-3 [scrollbar-width:none] sm:px-4"
+      // Nhiều tab: tự xuống dòng thay vì cuộn ngang ẩn (không có thanh cuộn ⇒ tab đầu/cuối bị khuất mà không biết).
+      className="-mb-px flex flex-wrap gap-x-1 px-3 sm:px-4"
     >
       {EDITOR_TABS.map((tab) => {
         const selected = tab === value;
