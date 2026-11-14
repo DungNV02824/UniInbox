@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   HANDOFF_REASON_CODES,
   HANDOFF_REASON_LABELS,
+  REENGAGE_LIMITS,
+  reengageStartSchema,
   base64DecodedBytes,
   businessHoursSchema,
   CHATBOT_LIMITS,
@@ -160,5 +162,30 @@ describe('chatbots schemas', () => {
 
   it('mọi mã lý do có nhãn tiếng Việt', () => {
     for (const code of HANDOFF_REASON_CODES) expect(HANDOFF_REASON_LABELS[code]).toBeTruthy();
+  });
+});
+
+describe('reengageStartSchema — chỉ dẫn gõ tay', () => {
+  const base = { days: 15, conversationIds: ['3f0c8a52-7f3e-4d3e-9b55-0c4b1a2d3e4f'] };
+
+  it('trim; ô trống / chỉ khoảng trắng ⇒ bỏ (undefined); không gửi cũng hợp lệ', () => {
+    const empty = reengageStartSchema.parse(base);
+    expect(empty.rules).toBeUndefined();
+    expect(empty.content).toBeUndefined();
+    const parsed = reengageStartSchema.parse({ ...base, rules: '  Xưng em  ', content: '   ' });
+    expect(parsed.rules).toBe('Xưng em');
+    expect(parsed.content).toBeUndefined();
+  });
+
+  it(`quá ${REENGAGE_LIMITS.guidanceMaxChars} ký tự ⇒ lỗi`, () => {
+    const long = 'a'.repeat(REENGAGE_LIMITS.guidanceMaxChars + 1);
+    expect(reengageStartSchema.safeParse({ ...base, content: long }).success).toBe(false);
+    expect(
+      reengageStartSchema.safeParse({ ...base, rules: 'a'.repeat(REENGAGE_LIMITS.guidanceMaxChars) }).success,
+    ).toBe(true);
+    // Đếm theo ký tự như bộ đếm ở web: emoji (2 đơn vị UTF-16) vẫn là 1 ký tự.
+    const emoji = '😀'.repeat(REENGAGE_LIMITS.guidanceMaxChars);
+    expect(reengageStartSchema.safeParse({ ...base, rules: emoji }).success).toBe(true);
+    expect(reengageStartSchema.safeParse({ ...base, rules: `${emoji}😀` }).success).toBe(false);
   });
 });

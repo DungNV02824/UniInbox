@@ -1,9 +1,19 @@
 'use client';
 
-import { useId, useState, type FormEvent } from 'react';
+import { useEffect, useId, useState, type FormEvent } from 'react';
 import Link from 'next/link';
 import { useMutation } from '@tanstack/react-query';
-import { AlertCircle, CircleCheck, Clock, ExternalLink, Info, Loader2, Search, Send } from 'lucide-react';
+import {
+  AlertCircle,
+  CircleCheck,
+  Clock,
+  Eraser,
+  ExternalLink,
+  Info,
+  Loader2,
+  Search,
+  Send,
+} from 'lucide-react';
 import {
   REENGAGE_LIMITS,
   type ReengageConversationItem,
@@ -15,27 +25,83 @@ import { Button } from '@/components/ui/button';
 import { Dialog } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Textarea } from '@/components/ui/textarea';
 import {
   excerptText,
   formatWaitingSince,
+  guidanceBody,
+  guidanceError,
+  guidanceLength,
   inboxConversationHref,
   initialSelection,
   isAllSelected,
   isStartResultError,
+  loadReengageGuidance,
   parseReengageDays,
   previewSummaryText,
   reengageErrorText,
+  saveReengageGuidance,
   selectedIds,
   selectionCapText,
   skippedText,
   startResultText,
   toggleSelection,
+  EMPTY_REENGAGE_GUIDANCE,
+  type ReengageGuidanceDraft,
 } from '@/lib/chatbot-reengage';
 import { chatbotsApi } from '@/lib/chatbots-api';
 import { CHANNEL_TYPE_LABELS } from '@/lib/inbox-format';
 import { useNow } from '@/lib/use-now';
 
 const MAX = REENGAGE_LIMITS.maxPerRun;
+const GUIDANCE_MAX = REENGAGE_LIMITS.guidanceMaxChars;
+
+/** Một ô chỉ dẫn gõ tay (nhãn + textarea + gợi ý/bộ đếm ký tự). */
+function GuidanceField({
+  id,
+  label,
+  hint,
+  placeholder,
+  value,
+  onChange,
+  disabled,
+}: {
+  id: string;
+  label: string;
+  hint: string;
+  placeholder: string;
+  value: string;
+  onChange: (value: string) => void;
+  disabled: boolean;
+}) {
+  const hintId = `${id}-hint`;
+  const error = guidanceError(value);
+  return (
+    <div className="flex flex-col gap-1.5">
+      <Label htmlFor={id}>{label}</Label>
+      <Textarea
+        id={id}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        rows={4}
+        className="max-h-64 min-h-24 resize-y"
+        aria-invalid={!!error}
+        aria-describedby={hintId}
+        disabled={disabled}
+      />
+      <p
+        id={hintId}
+        className={`flex justify-between gap-3 text-xs ${error ? 'text-destructive' : 'text-muted-foreground'}`}
+      >
+        <span>{error ?? hint}</span>
+        <span className="shrink-0 tabular-nums">
+          {guidanceLength(value)}/{GUIDANCE_MAX}
+        </span>
+      </p>
+    </div>
+  );
+}
 
 function channelText(item: ReengageConversationItem): string {
   return `${CHANNEL_TYPE_LABELS[item.channelType] ?? item.channelType} · ${item.channelName}`;
@@ -142,13 +208,23 @@ export function ReengageDialog({
   const [days, setDays] = useState(String(REENGAGE_LIMITS.daysDefault));
   const [daysError, setDaysError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  // Hai ô chỉ dẫn gõ tay: nhớ bản gõ lần trước của bot này (chỉ trên trình duyệt này) để sửa tiếp.
+  const [guidance, setGuidance] = useState<ReengageGuidanceDraft>(() => loadReengageGuidance(chatbotId));
   const now = new Date(useNow(60_000));
+
+  useEffect(() => {
+    saveReengageGuidance(chatbotId, guidance);
+  }, [chatbotId, guidance]);
 
   const preview = useMutation<ReengagePreview, unknown, number>({
     mutationFn: (n) => chatbotsApi.reengagePreview(chatbotId, { days: n }),
     onSuccess: (data) => setSelected(initialSelection(data.eligible, MAX)),
   });
-  const start = useMutation<ReengageStartResult, unknown, { days: number; conversationIds: string[] }>({
+  const start = useMutation<
+    ReengageStartResult,
+    unknown,
+    { days: number; conversationIds: string[]; rules?: string; content?: string }
+  >({
     mutationFn: (body) => chatbotsApi.reengageStart(chatbotId, body),
   });
 
@@ -158,6 +234,10 @@ export function ReengageDialog({
   const eligible = data?.eligible ?? [];
   const ids = selectedIds(selected, eligible);
   const allChecked = isAllSelected(selected, eligible, MAX);
+  const guidanceInvalid = !!guidanceError(guidance.rules) || !!guidanceError(guidance.content);
+  const hasGuidance = !!guidance.rules.trim() || !!guidance.content.trim();
+  // Chỉ dẫn đã gửi kèm lần "Bắt đầu" vừa rồi (để báo khách đã xếp hàng từ trước vẫn dùng chỉ dẫn cũ).
+  const sentGuidance = !!start.variables && (!!start.variables.rules || !!start.variables.content);
 
   function onCheck(e: FormEvent) {
     e.preventDefault();
@@ -181,8 +261,8 @@ export function ReengageDialog({
   }
 
   function onStart() {
-    if (!data || ids.length === 0 || busy || done) return;
-    start.mutate({ days: data.days, conversationIds: ids });
+    if (!data || ids.length === 0 || busy || done || guidanceInvalid) return;
+    start.mutate({ days: data.days, conversationIds: ids, ...guidanceBody(guidance) });
   }
 
   return (
@@ -231,6 +311,52 @@ export function ReengageDialog({
             `Từ ${REENGAGE_LIMITS.daysMin} đến ${REENGAGE_LIMITS.daysMax} ngày. Kiểm tra không gọi AI và không gửi tin.`}
         </p>
       </form>
+
+      <section className="flex flex-col gap-3" aria-labelledby={`${idPrefix}-guidance`}>
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex flex-col gap-0.5">
+            <h3 id={`${idPrefix}-guidance`} className="text-sm font-semibold">
+              Huấn luyện cho lần tái chăm sóc này
+            </h3>
+            <p className="text-xs text-muted-foreground">
+              Gõ tay cho từng chủ đề, áp dụng cho các khách bấm “Bắt đầu” lần này (không sửa Hướng dẫn của
+              bot). Để trống thì bot trả lời như bình thường. Nội dung gõ lần trước được giữ lại — kiểm tra
+              trước khi bắt đầu.
+            </p>
+          </div>
+          {hasGuidance && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="shrink-0"
+              disabled={busy}
+              onClick={() => setGuidance(EMPTY_REENGAGE_GUIDANCE)}
+            >
+              <Eraser aria-hidden />
+              Xóa nội dung
+            </Button>
+          )}
+        </div>
+        <GuidanceField
+          id={`${idPrefix}-rules`}
+          label="Quy tắc chăm sóc"
+          hint="Cách bot chăm sóc lại: giọng văn, điều nên/không nên nói. Ưu tiên hơn Hướng dẫn của bot trong lần này."
+          placeholder="Ví dụ: Xưng em, gọi anh/chị. Nhắn ngắn gọn, thân thiện, không hối thúc. Không báo giá cụ thể, mời khách để lại SĐT."
+          value={guidance.rules}
+          onChange={(rules) => setGuidance((g) => ({ ...g, rules }))}
+          disabled={busy}
+        />
+        <GuidanceField
+          id={`${idPrefix}-content`}
+          label="Nội dung chăm sóc lại"
+          hint="Chủ đề / thông tin bot cần nhắn khách lần này. Bot viết lại tự nhiên và vẫn trả lời tin khách đang chờ."
+          placeholder="Ví dụ: Tháng này bên em có chương trình tặng gói thiết kế 3D khi ký hợp đồng trước 30/11, mời anh/chị đặt lịch khảo sát miễn phí."
+          value={guidance.content}
+          onChange={(content) => setGuidance((g) => ({ ...g, content }))}
+          disabled={busy}
+        />
+      </section>
 
       <Alert>
         <Info aria-hidden />
@@ -323,6 +449,11 @@ export function ReengageDialog({
                 {skippedText(done.skipped) && (
                   <span className="text-xs text-muted-foreground">{skippedText(done.skipped)}</span>
                 )}
+                {sentGuidance && done.alreadyQueued > 0 && (
+                  <span className="text-xs text-muted-foreground">
+                    {done.alreadyQueued} khách đã xếp hàng từ lần bấm trước vẫn dùng chỉ dẫn của lần bấm đó.
+                  </span>
+                )}
               </AlertDescription>
             </Alert>
           )}
@@ -374,7 +505,12 @@ export function ReengageDialog({
           Đóng
         </Button>
         {data && eligible.length > 0 && !done && (
-          <Button type="button" variant="brand" onClick={onStart} disabled={busy || ids.length === 0}>
+          <Button
+            type="button"
+            variant="brand"
+            onClick={onStart}
+            disabled={busy || ids.length === 0 || guidanceInvalid}
+          >
             {start.isPending ? <Loader2 className="animate-spin" aria-hidden /> : <Send aria-hidden />}
             Bắt đầu ({ids.length} khách)
           </Button>

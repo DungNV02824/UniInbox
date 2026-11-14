@@ -568,7 +568,20 @@ export const REENGAGE_LIMITS = {
   spacingSec: 15,
   /** Tối đa số dòng mỗi danh sách trong kết quả kiểm tra (còn lại ⇒ truncated). */
   previewMaxItems: 300,
+  /** Độ dài tối đa (ký tự) của mỗi ô chỉ dẫn gõ tay: "Quy tắc chăm sóc" / "Nội dung chăm sóc lại". */
+  guidanceMaxChars: 4000,
 } as const;
+
+/** Ô chỉ dẫn gõ tay cho một lần tái chăm sóc: trim; rỗng ⇒ bỏ (undefined), bot trả lời như lượt thường. */
+// Đếm theo ký tự (code point, Array.from) — cùng cách với bộ đếm ở web và phần cắt ở core (emoji = 1 ký tự).
+const reengageGuidanceSchema = z
+  .string()
+  .trim()
+  .refine((v) => Array.from(v).length <= REENGAGE_LIMITS.guidanceMaxChars, {
+    message: `Tối đa ${REENGAGE_LIMITS.guidanceMaxChars} ký tự`,
+  })
+  .optional()
+  .transform((v) => (v ? v : undefined));
 
 const reengageDaysSchema = z.number().int().min(REENGAGE_LIMITS.daysMin).max(REENGAGE_LIMITS.daysMax);
 
@@ -580,8 +593,15 @@ export type ReengagePreviewRequest = z.infer<typeof reengagePreviewSchema>;
 export const reengageStartSchema = z.object({
   days: reengageDaysSchema,
   conversationIds: z.array(z.uuid()).min(1).max(REENGAGE_LIMITS.maxPerRun),
+  /**
+   * "Quy tắc chăm sóc" (admin gõ tay cho lần bấm này): cách bot chăm sóc lại — giọng văn, điều nên/không nên nói…
+   * Ưu tiên hơn Hướng dẫn của bot trong lượt này (không vượt quy tắc an toàn). Trống ⇒ không có.
+   */
+  rules: reengageGuidanceSchema,
+  /** "Nội dung chăm sóc lại" (admin gõ tay): chủ đề/thông tin bot cần nhắn khách lần này. Trống ⇒ không có. */
+  content: reengageGuidanceSchema,
 });
-export type ReengageStartRequest = z.infer<typeof reengageStartSchema>;
+export type ReengageStartRequest = z.input<typeof reengageStartSchema>;
 
 export interface ReengageConversationItem {
   conversationId: string;

@@ -250,8 +250,8 @@ describe('tái chăm sóc', () => {
       .where(and(eq(auditLogs.action, 'chatbot.reengage'), eq(auditLogs.entityId, bot.id)));
     expect(audits.map((a) => a.data)).toEqual(
       expect.arrayContaining([
-        { days: 15, requested: 4, queued: 2, alreadyQueued: 0, skipped: 2 },
-        { days: 15, requested: 1, queued: 0, alreadyQueued: 1, skipped: 0 },
+        { days: 15, requested: 4, queued: 2, alreadyQueued: 0, skipped: 2, rulesChars: 0, contentChars: 0 },
+        { days: 15, requested: 1, queued: 0, alreadyQueued: 1, skipped: 0, rulesChars: 0, contentChars: 0 },
       ]),
     );
     expect(llmCalls).toHaveLength(0);

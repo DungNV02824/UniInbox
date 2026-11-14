@@ -9,7 +9,7 @@ import {
 import { claimsHandoffInReply } from './handoff-claim';
 import { LlmError, type LlmClient, type LlmContent, type LlmRequest, type LlmResponse } from './llm';
 import { keywordHandoffReason, matchHandoffKeyword } from './prefilter';
-import { buildChatbotPrompt, llmTimeoutExtraMsForImages } from './prompt';
+import { buildChatbotPrompt, llmTimeoutExtraMsForImages, type ReengageGuidance } from './prompt';
 import { thinkingForSpeed } from './speed';
 import {
   boundToolArgsForLog,
@@ -74,6 +74,8 @@ export interface ChatbotTurnInput {
    * ghi chú "trả lời muộn, mở đầu bằng lời xin lỗi ngắn" (buildChatbotPrompt lateReplySince). Thiếu ⇒ lượt thường.
    */
   lateReplySince?: Date;
+  /** Lượt "Tái chăm sóc": chỉ dẫn admin gõ tay lúc bấm (buildChatbotPrompt reengageGuidance). Thiếu ⇒ không có. */
+  reengageGuidance?: ReengageGuidance;
 }
 
 /**
@@ -419,6 +421,7 @@ export async function runChatbotTurn(
       ...(notifiedKeyword ? { notifiedKeyword } : {}),
       ...(handoffContinues ? { handoffContinues } : {}),
       ...(input.lateReplySince ? { lateReplySince: input.lateReplySince } : {}),
+      ...(input.reengageGuidance ? { reengageGuidance: input.reengageGuidance } : {}),
     });
     const sleep = deps.sleep ?? defaultSleep;
     const request: LlmRequest = {

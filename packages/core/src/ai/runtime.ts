@@ -29,6 +29,7 @@ import type { MediaStorage } from '../media/types';
 import type { PipelineLogger } from '../pipeline/types';
 import type { RealtimePublisher } from '../realtime';
 import { toChatbotConfig } from './config';
+import type { ReengageGuidance } from './prompt';
 import {
   botCanSend,
   bubbleDelays,
@@ -791,6 +792,14 @@ async function runAiReplyJob(
     const outcome = await runChatbotTurnAndCommit(db, deps, conv, bot, pending, {
       pendingOptions,
       reengage: reengage !== undefined,
+      ...(reengage?.rules || reengage?.content
+        ? {
+            reengageGuidance: {
+              ...(reengage.rules ? { rules: reengage.rules } : {}),
+              ...(reengage.content ? { content: reengage.content } : {}),
+            },
+          }
+        : {}),
     });
     botReplyQueued = outcome.botReplyQueued;
     return outcome.result;
@@ -806,7 +815,7 @@ async function runChatbotTurnAndCommit(
   conv: JobConversation,
   bot: NonNullable<JobConversation['bot']>,
   pending: readonly PendingMessage[],
-  turn: { pendingOptions: LoadPendingOptions; reengage: boolean },
+  turn: { pendingOptions: LoadPendingOptions; reengage: boolean; reengageGuidance?: ReengageGuidance },
 ): Promise<{ result: AiReplyOutcome; botReplyQueued: boolean }> {
   const conversationId = conv.id;
   const triggerMessageIds = pending.map((m) => m.id);
@@ -831,6 +840,7 @@ async function runChatbotTurnAndCommit(
       businessHours,
       ...(images.length > 0 ? { images } : {}),
       ...(turn.reengage ? { lateReplySince: oldestSentAt(pending) ?? deps.ctx.now() } : {}),
+      ...(turn.reengageGuidance ? { reengageGuidance: turn.reengageGuidance } : {}),
     },
   );
 

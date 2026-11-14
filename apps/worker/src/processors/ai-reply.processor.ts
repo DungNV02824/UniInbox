@@ -8,6 +8,7 @@ import {
   maybeScheduleChatbotReply,
   processAiReplyJob,
   processHandoffReminderJob,
+  reengageGuidanceText,
   type AiKickJobData,
   type AiReplyJobData,
   type AiReplyJobOptions,
@@ -73,9 +74,21 @@ function jobOptions(
   if (!wakeup && !withReengage) return undefined;
   return {
     ...(wakeup ? { wakeup: true } : {}),
-    ...(withReengage
-      ? { reengage: { pendingMaxAgeHours: reengage.pendingMaxAgeHours, chatbotId: reengage.chatbotId } }
-      : {}),
+    ...(withReengage ? { reengage: reengageJobOptions(reengage) } : {}),
+  };
+}
+
+/** Tùy chọn tái chăm sóc cho core: chỉ dẫn gõ tay (rules/content) chuẩn hóa lại — dữ liệu job lạ không phình prompt. */
+function reengageJobOptions(
+  reengage: NonNullable<AiReplyJobData['reengage']>,
+): NonNullable<AiReplyJobOptions['reengage']> {
+  const rules = reengageGuidanceText(reengage.rules);
+  const content = reengageGuidanceText(reengage.content);
+  return {
+    pendingMaxAgeHours: reengage.pendingMaxAgeHours,
+    chatbotId: reengage.chatbotId,
+    ...(rules ? { rules } : {}),
+    ...(content ? { content } : {}),
   };
 }
 

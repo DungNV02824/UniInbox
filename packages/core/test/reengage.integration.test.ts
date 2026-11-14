@@ -369,8 +369,46 @@ describe('startChatbotReengage', () => {
       .from(auditLogs)
       .where(and(eq(auditLogs.action, 'chatbot.reengage'), eq(auditLogs.entityId, bot.id)));
     expect(audit).toMatchObject({ userId: t.admin.id, entity: 'chatbot' });
-    expect(audit!.data).toEqual({ days: 15, requested: 5, queued: 2, alreadyQueued: 0, skipped: 3 });
+    expect(audit!.data).toEqual({
+      days: 15,
+      requested: 5,
+      queued: 2,
+      alreadyQueued: 0,
+      skipped: 3,
+      rulesChars: 0,
+      contentChars: 0,
+    });
     expect(JSON.stringify(audit!.data)).not.toContain('riêng tư');
+  });
+
+  it('chỉ dẫn gõ tay (Quy tắc chăm sóc / Nội dung chăm sóc lại) đi theo job (trim, ô trống bỏ); audit chỉ ghi độ dài', async () => {
+    const bot = await createBot();
+    const a = await missed(bot, zalo, 3 * DAY);
+    const rec = fakeQueue();
+    await startChatbotReengage(
+      t.db,
+      ctx,
+      {
+        actorUserId: t.admin.id,
+        chatbotId: bot.id,
+        days: 15,
+        conversationIds: [a.id],
+        rules: '  Xưng em, nhắn ngắn gọn  ',
+        content: '   ',
+      },
+      rec.queue,
+    );
+    expect(rec.jobs[0]!.data.reengage).toEqual({
+      pendingMaxAgeHours: 15 * 24,
+      chatbotId: bot.id,
+      rules: 'Xưng em, nhắn ngắn gọn',
+    });
+    const [audit] = await t.db
+      .select()
+      .from(auditLogs)
+      .where(and(eq(auditLogs.action, 'chatbot.reengage'), eq(auditLogs.entityId, bot.id)));
+    expect(audit!.data).toMatchObject({ rulesChars: 22, contentChars: 0 });
+    expect(JSON.stringify(audit!.data)).not.toContain('Xưng em');
   });
 
   it('bấm lại khi job còn chờ ⇒ alreadyQueued (không đếm là đã xếp); preview sau đó chuyển sang khách tiếp theo', async () => {
@@ -423,7 +461,9 @@ describe('startChatbotReengage', () => {
       .from(auditLogs)
       .where(and(eq(auditLogs.action, 'chatbot.reengage'), eq(auditLogs.entityId, bot.id)));
     expect(audits.map((x) => x.data)).toEqual(
-      expect.arrayContaining([{ days: 15, requested: 2, queued: 1, alreadyQueued: 1, skipped: 0 }]),
+      expect.arrayContaining([
+        { days: 15, requested: 2, queued: 1, alreadyQueued: 1, skipped: 0, rulesChars: 0, contentChars: 0 },
+      ]),
     );
   });
 
@@ -552,6 +592,24 @@ describe('processAiReplyJob — lượt tái chăm sóc', () => {
     await processAiReplyJob(t.db, kit.deps, fresh.id);
     expect(kit.llm.calls).toHaveLength(2);
     expect(lastContextText(1)).not.toContain('CHƯA được ai trả lời');
+  });
+
+  it('job có Quy tắc chăm sóc + Nội dung chăm sóc lại ⇒ prompt lượt này có khối chỉ dẫn; systemInstruction không đổi', async () => {
+    const bot = await createBot();
+    const conv = await missed(bot, zalo, 2 * DAY, { text: 'Bên em còn nhận công trình không' });
+    const reengage = {
+      pendingMaxAgeHours: 15 * 24,
+      chatbotId: bot.id,
+      rules: 'Xưng em, gọi anh/chị; không báo giá cụ thể',
+      content: 'Mời khách đặt lịch khảo sát miễn phí trong tháng 11',
+    };
+    const out = await processAiReplyJob(t.db, kit.deps, conv.id, { reengage });
+    expect(out).toMatchObject({ status: 'done', decision: 'reply' });
+    const note = lastContextText(0);
+    expect(note).toContain('xin lỗi');
+    expect(note).toContain('Quy tắc chăm sóc:\nXưng em, gọi anh/chị; không báo giá cụ thể');
+    expect(note).toContain('Mời khách đặt lịch khảo sát miễn phí trong tháng 11');
+    expect(kit.llm.calls[0]!.systemInstruction).not.toContain('Quy tắc chăm sóc');
   });
 
   it('bị chặn (ngoài cửa sổ, đổi bot, đủ lượt/giờ) ⇒ KHÔNG coi tin là đã xử lý', async () => {

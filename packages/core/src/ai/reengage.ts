@@ -291,6 +291,25 @@ export interface StartReengageInput {
   chatbotId: string;
   days: number;
   conversationIds: readonly string[];
+  /** "Quy tắc chăm sóc" gõ tay cho lần bấm này (reengageGuidanceText chuẩn hóa); trống ⇒ không có. */
+  rules?: string;
+  /** "Nội dung chăm sóc lại" gõ tay cho lần bấm này; trống ⇒ không có. */
+  content?: string;
+}
+
+/**
+ * Chuẩn hóa ô chỉ dẫn gõ tay (Quy tắc chăm sóc / Nội dung chăm sóc lại): không phải chuỗi / chỉ khoảng trắng ⇒
+ * undefined; còn lại trim và cắt ≤ REENGAGE_LIMITS.guidanceMaxChars ký tự. Dùng cả lúc xếp job lẫn lúc worker đọc
+ * job (dữ liệu job lạ cũng không phình prompt).
+ */
+export function reengageGuidanceText(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const text = value.trim();
+  if (!text) return undefined;
+  const chars = Array.from(text);
+  return chars.length <= REENGAGE_LIMITS.guidanceMaxChars
+    ? text
+    : chars.slice(0, REENGAGE_LIMITS.guidanceMaxChars).join('').trimEnd();
 }
 
 /**
@@ -343,6 +362,8 @@ export async function startChatbotReengage(
   const now = ctx.now();
   const nowMs = now.getTime();
   const scheduledAt = now.toISOString();
+  const rules = reengageGuidanceText(input.rules);
+  const content = reengageGuidanceText(input.content);
   let queued = 0;
   let alreadyQueued = pending.size;
   let firstSlotMs: number | null = null;
@@ -364,7 +385,12 @@ export async function startChatbotReengage(
       data: {
         conversationId: item.conversationId,
         scheduledAt,
-        reengage: { pendingMaxAgeHours: input.days * 24, chatbotId: bot.id },
+        reengage: {
+          pendingMaxAgeHours: input.days * 24,
+          chatbotId: bot.id,
+          ...(rules ? { rules } : {}),
+          ...(content ? { content } : {}),
+        },
       },
     });
     if (!added) {
@@ -391,7 +417,16 @@ export async function startChatbotReengage(
     action: 'chatbot.reengage',
     entity: 'chatbot',
     entityId: bot.id,
-    data: { days: input.days, requested: ids.length, queued, alreadyQueued, skipped: result.skipped },
+    // Chỉ ghi có/không và độ dài chỉ dẫn gõ tay — không ghi nội dung.
+    data: {
+      days: input.days,
+      requested: ids.length,
+      queued,
+      alreadyQueued,
+      skipped: result.skipped,
+      rulesChars: rules ? Array.from(rules).length : 0,
+      contentChars: content ? Array.from(content).length : 0,
+    },
   });
   return result;
 }

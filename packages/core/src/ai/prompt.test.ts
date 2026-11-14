@@ -18,6 +18,7 @@ import {
   formatWaitDuration,
   handoffContinueTurnNote,
   lateReplyTurnNote,
+  reengageGuidanceNote,
   llmTimeoutExtraMsForImages,
   LLM_TIMEOUT_IMAGES_MAX_EXTRA_MS,
   notifyTurnNote,
@@ -864,6 +865,34 @@ describe('buildChatbotPrompt — lượt "Tái chăm sóc" (trả lời muộn)'
     const both = buildChatbotPrompt(input({ lateReplySince: since, notifiedKeyword: 'gấp' }));
     expect(lastPartText(both)).toBe(
       `${lastPartText(plain)} ${lateReplyTurnNote(since, now)} ${notifyTurnNote('gấp')}`,
+    );
+  });
+
+  it('reengageGuidance ⇒ khối chỉ dẫn của người quản trị nối SAU dòng bối cảnh; systemInstruction không đổi', () => {
+    const plain = buildChatbotPrompt(input());
+    const since = new Date(now.getTime() - 2 * 24 * 3_600_000);
+    const guided = buildChatbotPrompt(
+      input({ lateReplySince: since, reengageGuidance: { rules: 'Xưng em', content: 'Mời khảo sát' } }),
+    );
+    expect(guided.systemInstruction).toBe(plain.systemInstruction);
+    const text = lastPartText(guided);
+    expect(text.startsWith(`${lastPartText(plain)} ${lateReplyTurnNote(since, now)}\n`)).toBe(true);
+    expect(text).toContain('KHÔNG phải tin của người nhắn');
+    expect(text).toContain('Quy tắc chăm sóc:\nXưng em');
+    expect(text).toContain('Nội dung chăm sóc lại');
+    expect(text).toContain('Mời khảo sát');
+    expect(text.endsWith('(Hết chỉ dẫn của người quản trị.)')).toBe(true);
+  });
+
+  it('reengageGuidanceNote: chỉ ô có chữ; cả hai trống ⇒ null (prompt như cũ)', () => {
+    expect(reengageGuidanceNote(undefined)).toBeNull();
+    expect(reengageGuidanceNote({ rules: '  ', content: '' })).toBeNull();
+    const onlyContent = reengageGuidanceNote({ content: 'Ưu đãi tháng 11' })!;
+    expect(onlyContent).toContain('Ưu đãi tháng 11');
+    expect(onlyContent).not.toContain('Quy tắc chăm sóc:');
+    const plain = buildChatbotPrompt(input());
+    expect(lastPartText(buildChatbotPrompt(input({ reengageGuidance: { rules: ' ' } })))).toBe(
+      lastPartText(plain),
     );
   });
 

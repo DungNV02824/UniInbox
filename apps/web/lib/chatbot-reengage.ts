@@ -178,3 +178,71 @@ export function reengageErrorText(err: unknown, action: 'preview' | 'start'): st
     ? 'Không kiểm tra được. Vui lòng thử lại.'
     : 'Không bắt đầu được. Vui lòng thử lại.';
 }
+
+// ---------- Ô chỉ dẫn gõ tay: "Quy tắc chăm sóc" / "Nội dung chăm sóc lại" ----------
+
+export interface ReengageGuidanceDraft {
+  rules: string;
+  content: string;
+}
+
+export const EMPTY_REENGAGE_GUIDANCE: ReengageGuidanceDraft = { rules: '', content: '' };
+
+/** Khóa localStorage nhớ chỉ dẫn gõ lần trước theo từng bot (chỉ trên trình duyệt này). */
+export function reengageGuidanceStorageKey(chatbotId: string): string {
+  return `dezon:reengage-guidance:${chatbotId}`;
+}
+
+/** Số ký tự đếm như máy chủ (theo ký tự, không theo đơn vị UTF-16) — dùng cho bộ đếm "x/4000". */
+export function guidanceLength(text: string): number {
+  return Array.from(text.trim()).length;
+}
+
+/** Lỗi độ dài của một ô (null = hợp lệ). */
+export function guidanceError(text: string): string | null {
+  const max = REENGAGE_LIMITS.guidanceMaxChars;
+  return guidanceLength(text) > max ? `Tối đa ${max} ký tự.` : null;
+}
+
+/** Thân gửi kèm "Bắt đầu": chỉ ô có chữ (trim) — ô trống thì bỏ, bot trả lời như lượt thường. */
+export function guidanceBody(draft: ReengageGuidanceDraft): { rules?: string; content?: string } {
+  const rules = draft.rules.trim();
+  const content = draft.content.trim();
+  return { ...(rules ? { rules } : {}), ...(content ? { content } : {}) };
+}
+
+/** Đọc bản nháp đã lưu (JSON hỏng / thiếu ⇒ ô trống). */
+export function parseStoredGuidance(raw: string | null): ReengageGuidanceDraft {
+  if (!raw) return EMPTY_REENGAGE_GUIDANCE;
+  try {
+    const v: unknown = JSON.parse(raw);
+    if (!v || typeof v !== 'object') return EMPTY_REENGAGE_GUIDANCE;
+    const o = v as Record<string, unknown>;
+    return {
+      rules: typeof o.rules === 'string' ? o.rules : '',
+      content: typeof o.content === 'string' ? o.content : '',
+    };
+  } catch {
+    return EMPTY_REENGAGE_GUIDANCE;
+  }
+}
+
+/** Đọc chỉ dẫn đã lưu của bot; localStorage bị chặn (ẩn danh, chặn dữ liệu trang) ⇒ ô trống. */
+export function loadReengageGuidance(chatbotId: string): ReengageGuidanceDraft {
+  try {
+    return parseStoredGuidance(window.localStorage.getItem(reengageGuidanceStorageKey(chatbotId)));
+  } catch {
+    return EMPTY_REENGAGE_GUIDANCE;
+  }
+}
+
+/** Lưu chỉ dẫn của bot (cả hai trống ⇒ xóa khóa); lỗi lưu thì bỏ qua — chỉ là tiện ích. */
+export function saveReengageGuidance(chatbotId: string, draft: ReengageGuidanceDraft): void {
+  try {
+    const key = reengageGuidanceStorageKey(chatbotId);
+    if (!draft.rules.trim() && !draft.content.trim()) window.localStorage.removeItem(key);
+    else window.localStorage.setItem(key, JSON.stringify({ rules: draft.rules, content: draft.content }));
+  } catch {
+    // bỏ qua
+  }
+}

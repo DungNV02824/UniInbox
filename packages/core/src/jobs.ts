@@ -65,6 +65,10 @@ export interface AiReengageJobOptions {
   pendingMaxAgeHours: number;
   /** Bot admin đã chọn lúc bấm; hội thoại đổi bot ⇒ lượt bị bỏ (không nuốt tin). */
   chatbotId: string;
+  /** "Quy tắc chăm sóc" admin gõ tay lúc bấm (đã trim, ≤ REENGAGE_LIMITS.guidanceMaxChars); thiếu ⇒ không có. */
+  rules?: string;
+  /** "Nội dung chăm sóc lại" admin gõ tay lúc bấm (đã trim, ≤ guidanceMaxChars); thiếu ⇒ không có. */
+  content?: string;
 }
 export const AI_REPLY_JOB_NAME = 'reply';
 export const aiReplyJobId = (conversationId: string): string => `ai-${conversationId}`;

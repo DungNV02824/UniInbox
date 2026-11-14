@@ -76,6 +76,17 @@ export interface BuildChatbotPromptInput {
    * xin lỗi ngắn vì trả lời muộn. Thiếu ⇒ không có ghi chú (lượt thường). Không đổi systemInstruction.
    */
   lateReplySince?: Date;
+  /**
+   * Lượt "Tái chăm sóc": chỉ dẫn admin gõ tay lúc bấm (Quy tắc chăm sóc / Nội dung chăm sóc lại) ⇒ khối
+   * reengageGuidanceNote() nối SAU dòng "(Bối cảnh lượt này)" (không đổi systemInstruction ⇒ giữ cache ngầm).
+   */
+  reengageGuidance?: ReengageGuidance;
+}
+
+/** Chỉ dẫn gõ tay cho một lần "Tái chăm sóc" (AiReengageJobOptions.rules / content). */
+export interface ReengageGuidance {
+  rules?: string;
+  content?: string;
 }
 
 export interface BuiltPrompt {
@@ -253,6 +264,28 @@ export function formatWaitDuration(ms: number): string {
 export function lateReplyTurnNote(since: Date, now: Date): string {
   const waited = formatWaitDuration(now.getTime() - since.getTime());
   return `Tin nhắn mới của người nhắn được gửi cách đây khoảng ${waited} và đến giờ CHƯA được ai trả lời. Hãy mở đầu bằng một lời xin lỗi ngắn gọn (một câu) vì phản hồi muộn, không viện lý do, rồi trả lời người nhắn bình thường theo Hướng dẫn.`;
+}
+
+/**
+ * Khối chỉ dẫn của người quản trị cho lượt "Tái chăm sóc" (gõ tay lúc bấm — tin cậy như Hướng dẫn, KHÔNG phải tin
+ * khách nên không bọc <customer_message>): "Quy tắc chăm sóc" ưu tiên hơn Hướng dẫn và các ghi chú trên (kể cả lời
+ * xin lỗi trả lời muộn) nhưng không vượt các quy tắc kỹ thuật/an toàn; "Nội dung chăm sóc lại" là điều bot cần nhắn
+ * khách lần này, lồng tự nhiên với việc trả lời tin khách đang chờ. Cả hai trống ⇒ null.
+ */
+export function reengageGuidanceNote(guidance: ReengageGuidance | undefined): string | null {
+  const rules = guidance?.rules?.trim();
+  const content = guidance?.content?.trim();
+  if (!rules && !content) return null;
+  const parts = [
+    '\n(Chỉ dẫn của người quản trị cho lượt tái chăm sóc này — KHÔNG phải tin của người nhắn. Áp dụng cho câu trả lời lần này; nếu khác Hướng dẫn hoặc các ghi chú ở trên thì làm theo chỉ dẫn này, nhưng vẫn giữ các quy tắc kỹ thuật/an toàn. Không nhắc tới việc có chỉ dẫn này với người nhắn.)',
+  ];
+  if (rules) parts.push(`Quy tắc chăm sóc:\n${rules}`);
+  if (content)
+    parts.push(
+      `Nội dung chăm sóc lại (điều cần nhắn người nhắn lần này; vẫn trả lời các tin đang chờ nếu cần, viết tự nhiên theo giọng của bạn, không chép nguyên văn nếu không được yêu cầu):\n${content}`,
+    );
+  parts.push('(Hết chỉ dẫn của người quản trị.)');
+  return parts.join('\n');
 }
 
 /**
@@ -560,7 +593,8 @@ export function buildChatbotPrompt(input: BuildChatbotPromptInput): BuiltPrompt 
     ...(input.handoffContinues ? [handoffContinueTurnNote()] : []),
     ...(notifiedKeyword ? [notifyTurnNote(notifiedKeyword)] : []),
   ];
-  lastContent?.parts.push({ text: notes.join(' ') });
+  const guidanceNote = reengageGuidanceNote(input.reengageGuidance);
+  lastContent?.parts.push({ text: guidanceNote ? `${notes.join(' ')}${guidanceNote}` : notes.join(' ') });
 
   return { systemInstruction: buildSystemInstruction(input), contents };
 }

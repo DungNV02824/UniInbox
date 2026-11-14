@@ -51,6 +51,30 @@ describe('ai-reply processor', () => {
     expect(fields.reengage).toBe(true);
   });
 
+  it('job tái chăm sóc có chỉ dẫn gõ tay ⇒ truyền rules/content đã trim; giá trị lạ / rỗng bị bỏ', async () => {
+    const h = handlers();
+    const run = createAiReplyProcessor(h, createSilentLogger());
+    const base = { pendingMaxAgeHours: 360, chatbotId: 'bot-1' };
+    await run(
+      job(AI_REPLY_JOB_NAME, {
+        conversationId: 'c1',
+        scheduledAt: 'x',
+        reengage: { ...base, rules: '  Xưng em ', content: 'Mời khảo sát' },
+      }),
+    );
+    expect(h.reply).toHaveBeenLastCalledWith('c1', {
+      reengage: { ...base, rules: 'Xưng em', content: 'Mời khảo sát' },
+    });
+    await run(
+      job(AI_REPLY_JOB_NAME, {
+        conversationId: 'c2',
+        scheduledAt: 'x',
+        reengage: { ...base, rules: 42, content: '   ' },
+      }),
+    );
+    expect(h.reply).toHaveBeenLastCalledWith('c2', { reengage: base });
+  });
+
   it('job tái chăm sóc thiếu dữ liệu ⇒ bỏ qua, không chạy như lượt thường', async () => {
     const h = handlers();
     const run = createAiReplyProcessor(h, createSilentLogger());

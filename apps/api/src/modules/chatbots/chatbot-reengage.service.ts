@@ -82,7 +82,14 @@ export class ChatbotReengageService {
     return startChatbotReengage(
       this.db,
       this.ctx,
-      { actorUserId, chatbotId, days: input.days, conversationIds: input.conversationIds },
+      {
+        actorUserId,
+        chatbotId,
+        days: input.days,
+        conversationIds: input.conversationIds,
+        ...(input.rules ? { rules: input.rules } : {}),
+        ...(input.content ? { content: input.content } : {}),
+      },
       this.queue,
     );
   }

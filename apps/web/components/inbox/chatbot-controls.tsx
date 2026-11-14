@@ -1,5 +1,6 @@
 'use client';
 
+import { useState } from 'react';
 import { AlertTriangle, Bot, CheckCircle2, Hand, Loader2, PauseCircle, Play, Siren } from 'lucide-react';
 import { isAiPausedIndefinitely, type ConversationSummary } from '@dezon/shared';
 import { Button } from '@/components/ui/button';
@@ -27,6 +28,8 @@ import { useNow } from '@/lib/use-now';
 import { cn } from '@/lib/utils';
 
 const OFF = '';
+/** Tóm tắt dài hơn mức này (≈ 2 dòng ở khung chat hẹp) mới hiện nút "Xem thêm". */
+const SUMMARY_CLAMP_CHARS = 140;
 
 /**
  * Ô chọn nổi bật "🤖 Chatbot: Tắt / <tên bot>" ở đầu khung chat. Chỉ tô "đang bật" khi ai_mode auto; còn gắn
@@ -174,12 +177,15 @@ function HandoffBanner({ conversation: c }: { conversation: ConversationSummary 
   const now = useNow(30_000);
   const ack = useAckHandoff(c.id);
   const resolve = useResolveHandoff(c.id);
+  const [expanded, setExpanded] = useState(false);
   if (c.status !== 'pending_human') return null;
   const botNote = handoffBotNote(c, now);
   const h = c.handoff ?? null;
   const ackedBy = h?.acknowledgedBy ?? null;
   const busy = ack.isPending || resolve.isPending;
   const labels = handoffButtonLabels(c.chatbot);
+  const summary = h?.summary?.trim() || null;
+  const longSummary = !!summary && summary.length > SUMMARY_CLAMP_CHARS;
 
   return (
     <div
@@ -191,8 +197,32 @@ function HandoffBanner({ conversation: c }: { conversation: ConversationSummary 
         <div className="flex min-w-0 flex-col gap-0.5">
           <p className="font-semibold">
             Cần người: {h ? handoffReasonLabel(h.reasonCode) : 'Hội thoại đang chờ nhân viên xử lý'}
-            {h?.summary && <span className="font-normal"> — {h.summary}</span>}
           </p>
+          {summary && (
+            <div className="text-sm">
+              {/* Tóm tắt dài (bot cộng dồn nhiều lần chuyển) đẩy khung chat xuống: mặc định 2 dòng, mở ra thì
+                  cuộn trong khung có giới hạn chiều cao. */}
+              <p
+                className={cn(
+                  'break-words whitespace-pre-line',
+                  expanded ? 'max-h-60 overflow-y-auto pr-1' : 'line-clamp-2',
+                )}
+                title={expanded ? undefined : summary}
+              >
+                {summary}
+              </p>
+              {longSummary && (
+                <button
+                  type="button"
+                  className="mt-0.5 text-xs font-semibold text-blue-700 hover:underline"
+                  aria-expanded={expanded}
+                  onClick={() => setExpanded((v) => !v)}
+                >
+                  {expanded ? 'Thu gọn' : 'Xem thêm'}
+                </button>
+              )}
+            </div>
+          )}
           {ackedBy && (
             <p className="text-xs text-blue-800/80">
               {handoffAckedText(labels, ackedBy.id === user?.id ? 'bạn' : ackedBy.name)}
@@ -241,7 +271,8 @@ function HandoffBanner({ conversation: c }: { conversation: ConversationSummary 
 export function ConversationAiNotices({ conversation }: { conversation: ConversationSummary }) {
   return (
     <>
-      <HandoffBanner conversation={conversation} />
+      {/* key ⇒ đổi hội thoại thì banner thu gọn lại. */}
+      <HandoffBanner key={conversation.id} conversation={conversation} />
       <AiPausedNotice conversation={conversation} />
     </>
   );

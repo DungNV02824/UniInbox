@@ -6,6 +6,11 @@ import {
   excerptText,
   formatEstimatedMinutes,
   formatWaitingSince,
+  guidanceBody,
+  guidanceError,
+  guidanceLength,
+  parseStoredGuidance,
+  reengageGuidanceStorageKey,
   inboxConversationHref,
   initialSelection,
   isAllSelected,
@@ -148,5 +153,32 @@ describe('reengageErrorText', () => {
       'Số ngày không hợp lệ',
     );
     expect(reengageErrorText(new Error('x'), 'start')).toBe('Không bắt đầu được. Vui lòng thử lại.');
+  });
+});
+
+describe('ô chỉ dẫn gõ tay (Quy tắc chăm sóc / Nội dung chăm sóc lại)', () => {
+  it('guidanceBody chỉ gửi ô có chữ (trim)', () => {
+    expect(guidanceBody({ rules: '  ', content: '' })).toEqual({});
+    expect(guidanceBody({ rules: ' Xưng em ', content: '' })).toEqual({ rules: 'Xưng em' });
+    expect(guidanceBody({ rules: 'a', content: ' b ' })).toEqual({ rules: 'a', content: 'b' });
+  });
+
+  it('guidanceError / guidanceLength theo ký tự sau trim', () => {
+    const max = REENGAGE_LIMITS.guidanceMaxChars;
+    expect(guidanceLength('  ab  ')).toBe(2);
+    expect(guidanceError('x'.repeat(max))).toBeNull();
+    expect(guidanceError(`  ${'x'.repeat(max)}  `)).toBeNull();
+    expect(guidanceError('x'.repeat(max + 1))).toBe(`Tối đa ${max} ký tự.`);
+  });
+
+  it('parseStoredGuidance: JSON hỏng / thiếu / sai kiểu ⇒ ô trống', () => {
+    expect(parseStoredGuidance(null)).toEqual({ rules: '', content: '' });
+    expect(parseStoredGuidance('{oops')).toEqual({ rules: '', content: '' });
+    expect(parseStoredGuidance('"x"')).toEqual({ rules: '', content: '' });
+    expect(parseStoredGuidance('{"rules":"A","content":5}')).toEqual({ rules: 'A', content: '' });
+  });
+
+  it('khóa lưu riêng theo bot', () => {
+    expect(reengageGuidanceStorageKey('bot-1')).toBe('dezon:reengage-guidance:bot-1');
   });
 });
