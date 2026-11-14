@@ -18,6 +18,8 @@ import {
   CHATBOT_MAX_HANDOFF_MESSAGES,
   CHATBOT_MAX_REASON_CHARS,
   buildChatbotTools,
+  enabledCaptureFields,
+  enabledProjectLogFields,
   escalateArgsSchema,
   noReplyArgsSchema,
   replyArgsSchema,
@@ -127,7 +129,23 @@ function cleanBubbles(messages: readonly string[], max: number = CHATBOT_MAX_BUB
  */
 type MinConfidence = number | null;
 
-function replyDecision(messages: string[], confidence: number, minConfidence: MinConfidence): Decided {
+/** `captured` đã chuẩn hóa (normalizeCapturedArg) ⇒ mảnh trải vào Decided (thiếu ⇒ không có khóa). */
+const withCaptured = (captured: Record<string, string> | undefined): Pick<Decided, 'captured'> =>
+  captured ? { captured } : {};
+
+type ProjectLogEntries = Array<Record<string, string>>;
+
+/** `project_logs` đã chuẩn hóa (normalizeProjectLogsArg) ⇒ mảnh trải vào Decided (thiếu ⇒ không có khóa). */
+const withProjectLogs = (projectLogs: ProjectLogEntries | undefined): Pick<Decided, 'projectLogs'> =>
+  projectLogs ? { projectLogs } : {};
+
+function replyDecision(
+  messages: string[],
+  confidence: number,
+  minConfidence: MinConfidence,
+  captured?: Record<string, string>,
+  projectLogs?: ProjectLogEntries,
+): Decided {
   if (messages.length === 0) return errorDecision('AI trả lời rỗng');
   if (minConfidence !== null && confidence < minConfidence) {
     return {
@@ -137,9 +155,50 @@ function replyDecision(messages: string[], confidence: number, minConfidence: Mi
       // KHÔNG mang `messages`: với escalate, `messages` là tin GỬI khách (câu trả lời không chắc thì không gửi;
       // nội dung vẫn có trong toolCalls để xem log).
       confidence,
+      // Thông tin khách model điền vẫn đúng dù câu trả lời không chắc ⇒ vẫn thu thập (cả nhật ký công trình: công
+      // trình người nhắn gửi vẫn được ghi, nhân viên tiếp nhận).
+      ...withCaptured(captured),
+      ...withProjectLogs(projectLogs),
     };
   }
-  return { decision: 'reply', messages, confidence };
+  return {
+    decision: 'reply',
+    messages,
+    confidence,
+    ...withCaptured(captured),
+    ...withProjectLogs(projectLogs),
+  };
+}
+
+/**
+ * Chỉ giữ khóa của trường đang bật (enabledCaptureFields) — model có thể trả khóa lạ. Bot tắt thu thập / không còn
+ * khóa nào ⇒ undefined.
+ */
+export function filterCaptured(
+  captured: Record<string, string> | undefined,
+  chatbot: Pick<ChatbotConfig, 'capture'>,
+): Record<string, string> | undefined {
+  if (!captured) return undefined;
+  const keys = new Set(enabledCaptureFields(chatbot.capture).map((f) => f.key));
+  const out = Object.fromEntries(Object.entries(captured).filter(([k]) => keys.has(k)));
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * Nhật ký công trình: mỗi phần tử chỉ giữ khóa của trường đang bật (enabledProjectLogFields), bỏ phần tử không còn
+ * khóa nào. Bot tắt nhật ký / không còn phần tử nào ⇒ undefined.
+ */
+export function filterProjectLogs(
+  projectLogs: ProjectLogEntries | undefined,
+  chatbot: Pick<ChatbotConfig, 'capture'>,
+): ProjectLogEntries | undefined {
+  if (!projectLogs) return undefined;
+  const keys = new Set(enabledProjectLogFields(chatbot.capture).map((f) => f.key));
+  if (keys.size === 0) return undefined;
+  const out = projectLogs
+    .map((entry) => Object.fromEntries(Object.entries(entry).filter(([k]) => keys.has(k))))
+    .filter((entry) => Object.keys(entry).length > 0);
+  return out.length > 0 ? out : undefined;
 }
 
 /**
@@ -169,7 +228,13 @@ function decide(res: LlmResponse, minConfidence: MinConfidence): Decided {
     case 'reply': {
       const parsed = replyArgsSchema.safeParse(call.args);
       if (!parsed.success) return errorDecision('AI gọi reply với tham số không hợp lệ');
-      return replyDecision(cleanBubbles(parsed.data.messages), parsed.data.confidence, minConfidence);
+      return replyDecision(
+        cleanBubbles(parsed.data.messages),
+        parsed.data.confidence,
+        minConfidence,
+        parsed.data.captured,
+        parsed.data.project_logs,
+      );
     }
     case 'escalate': {
       const parsed = escalateArgsSchema.safeParse(call.args);
@@ -182,6 +247,8 @@ function decide(res: LlmResponse, minConfidence: MinConfidence): Decided {
         reasonCode: parsed.data.reason_code,
         summary,
         ...(messages.length > 0 ? { messages } : {}),
+        ...withCaptured(parsed.data.captured),
+        ...withProjectLogs(parsed.data.project_logs),
       };
     }
     case 'no_reply': {
@@ -190,6 +257,7 @@ function decide(res: LlmResponse, minConfidence: MinConfidence): Decided {
       return {
         decision: 'no_reply',
         reason: truncateAtWord(parsed.data.reason.trim(), CHATBOT_MAX_REASON_CHARS),
+        ...withCaptured(parsed.data.captured),
       };
     }
     default:
@@ -233,13 +301,16 @@ function autoHandoffSummary(bubbles: readonly string[]): string {
 }
 
 /** reply tự nói đã chuyển ⇒ escalate 'other', gửi chính các bong bóng đó (giờ đã đúng sự thật) thay handoffMessage. */
-function convertClaimToEscalate(bubbles: string[], confidence: number | undefined): Decided {
+function convertClaimToEscalate(claim: Decided): Decided {
+  const bubbles = claim.messages ?? [];
   return {
     decision: 'escalate',
     reasonCode: 'other',
     summary: autoHandoffSummary(bubbles),
     messages: bubbles,
-    ...(confidence !== undefined ? { confidence } : {}),
+    ...(claim.confidence !== undefined ? { confidence: claim.confidence } : {}),
+    ...withCaptured(claim.captured),
+    ...withProjectLogs(claim.projectLogs),
   };
 }
 
@@ -362,6 +433,12 @@ function toolCallEntries(response: LlmResponse): unknown[] {
  *    - Không có gì dùng được / tên lạ / args sai ⇒ decision 'error', reasonCode 'other', reason tiếng Việt.
  *    - Lỗi LLM sau khi hết lượt thử (hoặc lỗi không retryable) ⇒ decision 'error', reasonCode 'other',
  *      reason 'Lỗi gọi AI: <message>'.
+ * 3c. Bot bật "Thu thập thông tin": `captured` của tool đã gọi (reply / escalate / no_reply — kể cả reply bị đổi thành
+ *    escalate low_confidence hoặc "tự nói đã chuyển"; lần gọi lại không điền ⇒ dùng của lần đầu) ⇒
+ *    ChatbotTurnResult.captured, chỉ giữ khóa trường bật (filterCaptured). Lượt 'error' / "Không đạt" ⇒ không có.
+ * 3d. Bot bật "Nhật ký công trình": `project_logs` của reply / escalate (kể cả reply bị đổi thành escalate
+ *    low_confidence hoặc "tự nói đã chuyển"; lần gọi lại không điền ⇒ dùng của lần đầu) ⇒ ChatbotTurnResult.projectLogs,
+ *    mỗi phần tử chỉ giữ khóa trường bật (filterProjectLogs). Lượt no_reply / 'error' / "Không đạt" ⇒ không có.
  * 4. latencyMs = deps.now() cuối − đầu; toolCalls = [{ name, args }] model trả về; model = response.model.
  * Lượt "Không đạt" (input.staffRejectReason): bỏ bước 1/1b, tools = STAFF_REJECT_TOOLS (chỉ reply), không escalate
  * low_confidence, không chạy bước 3b ⇒ kết quả chỉ là 'reply' / 'error' (hoặc quyết định lạ nếu model vẫn gọi tool khác).
@@ -493,6 +570,9 @@ export async function runChatbotTurn(
         : null;
     let decided = decide(response, minConfidence);
     let finalModel = response.model || model;
+    // `captured` / `project_logs` của lần gọi đầu — giữ lại nếu lần gọi lại (bộ chặn 3b) không điền.
+    const firstCaptured = decided.captured;
+    const firstProjectLogs = decided.projectLogs;
 
     // 3b. reply tự nói đã chuyển cho người thật mà không gọi escalate ⇒ gọi lại một lần; vẫn vậy ⇒ tự chuyển.
     // Lượt khớp từ khóa báo nhân viên: nhân viên ĐÃ được báo thật ⇒ không chặn. Lượt sau (lịch sử có dòng [Hệ thống]
@@ -530,15 +610,28 @@ export async function runChatbotTurn(
       if (acceptable) {
         decided = retried!;
       } else {
-        decided = convertClaimToEscalate(claim.messages ?? [], claim.confidence);
+        decided = convertClaimToEscalate(claim);
         toolCalls.push({
           name: HANDOFF_CLAIM_GUARD,
           args: boundToolArgsForLog({ action: 'convert', reason_code: 'other', messages: decided.messages }),
         });
       }
     }
+    // Thu thập thông tin: chỉ trường bật của bot; lượt "Không đạt" (tool không có `captured`) và lượt lỗi thì bỏ.
+    const { captured: decidedCaptured, projectLogs: decidedProjectLogs, ...rest } = decided;
+    const captured =
+      staffRejectReason || decided.decision === 'error'
+        ? undefined
+        : filterCaptured(decidedCaptured ?? firstCaptured, chatbot);
+    // Nhật ký công trình: chỉ lượt reply / escalate (không no_reply / lỗi / "Không đạt"), chỉ trường bật.
+    const projectLogs =
+      staffRejectReason || (decided.decision !== 'reply' && decided.decision !== 'escalate')
+        ? undefined
+        : filterProjectLogs(decidedProjectLogs ?? firstProjectLogs, chatbot);
     return {
-      ...decided,
+      ...rest,
+      ...withCaptured(captured),
+      ...withProjectLogs(projectLogs),
       ...notified,
       usage,
       model: finalModel,

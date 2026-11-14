@@ -1,6 +1,7 @@
 // Kiểu dữ liệu thuần (không DB) dùng chung cho prompt/orchestrator/runtime.
 import type {
   AiHandoffMode,
+  CaptureConfig,
   ChatbotExampleDto,
   ChatbotTurnDecision,
   HandoffReasonCode,
@@ -44,6 +45,12 @@ export interface ChatbotConfig {
    * fixture cũ hợp lệ (thiếu ⇒ 'stop').
    */
   aiHandoffMode?: AiHandoffMode;
+  /**
+   * Tab "Thu thập thông tin": enabled + có trường bật ⇒ prompt thêm mục "# Thu thập thông tin" và 3 tool có thuộc
+   * tính tùy chọn `captured` (một chuỗi cho mỗi khóa trường bật). toChatbotConfig: chatbots.capture null / sai dạng
+   * ⇒ DEFAULT_CAPTURE_CONFIG (tắt).
+   */
+  capture: CaptureConfig;
 }
 
 /** Một tin trong lịch sử/tin mới, đã rút gọn cho prompt. */
@@ -134,6 +141,19 @@ export interface ChatbotTurnResult {
   notifiedKeyword?: string;
   /** Độ tự tin model báo trong reply (nếu có). */
   confidence?: number;
+  /**
+   * Thông tin khách model điền vào `captured` của tool đã gọi (reply / escalate / no_reply; kể cả reply bị đổi thành
+   * escalate low_confidence / "tự nói đã chuyển"): khóa trường bật ⇒ giá trị đã trim, bỏ rỗng, ≤ CAPTURE_LIMITS.valueMax.
+   * Thiếu ⇒ model không điền gì (hoặc bot tắt thu thập). Runtime ghi vào hồ sơ khách (applyCapturedFields).
+   */
+  captured?: Record<string, string>;
+  /**
+   * Nhật ký công trình model điền vào `project_logs` của reply / escalate (kể cả reply bị đổi thành escalate): mỗi
+   * phần tử một công trình, chỉ khóa trường bật (capture.projectLog), giá trị đã trim, bỏ rỗng; ≤
+   * PROJECT_LOG_LIMITS.maxEntriesPerTurn. Thiếu ⇒ không ghi (bot tắt nhật ký / no_reply / lỗi / "Không đạt"). Runtime
+   * ghi bảng project_logs (recordProjectLogs); Chat thử không ghi.
+   */
+  projectLogs?: Array<Record<string, string>>;
   usage: LlmUsage;
   model: string;
   latencyMs: number;

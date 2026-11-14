@@ -15,6 +15,7 @@ import { useToast } from '@/components/ui/toast';
 import { ApiError } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { channelsRefetchInterval } from '@/lib/channel-sync';
+import { applyContactUpdate } from '@/lib/contact-profile';
 import {
   channelsApi,
   inboxApi,
@@ -34,6 +35,7 @@ import {
   type MessagesData,
 } from '@/lib/inbox-cache';
 import { channelsKey, directoryKey, inboxKeys } from '@/lib/inbox-keys';
+import { looksLikeProjectLogs, withoutProjectLog } from '@/lib/project-logs';
 import {
   applyConversationUpdate,
   markReadLocally,
@@ -237,12 +239,7 @@ export function useUpdateContact(conversationId: string, contactId: string) {
         if (!old) return old;
         const contactDetail: ContactDetail = looksLikeContactDetail(data)
           ? { ...old.contactDetail, ...data }
-          : {
-              ...old.contactDetail,
-              ...(body.displayName !== undefined && { displayName: body.displayName }),
-              ...(body.notes !== undefined && { notes: body.notes }),
-              ...(body.tags !== undefined && { tags: body.tags }),
-            };
+          : applyContactUpdate(old.contactDetail, body, new Date().toISOString());
         return {
           ...old,
           contact: { ...old.contact, displayName: contactDetail.displayName },
@@ -262,5 +259,34 @@ export function useUpdateContact(conversationId: string, contactId: string) {
       }
       toast({ title: 'Không lưu được thông tin khách', description: errorText(err), variant: 'destructive' });
     },
+  });
+}
+
+/**
+ * Xóa một dòng Nhật ký công trình: bỏ khỏi khung ngay (lạc quan), lỗi thì trả lại + toast. Máy chủ trả danh sách
+ * mới ⇒ dùng luôn; trả 204 ⇒ tải lại chi tiết.
+ */
+export function useDeleteProjectLog(conversationId: string) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const key = inboxKeys.detail(conversationId);
+  return useMutation({
+    mutationFn: (logId: string) => inboxApi.deleteProjectLog(conversationId, logId),
+    onMutate: async (logId) => {
+      await qc.cancelQueries({ queryKey: key, exact: true });
+      const prev = qc.getQueryData<ConversationDetail>(key);
+      qc.setQueryData<ConversationDetail>(key, (old) => withoutProjectLog(old, logId));
+      return { prev };
+    },
+    onSuccess: (data) => {
+      if (looksLikeProjectLogs(data)) {
+        qc.setQueryData<ConversationDetail>(key, (old) => (old ? { ...old, projectLogs: data } : old));
+      }
+    },
+    onError: (err, _logId, ctx) => {
+      if (ctx?.prev) qc.setQueryData(key, ctx.prev);
+      toast({ title: 'Không xóa được dòng nhật ký', description: errorText(err), variant: 'destructive' });
+    },
+    onSettled: () => void qc.invalidateQueries({ queryKey: key, exact: true }),
   });
 }

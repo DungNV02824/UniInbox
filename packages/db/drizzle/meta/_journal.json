@@ -85,6 +85,20 @@
       "when": 1794422800294,
       "tag": "0011_ai_handoff_mode",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1794649105290,
+      "tag": "0012_contact_capture",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1794675084786,
+      "tag": "0013_project_logs",
+      "breakpoints": true
     }
   ]
 }

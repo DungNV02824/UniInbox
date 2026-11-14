@@ -290,15 +290,58 @@ export interface ContactIdentityDto {
   conversationId: string | null;
 }
 
+/** Một trường thông tin khách (ô Ghi chú tách trường): Nhu cầu + trường riêng bot thu thập / nhân viên sửa. */
+export interface ContactProfileFieldDto {
+  key: string;
+  label: string;
+  value: string;
+  /** 'ai' = bot điền (lượt sau bot được cập nhật); 'user' = nhân viên sửa tay (bot không ghi đè). */
+  source: 'ai' | 'user';
+  /** ISO. */
+  updatedAt: string;
+}
+
 export interface ContactDetail extends ContactRef {
   phone: string | null;
+  /**
+   * Nguồn của SĐT: 'ai' = bot điền (bot được cập nhật lại); 'user' = nhân viên sửa; null = có từ trước/hệ thống
+   * (vd. Zalo chia sẻ) — bot chỉ điền khi đang trống hoặc nguồn 'ai'.
+   */
+  phoneSource: 'ai' | 'user' | null;
   email: string | null;
   notes: string | null;
+  /** Theo thứ tự: 'need' trước, rồi các trường khác theo thời gian điền. */
+  profileFields: ContactProfileFieldDto[];
   identities: ContactIdentityDto[];
+}
+
+/** Một trường của dòng nhật ký công trình (theo thứ tự cấu hình lúc ghi). */
+export interface ProjectLogFieldDto {
+  key: string;
+  label: string;
+  value: string;
+}
+
+/**
+ * Một dòng "Nhật ký công trình": AI ghi khi bot xác nhận tiếp nhận một công trình người nhắn gửi (bot bật
+ * CaptureConfig.projectLog). messageIds = tin khách của lượt đó (ảnh…) + tin bot trả lời; anchorMessageId = tin để
+ * cuộn tới khi bấm (tin khách có ảnh sớm nhất của lượt, không có ảnh ⇒ tin khách sớm nhất). Tin bị xóa ⇒ id vẫn còn
+ * trong mảng (web bỏ qua id không thấy).
+ */
+export interface ProjectLogDto {
+  id: string;
+  conversationId: string;
+  fields: ProjectLogFieldDto[];
+  messageIds: string[];
+  anchorMessageId: string | null;
+  /** ISO. */
+  createdAt: string;
 }
 
 export interface ConversationDetail extends ConversationSummary {
   contactDetail: ContactDetail;
+  /** Nhật ký công trình của hội thoại, MỚI NHẤT trước, tối đa PROJECT_LOG_LIMITS.detailMaxItems dòng. */
+  projectLogs: ProjectLogDto[];
 }
 
 export interface Page<T> {
@@ -352,10 +395,32 @@ export const updateContactSchema = z
     displayName: z.string().trim().min(1).max(200).optional(),
     notes: z.string().max(5000).nullable().optional(),
     tags: z.array(z.string().trim().min(1).max(50)).max(30).optional(),
+    /** Nhân viên sửa SĐT ⇒ phoneSource 'user' (bot không ghi đè). Chuỗi rỗng / null ⇒ xóa. */
+    phone: z.string().trim().max(30).nullable().optional(),
+    /**
+     * Nhân viên sửa trường thông tin (khóa ⇒ giá trị): có chữ ⇒ lưu, source 'user'; rỗng/null ⇒ xóa trường.
+     * label: tên hiển thị khi trường chưa có (mặc định = khóa; 'need' ⇒ "Nhu cầu").
+     */
+    profileFields: z
+      .array(
+        z.object({
+          key: z.string().regex(/^[a-z][a-z0-9_]{0,31}$/),
+          label: z.string().trim().min(1).max(40).optional(),
+          value: z.string().trim().max(1000).nullable(),
+        }),
+      )
+      .max(10)
+      .optional(),
   })
-  .refine((v) => v.displayName !== undefined || v.notes !== undefined || v.tags !== undefined, {
-    message: 'Không có gì để cập nhật',
-  });
+  .refine(
+    (v) =>
+      v.displayName !== undefined ||
+      v.notes !== undefined ||
+      v.tags !== undefined ||
+      v.phone !== undefined ||
+      v.profileFields !== undefined,
+    { message: 'Không có gì để cập nhật' },
+  );
 export type UpdateContactRequest = z.infer<typeof updateContactSchema>;
 
 // ---------- Tin nhắn ----------

@@ -8,12 +8,13 @@ import {
   listMessagesQuerySchema,
   type MessageDto,
   type Page,
+  type ProjectLogDto,
   type SendMessageRequest,
   sendMessageSchema,
   type UpdateConversationRequest,
   updateConversationSchema,
 } from '@dezon/shared';
-import { Body, Controller, Get, HttpCode, HttpStatus, Patch, Post, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Patch, Post, Query } from '@nestjs/common';
 import { UuidParam } from '../../common/params';
 import { toViewer } from '../../common/viewer';
 import { ZodValidationPipe } from '../../common/zod-validation.pipe';
@@ -69,5 +70,16 @@ export class ConversationsController {
     @Body(new ZodValidationPipe(updateConversationSchema)) body: UpdateConversationRequest,
   ): Promise<ConversationSummary> {
     return this.inbox.update(toViewer(user), id, body);
+  }
+
+  /** Xóa một dòng "Nhật ký công trình"; 200 + nhật ký còn lại (mới nhất trước). */
+  @Delete(':id/project-logs/:logId')
+  @HttpCode(HttpStatus.OK)
+  deleteProjectLog(
+    @CurrentUser() user: AuthUser,
+    @UuidParam() id: string,
+    @UuidParam('logId') logId: string,
+  ): Promise<ProjectLogDto[]> {
+    return this.inbox.deleteProjectLog(toViewer(user), id, logId);
   }
 }

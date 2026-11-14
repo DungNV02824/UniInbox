@@ -20,6 +20,7 @@ const EXPECTED_TABLES = [
   'knowledge_chunks',
   'knowledge_documents',
   'messages',
+  'project_logs',
   'style_examples',
   'users',
 ];
@@ -121,6 +122,8 @@ describe('migrations', () => {
   it('migration ngược xóa sạch, sau đó chạy xuôi lại được', async () => {
     const files = await rollbackMigrations(url);
     expect(files).toEqual([
+      '0013_project_logs.sql',
+      '0012_contact_capture.sql',
       '0011_ai_handoff_mode.sql',
       '0010_handoff_action_messages.sql',
       '0009_bot_notify_agent_reply.sql',
@@ -146,6 +149,81 @@ describe('migrations', () => {
     expect(await vectorInstalled()).toBe(true);
   });
 
+  it('0013: bảng project_logs (cột, FK cascade/set null, index); rollback xóa bảng; chạy lại tạo lại', async () => {
+    const cols = `select column_name, data_type, udt_name, is_nullable, column_default from information_schema.columns
+       where table_name = 'project_logs'
+         and column_name in ('conversation_id', 'chatbot_id', 'ai_run_id', 'fields', 'message_ids', 'anchor_message_id')
+       order by column_name`;
+    const rows = await query<{
+      column_name: string;
+      data_type: string;
+      udt_name: string;
+      is_nullable: string;
+      column_default: string | null;
+    }>(cols);
+    expect(rows.map((c) => [c.column_name, c.data_type, c.udt_name, c.is_nullable])).toEqual([
+      ['ai_run_id', 'uuid', 'uuid', 'YES'],
+      ['anchor_message_id', 'uuid', 'uuid', 'YES'],
+      ['chatbot_id', 'uuid', 'uuid', 'YES'],
+      ['conversation_id', 'uuid', 'uuid', 'NO'],
+      ['fields', 'jsonb', 'jsonb', 'NO'],
+      ['message_ids', 'ARRAY', '_uuid', 'NO'],
+    ]);
+    expect(rows.find((c) => c.column_name === 'fields')?.column_default).toContain("'[]'");
+
+    // 'c' = ON DELETE CASCADE, 'n' = ON DELETE SET NULL
+    const fks = await query<{ conname: string; confdeltype: string }>(
+      `select conname, confdeltype from pg_constraint
+       where conrelid = 'project_logs'::regclass and contype = 'f' order by conname`,
+    );
+    expect(fks).toEqual([
+      { conname: 'project_logs_ai_run_id_ai_runs_id_fk', confdeltype: 'n' },
+      { conname: 'project_logs_chatbot_id_chatbots_id_fk', confdeltype: 'n' },
+      { conname: 'project_logs_conversation_id_conversations_id_fk', confdeltype: 'c' },
+    ]);
+    const idx = "select indexdef from pg_indexes where indexname = 'project_logs_conversation_created_idx'";
+    const [index] = await query<{ indexdef: string }>(idx);
+    expect(index?.indexdef).toMatch(/\(conversation_id, created_at\)/);
+
+    expect(await rollbackMigrations(url, 1)).toEqual(['0013_project_logs.sql']);
+    expect(await publicTables()).toEqual(EXPECTED_TABLES.filter((t) => t !== 'project_logs'));
+    await runMigrations(url);
+    expect(await publicTables()).toEqual(EXPECTED_TABLES);
+    expect(await query(idx)).toHaveLength(1);
+  });
+
+  it('0012: cột capture (bot) + phone_source, profile_fields (khách); rollback gỡ, giữ bot/khách; chạy lại ⇒ mặc định', async () => {
+    const cols = `select table_name, column_name, data_type, is_nullable from information_schema.columns
+       where (table_name = 'chatbots' and column_name = 'capture')
+          or (table_name = 'contacts' and column_name in ('phone_source', 'profile_fields'))
+       order by table_name, column_name`;
+    expect(await query(cols)).toEqual([
+      { table_name: 'chatbots', column_name: 'capture', data_type: 'jsonb', is_nullable: 'YES' },
+      { table_name: 'contacts', column_name: 'phone_source', data_type: 'text', is_nullable: 'YES' },
+      { table_name: 'contacts', column_name: 'profile_fields', data_type: 'jsonb', is_nullable: 'NO' },
+    ]);
+    await query(
+      `insert into chatbots (name, capture) values ('Bot 0012', '{"enabled":true,"fields":[],"phoneTag":null}')`,
+    );
+    await query(
+      `insert into contacts (display_name, phone, phone_source, profile_fields) values ('Khách 0012', '0912345678', 'ai', '{"need":{"label":"Nhu cầu","value":"Xây nhà","source":"ai","updatedAt":"2026-11-14T00:00:00.000Z"}}')`,
+    );
+
+    expect(await rollbackMigrations(url, 2)).toEqual(['0013_project_logs.sql', '0012_contact_capture.sql']);
+    expect(await query(cols)).toEqual([]);
+    expect(await query("select name from chatbots where name = 'Bot 0012'")).toHaveLength(1);
+    expect(await query("select phone from contacts where display_name = 'Khách 0012'")).toEqual([
+      { phone: '0912345678' },
+    ]);
+    await runMigrations(url);
+    expect(await query("select capture from chatbots where name = 'Bot 0012'")).toEqual([{ capture: null }]);
+    expect(
+      await query("select phone_source, profile_fields from contacts where display_name = 'Khách 0012'"),
+    ).toEqual([{ phone_source: null, profile_fields: {} }]);
+    await query("delete from chatbots where name = 'Bot 0012'");
+    await query("delete from contacts where display_name = 'Khách 0012'");
+  });
+
   it("0011: cột ai_handoff_mode ('stop' mặc định) + CHECK; rollback gỡ, giữ bot; chạy lại ⇒ 'stop'", async () => {
     const cols = `select column_name, data_type, is_nullable, column_default from information_schema.columns
        where table_name = 'chatbots' and column_name = 'ai_handoff_mode'`;
@@ -159,7 +237,11 @@ describe('migrations', () => {
     ).rejects.toThrow(/chatbots_ai_handoff_mode_check/);
     await query("insert into chatbots (name, ai_handoff_mode) values ('Bot 0011', 'continue')");
 
-    expect(await rollbackMigrations(url, 1)).toEqual(['0011_ai_handoff_mode.sql']);
+    expect(await rollbackMigrations(url, 3)).toEqual([
+      '0013_project_logs.sql',
+      '0012_contact_capture.sql',
+      '0011_ai_handoff_mode.sql',
+    ]);
     expect(await query(cols)).toEqual([]);
     expect(await query(checks)).toEqual([]);
     expect(await query("select name from chatbots where name = 'Bot 0011'")).toHaveLength(1);
@@ -181,7 +263,9 @@ describe('migrations', () => {
     await query(
       "insert into chatbots (name, handoff_ack_message) values ('Bot tin nút', 'Dạ {ten_khach} chờ em chút ạ')",
     );
-    expect(await rollbackMigrations(url, 2)).toEqual([
+    expect(await rollbackMigrations(url, 4)).toEqual([
+      '0013_project_logs.sql',
+      '0012_contact_capture.sql',
       '0011_ai_handoff_mode.sql',
       '0010_handoff_action_messages.sql',
     ]);
@@ -241,7 +325,9 @@ describe('migrations', () => {
       `insert into chatbots (name, notify_keywords, agent_reply_mode, agent_pause_minutes, handoff_reminder_min)
        values ('Bot 0009', '{bảo hành}', 'stop', 15, 30)`,
     );
-    expect(await rollbackMigrations(url, 3)).toEqual([
+    expect(await rollbackMigrations(url, 5)).toEqual([
+      '0013_project_logs.sql',
+      '0012_contact_capture.sql',
       '0011_ai_handoff_mode.sql',
       '0010_handoff_action_messages.sql',
       '0009_bot_notify_agent_reply.sql',
@@ -266,7 +352,9 @@ describe('migrations', () => {
        and column_name in ('handoff_ack_label', 'handoff_resolve_label', 'handoff_action_lark') order by column_name`;
     await query("insert into chatbots (name, handoff_ack_label) values ('Bot nút', 'Nghiệm thu')");
     expect(await query(cols)).toHaveLength(3);
-    expect(await rollbackMigrations(url, 4)).toEqual([
+    expect(await rollbackMigrations(url, 6)).toEqual([
+      '0013_project_logs.sql',
+      '0012_contact_capture.sql',
       '0011_ai_handoff_mode.sql',
       '0010_handoff_action_messages.sql',
       '0009_bot_notify_agent_reply.sql',
@@ -284,14 +372,18 @@ describe('migrations', () => {
   });
 
   it('0007: rollback gỡ contact_tags, giữ contacts.tags; chạy lại seed nhãn sẵn có (bỏ trùng hoa thường)', async () => {
-    expect(await rollbackMigrations(url, 5)).toEqual([
+    expect(await rollbackMigrations(url, 7)).toEqual([
+      '0013_project_logs.sql',
+      '0012_contact_capture.sql',
       '0011_ai_handoff_mode.sql',
       '0010_handoff_action_messages.sql',
       '0009_bot_notify_agent_reply.sql',
       '0008_handoff_buttons.sql',
       '0007_contact_tags.sql',
     ]);
-    expect(await publicTables()).toEqual(EXPECTED_TABLES.filter((t) => t !== 'contact_tags'));
+    expect(await publicTables()).toEqual(
+      EXPECTED_TABLES.filter((t) => t !== 'contact_tags' && t !== 'project_logs'),
+    );
     await query(
       `insert into contacts (display_name, tags, created_at) values
        ('Khách A', '{VIP,Sofa}', now() - interval '2 day'),
@@ -326,7 +418,9 @@ describe('migrations', () => {
     await query("insert into chatbots (name) values ('Bot tốc độ')");
     expect((await query<{ n: number }>(col))[0]?.n).toBe(1);
     expect((await query<{ n: number }>(chk))[0]?.n).toBe(1);
-    expect(await rollbackMigrations(url, 6)).toEqual([
+    expect(await rollbackMigrations(url, 8)).toEqual([
+      '0013_project_logs.sql',
+      '0012_contact_capture.sql',
       '0011_ai_handoff_mode.sql',
       '0010_handoff_action_messages.sql',
       '0009_bot_notify_agent_reply.sql',
@@ -350,7 +444,9 @@ describe('migrations', () => {
       "select count(*)::int as n from information_schema.columns where table_name = 'chatbots' and column_name = 'escalate_when_unsure'";
     await query("insert into chatbots (name) values ('Bot giữ lại')");
     expect((await query<{ n: number }>(col))[0]?.n).toBe(1);
-    expect(await rollbackMigrations(url, 7)).toEqual([
+    expect(await rollbackMigrations(url, 9)).toEqual([
+      '0013_project_logs.sql',
+      '0012_contact_capture.sql',
       '0011_ai_handoff_mode.sql',
       '0010_handoff_action_messages.sql',
       '0009_bot_notify_agent_reply.sql',
@@ -393,7 +489,9 @@ describe('migrations', () => {
       { conname: 'conversations_chatbot_id_chatbots_id_fk', confdeltype: 'n' },
     ]);
 
-    expect(await rollbackMigrations(url, 8)).toEqual([
+    expect(await rollbackMigrations(url, 10)).toEqual([
+      '0013_project_logs.sql',
+      '0012_contact_capture.sql',
       '0011_ai_handoff_mode.sql',
       '0010_handoff_action_messages.sql',
       '0009_bot_notify_agent_reply.sql',
@@ -405,7 +503,9 @@ describe('migrations', () => {
     ]);
     expect(await query(cols)).toEqual([]);
     expect(await publicTables()).toEqual(
-      EXPECTED_TABLES.filter((t) => t !== 'chatbots' && t !== 'app_settings' && t !== 'contact_tags'),
+      EXPECTED_TABLES.filter(
+        (t) => t !== 'chatbots' && t !== 'app_settings' && t !== 'contact_tags' && t !== 'project_logs',
+      ),
     );
     await runMigrations(url);
     expect(await publicTables()).toEqual(EXPECTED_TABLES);
@@ -464,7 +564,9 @@ describe('migrations', () => {
     const col =
       "select count(*)::int as n from information_schema.columns where table_name = 'messages' and column_name = 'client_id'";
     expect((await query<{ n: number }>(col))[0]?.n).toBe(1);
-    expect(await rollbackMigrations(url, 9)).toEqual([
+    expect(await rollbackMigrations(url, 11)).toEqual([
+      '0013_project_logs.sql',
+      '0012_contact_capture.sql',
       '0011_ai_handoff_mode.sql',
       '0010_handoff_action_messages.sql',
       '0009_bot_notify_agent_reply.sql',
@@ -485,7 +587,9 @@ describe('migrations', () => {
     const fk =
       "select count(*)::int as n from pg_constraint where conname = 'messages_conversation_channel_account_fk'";
     expect((await query<{ n: number }>(fk))[0]?.n).toBe(1);
-    expect(await rollbackMigrations(url, 10)).toEqual([
+    expect(await rollbackMigrations(url, 12)).toEqual([
+      '0013_project_logs.sql',
+      '0012_contact_capture.sql',
       '0011_ai_handoff_mode.sql',
       '0010_handoff_action_messages.sql',
       '0009_bot_notify_agent_reply.sql',
@@ -504,7 +608,7 @@ describe('migrations', () => {
   });
 
   it('rollback mười một bước giữ extension và cho phép chạy lại 0001', async () => {
-    await rollbackMigrations(url, 11);
+    await rollbackMigrations(url, 13);
     expect(await publicTables()).toEqual([]);
     expect(await vectorInstalled()).toBe(true);
     await runMigrations(url);

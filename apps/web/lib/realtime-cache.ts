@@ -160,3 +160,14 @@ export function patchConversationEverywhere(
     for (const [key, data] of prevLists) qc.setQueryData(key, data);
   };
 }
+
+/**
+ * Tải lại chi tiết hội thoại (gồm hồ sơ khách: SĐT, trường bot điền, nhãn) khi đã có trong cache — bản tóm tắt
+ * của `conversation.updated` không mang các trường này. Chỉ hội thoại đang mở mới gọi API (refetch 'active');
+ * bản không mở chỉ bị đánh dấu cũ.
+ */
+export function refreshConversationDetail(qc: QueryClient, conversationId: string): void {
+  const queryKey = inboxKeys.detail(conversationId);
+  if (!qc.getQueryState(queryKey)) return;
+  void qc.invalidateQueries({ queryKey, exact: true }).catch(() => undefined);
+}

@@ -11,8 +11,11 @@ import {
   type ChannelAccount,
 } from '@dezon/db';
 import {
+  DEFAULT_CAPTURE_CONFIG,
+  DEFAULT_PROJECT_LOG_CONFIG,
   DEFAULT_HANDOFF_ACK_LABEL,
   DEFAULT_HANDOFF_RESOLVE_LABEL,
+  type CaptureConfig,
   type NormalizedInboundMessage,
 } from '@dezon/shared';
 import { and, eq } from 'drizzle-orm';
@@ -265,6 +268,40 @@ describe('CRUD chatbot', () => {
       .from(auditLogs)
       .where(and(eq(auditLogs.action, 'chatbot.update'), eq(auditLogs.entityId, bot.id)));
     expect(log!.data).toEqual({ fields: ['agentReplyMode', 'agentPauseMinutes'] });
+  });
+
+  it('"Thu thập thông tin": bot mới / NULL / dữ liệu hỏng ⇒ DEFAULT_CAPTURE_CONFIG; PATCH capture ⇒ lưu và trả lại', async () => {
+    const bot = await createChatbot(t.db, t.admin.id, { name: 'Bot Thu Thập' });
+    expect(bot.capture).toEqual(DEFAULT_CAPTURE_CONFIG);
+    const capture: CaptureConfig = {
+      enabled: true,
+      fields: [
+        ...DEFAULT_CAPTURE_CONFIG.fields,
+        { key: 'khu_vuc', label: 'Khu vực', hint: 'Quận/huyện', enabled: true },
+      ],
+      phoneTag: 'Tiềm năng',
+      projectLog: DEFAULT_PROJECT_LOG_CONFIG,
+    };
+    expect((await updateChatbot(t.db, t.admin.id, bot.id, { capture })).capture).toEqual(capture);
+    const [row] = await t.db
+      .select({ capture: chatbots.capture })
+      .from(chatbots)
+      .where(eq(chatbots.id, bot.id));
+    expect(row!.capture).toEqual(capture);
+    const [log] = await t.db
+      .select()
+      .from(auditLogs)
+      .where(and(eq(auditLogs.action, 'chatbot.update'), eq(auditLogs.entityId, bot.id)));
+    expect(log!.data).toEqual({ fields: ['capture'] });
+
+    const created = await createChatbot(t.db, t.admin.id, { name: 'Bot Thu Thập 2', capture });
+    expect(created.capture).toEqual(capture);
+
+    await t.db
+      .update(chatbots)
+      .set({ capture: { enabled: true } as unknown as CaptureConfig })
+      .where(eq(chatbots.id, bot.id));
+    expect((await getChatbot(t.db, bot.id)).capture).toEqual(DEFAULT_CAPTURE_CONFIG);
   });
 
   it('từ khóa ở cả hai danh sách ⇒ InboxValidationError; PATCH kiểm trên giá trị đang lưu + patch', async () => {

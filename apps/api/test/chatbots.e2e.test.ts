@@ -30,6 +30,8 @@ import {
   type ChatbotTestResult,
   type ConversationSummary,
   DEFAULT_BUSINESS_HOURS,
+  DEFAULT_CAPTURE_CONFIG,
+  DEFAULT_PROJECT_LOG_CONFIG,
   HANDOFF_MESSAGE_CONTACT_PLACEHOLDER,
   type LarkSettingsDto,
   type LoginResponse,
@@ -385,6 +387,49 @@ describe('CRUD chatbot', () => {
       agentPauseMinutes: CHATBOT_LIMITS.agentPauseMinutesMax,
     });
     expect(other.json<ChatbotDto>()).toMatchObject({ ...expected, agentPauseMinutes: 1440 });
+  });
+
+  it('capture ("Thu thập thông tin"): mặc định tắt, tạo/sửa, PATCH khác giữ nguyên; sai dạng => 400', async () => {
+    const plain = await createBot({ name: 'Bot thu thập mặc định' });
+    expect(plain.capture).toEqual(DEFAULT_CAPTURE_CONFIG);
+    const capture = {
+      enabled: true,
+      fields: [
+        { key: 'phone', label: 'SĐT', hint: '', enabled: true },
+        { key: 'need', label: 'Nhu cầu', hint: 'Tóm tắt', enabled: false },
+        { key: 'khu_vuc', label: ' Khu vực ', enabled: true },
+      ],
+      phoneTag: 'Tiềm năng',
+    };
+    const expected = {
+      ...capture,
+      fields: [
+        capture.fields[0],
+        capture.fields[1],
+        { key: 'khu_vuc', label: 'Khu vực', hint: '', enabled: true },
+      ],
+      // Không gửi projectLog ⇒ mặc định Nhật ký công trình (tắt, 4 trường có sẵn).
+      projectLog: DEFAULT_PROJECT_LOG_CONFIG,
+    };
+    const bot = await createBot({ name: 'Bot thu thập', capture });
+    expect(bot.capture).toEqual(expected);
+    const patched = await asAdmin('PATCH', `/chatbots/${plain.id}`, { capture });
+    expect(patched.statusCode).toBe(200);
+    expect(patched.json<ChatbotDto>().capture).toEqual(expected);
+    const other = await asAdmin('PATCH', `/chatbots/${plain.id}`, { handoffReminderMin: 3 });
+    expect(other.json<ChatbotDto>().capture).toEqual(expected);
+
+    const BAD: unknown[] = [
+      { ...capture, fields: capture.fields.filter((f) => f.key !== 'need') },
+      { ...capture, fields: [...capture.fields, capture.fields[2]] },
+      { ...capture, fields: [...capture.fields, { key: 'Sai Khoa', label: 'x' }] },
+      { ...capture, phoneTag: '' },
+      { enabled: 'yes', fields: capture.fields, phoneTag: null },
+    ];
+    for (const bad of BAD) {
+      expect((await asAdmin('PATCH', `/chatbots/${plain.id}`, { capture: bad })).statusCode).toBe(400);
+    }
+    expect((await asAdmin('GET', `/chatbots/${plain.id}`)).json<ChatbotDto>().capture).toEqual(expected);
   });
 
   it("aiHandoffMode: mặc định 'stop', tạo/sửa 'continue', đọc lại; giá trị lạ => 400", async () => {

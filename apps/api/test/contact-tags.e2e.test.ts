@@ -131,10 +131,50 @@ describe('/contact-tags', () => {
     expect(ok.json<ContactDetail>().tags).toEqual(['VIP']);
     // Danh sách hộp thư đang mở thấy tag mới ngay (summary có contact.tags).
     expect(conversationTagEvents(spy)).toEqual([{ id: seed.agentConversationId, tags: ['VIP'] }]);
-    // Chỉ sửa ghi chú ⇒ không phát conversation.updated.
+    // Chỉ sửa ghi chú ⇒ vẫn phát conversation.updated (máy khác đang mở tải lại hồ sơ khách).
     spy.mockClear();
     expect((await asAgent('PATCH', `/contacts/${contactId}`, { notes: 'n' })).statusCode).toBe(200);
-    expect(conversationTagEvents(spy)).toEqual([]);
+    expect(conversationTagEvents(spy)).toEqual([{ id: seed.agentConversationId, tags: ['VIP'] }]);
+  });
+
+  it('PATCH /contacts/:id: SĐT (source user) và trường thông tin; đổi SĐT ⇒ phát conversation.updated', async () => {
+    const spy = vi.spyOn(realtime, 'emit');
+    const ok = await asAgent('PATCH', `/contacts/${contactId}`, {
+      phone: ' 0912 345 678 ',
+      profileFields: [
+        { key: 'need', value: 'Sofa góc' },
+        { key: 'khu_vuc', label: 'Khu vực', value: 'Quận 7' },
+      ],
+    });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json<ContactDetail>()).toMatchObject({
+      phone: '0912345678',
+      phoneSource: 'user',
+      profileFields: [
+        { key: 'need', label: 'Nhu cầu', value: 'Sofa góc', source: 'user' },
+        { key: 'khu_vuc', label: 'Khu vực', value: 'Quận 7', source: 'user' },
+      ],
+    });
+    expect(conversationTagEvents(spy)).toHaveLength(1);
+
+    // Chỉ sửa trường thông tin ⇒ vẫn phát (máy khác thấy ngay); giá trị rỗng ⇒ ẩn trường.
+    spy.mockClear();
+    const cleared = await asAgent('PATCH', `/contacts/${contactId}`, {
+      profileFields: [{ key: 'khu_vuc', value: '' }],
+    });
+    expect(cleared.json<ContactDetail>().profileFields.map((f) => f.key)).toEqual(['need']);
+    expect(conversationTagEvents(spy)).toHaveLength(1);
+    const noPhone = await asAgent('PATCH', `/contacts/${contactId}`, { phone: null });
+    expect(noPhone.json<ContactDetail>()).toMatchObject({ phone: null, phoneSource: null });
+
+    expect(
+      (await asAgent('PATCH', `/contacts/${contactId}`, { profileFields: [{ key: 'Sai', value: 'x' }] }))
+        .statusCode,
+    ).toBe(400);
+    expect((await asAgent('PATCH', `/contacts/${contactId}`, { phone: 'x'.repeat(31) })).statusCode).toBe(
+      400,
+    );
+    expect((await asAgent('PATCH', `/contacts/${contactId}`, {})).statusCode).toBe(400);
   });
 
   it('đổi tên lan sang khách; sắp xếp; xóa gỡ khỏi khách và trả số khách', async () => {

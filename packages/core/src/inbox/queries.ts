@@ -10,6 +10,7 @@ import type {
   Page,
 } from '@dezon/shared';
 import { and, desc, eq, gt, isNotNull, isNull, lt, or, sql, type AnyColumn, type SQL } from 'drizzle-orm';
+import { listProjectLogs } from '../project-logs/service';
 import { assertCanView, CONVERSATION_NOT_FOUND, visibleConversationsWhere } from './access';
 import { decodeCursor, encodeCursor } from './cursor';
 import { InboxNotFoundError } from './errors';
@@ -106,7 +107,10 @@ export async function listConversations(
   };
 }
 
-/** Ném InboxNotFoundError nếu không tồn tại, InboxForbiddenError nếu viewer không được xem. */
+/**
+ * Chi tiết hội thoại (kèm hồ sơ khách + nhật ký công trình mới nhất). Ném InboxNotFoundError nếu không tồn tại,
+ * InboxForbiddenError nếu viewer không được xem.
+ */
 export async function getConversationDetail(
   db: Db,
   viewer: Viewer,
@@ -114,12 +118,13 @@ export async function getConversationDetail(
   ctx: InboxContext,
 ): Promise<ConversationDetail> {
   const conv = await assertCanView(db, viewer, conversationId);
-  const [summary, contactDetail] = await Promise.all([
+  const [summary, contactDetail, projectLogs] = await Promise.all([
     loadSummary(db, conversationId, ctx),
     loadContactDetail(db, conv.contactId, ctx),
+    listProjectLogs(db, conversationId),
   ]);
   if (!summary || !contactDetail) throw new InboxNotFoundError(CONVERSATION_NOT_FOUND);
-  return { ...summary, contactDetail };
+  return { ...summary, contactDetail, projectLogs };
 }
 
 /** Tin của hội thoại, trang mới nhất trước; items trong trang tăng dần theo sentAt. Kiểm quyền như trên. */

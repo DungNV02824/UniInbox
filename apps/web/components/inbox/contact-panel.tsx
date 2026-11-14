@@ -8,13 +8,12 @@ import { EmptyState } from '@/components/empty-state';
 import { Avatar } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
-import { useAuth } from '@/lib/auth';
-import { Feature } from '@/lib/config';
+import { useFeature } from '@/lib/config';
 import { useConversation } from '@/lib/inbox-queries';
-import { AiRunsSection } from './ai-runs-section';
 import { ChannelLabel } from './channel-label';
-import { ContactNameEditor, ContactNotesEditor, ContactTagsEditor } from './contact-editors';
+import { ContactNameEditor, ContactNotesFields, ContactTagsEditor } from './contact-editors';
 import { Panel } from './panel';
+import { ProjectLogSection } from './project-log-section';
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -25,9 +24,18 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
-function ContactProfile({ conversation: c }: { conversation: ConversationDetail }) {
+function ContactProfile({
+  conversation: c,
+  onJumpToChat,
+}: {
+  conversation: ConversationDetail;
+  /** Bấm một dòng Nhật ký công trình: đưa khung chat ra (điện thoại) trước khi cuộn tới tin. */
+  onJumpToChat: () => void;
+}) {
   const contact = c.contactDetail;
-  const { user } = useAuth();
+  const aiEnabled = useFeature('featureAiEnabled');
+  // Máy chủ cũ chưa gửi projectLogs ⇒ coi như chưa có.
+  const projectLogs = c.projectLogs ?? [];
   return (
     <>
       <div className="flex flex-col items-center gap-2 border-b p-4 text-center">
@@ -74,7 +82,12 @@ function ContactProfile({ conversation: c }: { conversation: ConversationDetail 
       </Section>
 
       <Section title="Ghi chú">
-        <ContactNotesEditor conversationId={c.id} contactId={contact.id} notes={contact.notes} />
+        <ContactNotesFields
+          conversationId={c.id}
+          contactId={contact.id}
+          contact={contact}
+          captureFields={c.chatbot?.captureFields}
+        />
       </Section>
 
       <Section title="Nhãn">
@@ -86,10 +99,8 @@ function ContactProfile({ conversation: c }: { conversation: ConversationDetail 
         />
       </Section>
 
-      {user?.role === 'admin' && (
-        <Feature flag="featureAiEnabled">
-          <AiRunsSection key={c.id} conversationId={c.id} />
-        </Feature>
+      {(aiEnabled || projectLogs.length > 0) && (
+        <ProjectLogSection key={c.id} conversationId={c.id} logs={projectLogs} onJump={onJumpToChat} />
       )}
     </>
   );
@@ -127,7 +138,7 @@ export function ContactPanel({
           <Skeleton className="h-20 w-full" />
         </div>
       ) : detail.data ? (
-        <ContactProfile key={detail.data.contactDetail.id} conversation={detail.data} />
+        <ContactProfile key={detail.data.contactDetail.id} conversation={detail.data} onJumpToChat={onBack} />
       ) : (
         <EmptyState icon={UserRound} title="Không tải được thông tin khách" />
       )}

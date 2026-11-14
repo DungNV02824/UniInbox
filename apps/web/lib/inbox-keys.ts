@@ -8,7 +8,6 @@ export const inboxKeys = {
   details: () => ['conversations', 'detail'] as const,
   detail: (id: string) => ['conversations', 'detail', id] as const,
   messages: (id: string) => ['conversations', 'messages', id] as const,
-  aiRuns: (id: string) => ['conversations', 'ai-runs', id] as const,
 };
 
 /** Danh sách bot cho ô chọn ở khung chat (tiền tố 'chatbots' để trang quản trị invalidate chung). */

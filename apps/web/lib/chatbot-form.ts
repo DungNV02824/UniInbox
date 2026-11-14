@@ -13,6 +13,13 @@ import {
   type ResponseSpeed,
 } from '@dezon/shared';
 import { ApiError } from '@/lib/api';
+import {
+  captureFieldMessage,
+  captureFormErrors,
+  captureFormToRequest,
+  captureToForm,
+  type CaptureFormValues,
+} from '@/lib/chatbot-capture';
 
 export interface ExampleRow {
   /** Khóa ổn định cho React (không gửi lên API). */
@@ -64,6 +71,8 @@ export interface ChatbotFormValues {
   replyDelaySec: string;
   maxWaitSec: string;
   maxRepliesPerHour: string;
+  /** Tab "Thu thập thông tin": AI điền thông tin khách vào ô Ghi chú. */
+  capture: CaptureFormValues;
 }
 
 /** Lỗi theo đường dẫn ô: 'name', 'examples.0.reply', 'maxWaitSec'... */
@@ -121,6 +130,7 @@ export function emptyChatbotForm(): ChatbotFormValues {
     replyDelaySec: String(CHATBOT_DEFAULTS.replyDelaySec),
     maxWaitSec: String(CHATBOT_DEFAULTS.maxWaitSec),
     maxRepliesPerHour: String(CHATBOT_DEFAULTS.maxRepliesPerHour),
+    capture: captureToForm(null),
   };
 }
 
@@ -153,6 +163,7 @@ export function chatbotToForm(dto: ChatbotDto): ChatbotFormValues {
     replyDelaySec: String(dto.replyDelaySec),
     maxWaitSec: String(dto.maxWaitSec),
     maxRepliesPerHour: String(dto.maxRepliesPerHour),
+    capture: captureToForm(dto.capture),
   };
 }
 
@@ -228,6 +239,7 @@ export function formToRequest(form: ChatbotFormValues): CreateChatbotRequest {
     replyDelaySec: parseNumberField(form.replyDelaySec),
     maxWaitSec: parseNumberField(form.maxWaitSec),
     maxRepliesPerHour: parseNumberField(form.maxRepliesPerHour),
+    capture: captureFormToRequest(form.capture),
   };
 }
 
@@ -297,6 +309,8 @@ function fieldMessage(path: string, code?: string): string {
       return 'Nhập số nguyên từ 5 đến 300 giây';
     case 'maxRepliesPerHour':
       return 'Nhập số nguyên từ 1 đến 200';
+    case 'capture':
+      return captureFieldMessage(path, code);
     default:
       return 'Giá trị không hợp lệ';
   }
@@ -345,6 +359,8 @@ export function validateChatbotForm(form: ChatbotFormValues): ValidationResult {
       errors.handoffReminderMin = fieldMessage('handoffReminderMin');
     }
   }
+  // Tên trường thu thập không trùng nhau.
+  for (const [path, message] of Object.entries(captureFormErrors(form.capture))) errors[path] ??= message;
   // Một từ khóa không được nằm ở cả hai danh sách.
   const overlap = keywordOverlap(form.handoffKeywords, form.notifyKeywords);
   if (overlap.length > 0 && !errors.notifyKeywords) {
@@ -385,7 +401,15 @@ export function apiErrorToForm(
 }
 
 /** Tab của trình soạn và trường thuộc tab đó (để đánh dấu tab có lỗi). */
-export const EDITOR_TABS = ['instructions', 'knowledge', 'examples', 'handoff', 'staff', 'advanced'] as const;
+export const EDITOR_TABS = [
+  'instructions',
+  'knowledge',
+  'examples',
+  'handoff',
+  'staff',
+  'capture',
+  'advanced',
+] as const;
 export type EditorTab = (typeof EDITOR_TABS)[number];
 
 const FIELD_TAB: Record<string, EditorTab> = {
@@ -406,6 +430,7 @@ const FIELD_TAB: Record<string, EditorTab> = {
   agentPauseMinutes: 'staff',
   handoffReminderEnabled: 'staff',
   handoffReminderMin: 'staff',
+  capture: 'capture',
   model: 'advanced',
   responseSpeed: 'advanced',
   temperature: 'advanced',
@@ -567,6 +592,7 @@ export function duplicateRequest(dto: ChatbotDto, existingNames: readonly string
     replyDelaySec: dto.replyDelaySec,
     maxWaitSec: dto.maxWaitSec,
     maxRepliesPerHour: dto.maxRepliesPerHour,
+    capture: captureFormToRequest(captureToForm(dto.capture)),
   };
 }
 

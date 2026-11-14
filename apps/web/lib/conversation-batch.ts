@@ -66,3 +66,39 @@ export function createConversationBatcher(
     },
   };
 }
+
+export interface KeyedDebouncer {
+  /** Hẹn chạy cho `key` sau `delayMs`; gọi lại trong lúc chờ thì dời hẹn (chỉ chạy một lần). */
+  push(key: string): void;
+  /** Hủy mọi hẹn đang chờ. */
+  dispose(): void;
+}
+
+/**
+ * Debounce theo khóa: `conversation.updated` dồn dập của cùng một hội thoại chỉ tải lại hồ sơ khách một lần
+ * (vd. bot vừa trả lời vừa điền thông tin khách ⇒ vài sự kiện liền nhau).
+ */
+export function createKeyedDebouncer(
+  run: (key: string) => void,
+  delayMs = 400,
+  timers: Timers = defaultTimers,
+): KeyedDebouncer {
+  const pending = new Map<string, unknown>();
+  return {
+    push(key) {
+      const prev = pending.get(key);
+      if (prev !== undefined) timers.clear(prev);
+      pending.set(
+        key,
+        timers.set(() => {
+          pending.delete(key);
+          run(key);
+        }, delayMs),
+      );
+    },
+    dispose() {
+      for (const handle of pending.values()) timers.clear(handle);
+      pending.clear();
+    },
+  };
+}

@@ -24,6 +24,7 @@ import { loadSummary, type DbLike } from '../inbox/read-model';
 import type { InboxContext, Viewer } from '../inbox/types';
 import { notAutomatedEcho } from '../pipeline/automation-echo';
 import { isUniqueViolation } from '../pipeline/helpers';
+import { parseCaptureConfig } from './config';
 import { ChatbotNameConflictError } from './errors';
 import { normalizeForMatch } from './prefilter';
 
@@ -79,6 +80,7 @@ function toDto(row: ChatbotRow, conversationCount: number): ChatbotDto {
     handoffAckMessage: row.handoffAckMessage,
     handoffResolveMessage: row.handoffResolveMessage,
     aiHandoffMode: row.aiHandoffMode,
+    capture: parseCaptureConfig(row.capture),
     agentReplyMode: row.agentReplyMode,
     agentPauseMinutes: row.agentPauseMinutes,
     handoffReminderMin: row.handoffReminderMin,
@@ -146,6 +148,7 @@ function toSet(input: Partial<CreateChatbotRequest>): ChatbotSet {
   if (input.agentReplyMode !== undefined) set.agentReplyMode = input.agentReplyMode;
   if (input.agentPauseMinutes !== undefined) set.agentPauseMinutes = input.agentPauseMinutes;
   if (input.handoffReminderMin !== undefined) set.handoffReminderMin = input.handoffReminderMin;
+  if (input.capture !== undefined) set.capture = input.capture;
   return set;
 }
 

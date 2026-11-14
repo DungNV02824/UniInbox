@@ -1,11 +1,10 @@
 // Logic THUẦN của tính năng Chatbot AI trong hộp thư (trạng thái AI của hội thoại, cập nhật lạc quan,
-// bộ lọc "AI đang lo", nhãn tin bot, nhật ký AI). Không phụ thuộc React để test độc lập.
+// bộ lọc "AI đang lo", nhãn tin bot). Không phụ thuộc React để test độc lập.
 import {
   DEFAULT_HANDOFF_ACK_LABEL,
   DEFAULT_HANDOFF_RESOLVE_LABEL,
   HANDOFF_REASON_LABELS,
   isAiPausedIndefinitely,
-  type AiRunDecision,
   type ChatbotRef,
   type ConversationSummary,
   type MessageDto,
@@ -237,30 +236,6 @@ export function handoffAckedText(
   who: string,
 ): string {
   return labels.customAck ? `Đã bấm "${labels.ack}" — ${who}` : `Đã nhận bởi ${who}`;
-}
-
-export const AI_RUN_DECISION_LABELS: Record<AiRunDecision, string> = {
-  reply: 'Trả lời',
-  escalate: 'Chuyển người',
-  no_reply: 'Không trả lời',
-  suggest: 'Gợi ý',
-  error: 'Lỗi',
-};
-
-/** Lớp màu badge cho từng quyết định trong "Nhật ký AI". */
-export const AI_RUN_DECISION_TONES: Record<AiRunDecision, string> = {
-  reply: 'border-emerald-200 bg-emerald-50 text-emerald-700',
-  escalate: 'border-red-200 bg-red-50 text-red-700',
-  no_reply: 'border-slate-200 bg-slate-50 text-slate-600',
-  suggest: 'border-sky-200 bg-sky-50 text-sky-700',
-  error: 'border-amber-200 bg-amber-50 text-amber-800',
-};
-
-/** "1,2 s" / "850 ms". */
-export function formatLatency(ms: number): string {
-  if (!Number.isFinite(ms) || ms < 0) return '—';
-  if (ms < 1000) return `${Math.round(ms)} ms`;
-  return `${(ms / 1000).toFixed(1).replace('.', ',')} s`;
 }
 
 export interface ChatbotOption {

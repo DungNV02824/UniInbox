@@ -1,4 +1,9 @@
-import { DEFAULT_BUSINESS_HOURS } from '@dezon/shared';
+import {
+  DEFAULT_BUSINESS_HOURS,
+  DEFAULT_CAPTURE_CONFIG,
+  DEFAULT_PROJECT_LOG_CONFIG,
+  type CaptureConfig,
+} from '@dezon/shared';
 import { describe, expect, it } from 'vitest';
 import { LlmError, type LlmClient, type LlmRequest, type LlmResponse } from './llm';
 import {
@@ -28,6 +33,7 @@ const chatbot: ChatbotConfig = {
   model: null,
   temperature: 0.3,
   escalateWhenUnsure: true,
+  capture: DEFAULT_CAPTURE_CONFIG,
 };
 
 const baseInput: ChatbotTurnInput = {
@@ -1067,5 +1073,269 @@ describe('runChatbotTurn — lượt "Không đạt" (staffRejectReason)', () =>
     const { llm } = fakeLlm([new LlmError('Gemini 400', false, 400)]);
     const r = await runChatbotTurn(deps(llm).d, rejectInput);
     expect(r.decision).toBe('error');
+  });
+});
+
+describe('runChatbotTurn — "Thu thập thông tin" (captured)', () => {
+  const capture: CaptureConfig = {
+    ...DEFAULT_CAPTURE_CONFIG,
+    enabled: true,
+    fields: [...DEFAULT_CAPTURE_CONFIG.fields, { key: 'khu_vuc', label: 'Khu vực', hint: '', enabled: true }],
+  };
+  const captureInput: ChatbotTurnInput = { ...baseInput, chatbot: { ...chatbot, capture } };
+
+  it('reply: captured đi kèm kết quả, chỉ giữ khóa trường bật; tools có captured', async () => {
+    const { llm, requests } = fakeLlm([
+      res({
+        functionCall: {
+          name: 'reply',
+          args: {
+            messages: ['Dạ'],
+            confidence: 0.9,
+            captured: { phone: '0912 345 678', need: ' Xây nhà 2 tầng ', la: 'x', khu_vuc: 7 },
+          },
+        },
+      }),
+    ]);
+    const r = await runChatbotTurn(deps(llm).d, captureInput);
+    expect(r).toMatchObject({ decision: 'reply', messages: ['Dạ'] });
+    expect(r.captured).toEqual({ phone: '0912 345 678', need: 'Xây nhà 2 tầng' });
+    const replyTool = requests[0]!.tools.find((t) => t.name === 'reply')!;
+    expect(Object.keys((replyTool.parameters as { properties: object }).properties)).toContain('captured');
+    // Args gốc vẫn ghi vào toolCalls (ai_runs).
+    expect(JSON.stringify(r.toolCalls)).toContain('Xây nhà 2 tầng');
+  });
+
+  it('escalate / no_reply / reply độ tự tin thấp (⇒ escalate) đều mang captured', async () => {
+    const captured = { need: 'Báo giá thi công' };
+    const esc = await runChatbotTurn(
+      deps(
+        fakeLlm([
+          res({
+            functionCall: {
+              name: 'escalate',
+              args: { reason_code: 'human_request', summary_for_agent: 'Khách cần gặp người', captured },
+            },
+          }),
+        ]).llm,
+      ).d,
+      captureInput,
+    );
+    expect(esc).toMatchObject({ decision: 'escalate', reasonCode: 'human_request', captured });
+    const nr = await runChatbotTurn(
+      deps(fakeLlm([res({ functionCall: { name: 'no_reply', args: { reason: 'cảm ơn', captured } } })]).llm)
+        .d,
+      captureInput,
+    );
+    expect(nr).toMatchObject({ decision: 'no_reply', captured });
+    const low = await runChatbotTurn(
+      deps(
+        fakeLlm([
+          res({ functionCall: { name: 'reply', args: { messages: ['Dạ'], confidence: 0.2, captured } } }),
+        ]).llm,
+        { minConfidence: 0.6 },
+      ).d,
+      captureInput,
+    );
+    expect(low).toMatchObject({ decision: 'escalate', reasonCode: 'low_confidence', captured });
+  });
+
+  it('captured sai dạng không làm hỏng lượt; bot tắt thu thập ⇒ không có captured', async () => {
+    const bad = await runChatbotTurn(
+      deps(
+        fakeLlm([
+          res({
+            functionCall: { name: 'reply', args: { messages: ['Dạ'], confidence: 0.9, captured: 'x' } },
+          }),
+        ]).llm,
+      ).d,
+      captureInput,
+    );
+    expect(bad.decision).toBe('reply');
+    expect(bad.captured).toBeUndefined();
+    const off = await runChatbotTurn(
+      deps(
+        fakeLlm([
+          res({
+            functionCall: {
+              name: 'reply',
+              args: { messages: ['Dạ'], confidence: 0.9, captured: { need: 'x' } },
+            },
+          }),
+        ]).llm,
+      ).d,
+      baseInput,
+    );
+    expect(off.decision).toBe('reply');
+    expect(off.captured).toBeUndefined();
+  });
+
+  it('bộ chặn "tự nói đã chuyển": lần gọi lại không điền ⇒ dùng captured của lần đầu', async () => {
+    const said = ['Dạ em đã chuyển cho nhân viên rồi ạ'];
+    const { llm } = fakeLlm([
+      res({
+        functionCall: { name: 'reply', args: { messages: said, confidence: 0.9, captured: { need: 'Sơn' } } },
+      }),
+      res({
+        functionCall: { name: 'escalate', args: { reason_code: 'human_request', summary_for_agent: 'x' } },
+      }),
+    ]);
+    const r = await runChatbotTurn(deps(llm).d, captureInput);
+    expect(r).toMatchObject({ decision: 'escalate', captured: { need: 'Sơn' } });
+  });
+
+  it('lượt "Không đạt" ⇒ tool reply không có captured, kết quả không có captured', async () => {
+    const { llm, requests } = fakeLlm([
+      res({
+        functionCall: {
+          name: 'reply',
+          args: { messages: ['Dạ chưa đạt ạ'], confidence: 0.9, captured: { need: 'x' } },
+        },
+      }),
+    ]);
+    const r = await runChatbotTurn(deps(llm).d, {
+      ...captureInput,
+      newMessages: [],
+      staffRejectReason: 'ảnh mờ',
+    });
+    expect(r.decision).toBe('reply');
+    expect(r.captured).toBeUndefined();
+    expect(requests[0]!.tools).toEqual(CHATBOT_TOOLS.filter((t) => t.name === 'reply'));
+  });
+});
+
+describe('runChatbotTurn — "Nhật ký công trình" (project_logs)', () => {
+  const capture: CaptureConfig = {
+    ...DEFAULT_CAPTURE_CONFIG,
+    projectLog: {
+      enabled: true,
+      fields: DEFAULT_PROJECT_LOG_CONFIG.fields.map((f) =>
+        f.key === 'ngay_chup' ? { ...f, enabled: false } : f,
+      ),
+    },
+  };
+  const logInput: ChatbotTurnInput = { ...baseInput, chatbot: { ...chatbot, capture } };
+  const entry = { dia_chi: '252 Nguyễn Thái Bình', nha_thau: 'TVL', sdt_nha_thau: '0937549534' };
+  const run = (steps: Step[], input: ChatbotTurnInput = logInput, extra: Partial<ChatbotTurnDeps> = {}) =>
+    runChatbotTurn(deps(fakeLlm(steps).llm, extra).d, input);
+
+  it('reply: projectLogs đi kèm, chỉ giữ khóa trường bật, bỏ phần tử rỗng; tools reply/escalate có project_logs', async () => {
+    const { llm, requests } = fakeLlm([
+      res({
+        functionCall: {
+          name: 'reply',
+          args: {
+            messages: ['Dạ bên em tiếp nhận bộ ảnh ạ'],
+            confidence: 0.9,
+            project_logs: [{ ...entry, ngay_chup: '09/11/2026', la: 'x' }, { ngay_chup: '10/11/2026' }],
+          },
+        },
+      }),
+    ]);
+    const r = await runChatbotTurn(deps(llm).d, logInput);
+    expect(r).toMatchObject({ decision: 'reply', messages: ['Dạ bên em tiếp nhận bộ ảnh ạ'] });
+    expect(r.projectLogs).toEqual([entry]);
+    const props = (name: string) =>
+      Object.keys(
+        (requests[0]!.tools.find((t) => t.name === name)!.parameters as { properties: object }).properties,
+      );
+    expect(props('reply')).toContain('project_logs');
+    expect(props('escalate')).toContain('project_logs');
+    expect(props('no_reply')).not.toContain('project_logs');
+    // Args gốc vẫn ghi vào toolCalls (Chat thử xem được).
+    expect(JSON.stringify(r.toolCalls)).toContain('252 Nguyễn Thái Bình');
+  });
+
+  it('escalate và reply độ tự tin thấp (⇒ escalate) mang projectLogs', async () => {
+    const esc = await run([
+      res({
+        functionCall: {
+          name: 'escalate',
+          args: {
+            reason_code: 'human_request',
+            summary_for_agent: 'CTV gửi bộ ảnh',
+            messages_to_customer: ['Dạ em đã chuyển hồ sơ cho bộ phận duyệt ạ'],
+            project_logs: [entry],
+          },
+        },
+      }),
+    ]);
+    expect(esc).toMatchObject({ decision: 'escalate', projectLogs: [entry] });
+    const low = await run(
+      [
+        res({
+          functionCall: {
+            name: 'reply',
+            args: { messages: ['Dạ'], confidence: 0.2, project_logs: [entry] },
+          },
+        }),
+      ],
+      logInput,
+      { minConfidence: 0.6 },
+    );
+    expect(low).toMatchObject({ decision: 'escalate', reasonCode: 'low_confidence', projectLogs: [entry] });
+  });
+
+  it('bộ chặn "tự nói đã chuyển" đổi thành escalate ⇒ vẫn mang projectLogs của lần đầu', async () => {
+    const said = ['Dạ em đã chuyển cho nhân viên rồi ạ'];
+    const r = await run([
+      res({
+        functionCall: { name: 'reply', args: { messages: said, confidence: 0.9, project_logs: [entry] } },
+      }),
+      res({ functionCall: { name: 'reply', args: { messages: said, confidence: 0.9 } } }),
+    ]);
+    expect(r).toMatchObject({
+      decision: 'escalate',
+      reasonCode: 'other',
+      messages: said,
+      projectLogs: [entry],
+    });
+  });
+
+  it('no_reply / lỗi / bot tắt nhật ký / sai dạng ⇒ không có projectLogs', async () => {
+    const nr = await run([
+      res({ functionCall: { name: 'no_reply', args: { reason: 'ok', project_logs: [entry] } } }),
+    ]);
+    expect(nr.decision).toBe('no_reply');
+    expect(nr.projectLogs).toBeUndefined();
+    const err = await run([res({ functionCall: { name: 'khong_co', args: { project_logs: [entry] } } })]);
+    expect(err.decision).toBe('error');
+    expect(err.projectLogs).toBeUndefined();
+    const off = await run(
+      [
+        res({
+          functionCall: { name: 'reply', args: { messages: ['Dạ'], confidence: 0.9, project_logs: [entry] } },
+        }),
+      ],
+      baseInput,
+    );
+    expect(off.decision).toBe('reply');
+    expect(off.projectLogs).toBeUndefined();
+    const bad = await run([
+      res({
+        functionCall: { name: 'reply', args: { messages: ['Dạ'], confidence: 0.9, project_logs: 'rác' } },
+      }),
+    ]);
+    expect(bad.decision).toBe('reply');
+    expect(bad.projectLogs).toBeUndefined();
+  });
+
+  it('lượt "Không đạt" ⇒ tool không có project_logs, kết quả không có projectLogs', async () => {
+    const { llm, requests } = fakeLlm([
+      res({
+        functionCall: {
+          name: 'reply',
+          args: { messages: ['Dạ chưa đạt ạ'], confidence: 0.9, project_logs: [entry] },
+        },
+      }),
+    ]);
+    const r = await runChatbotTurn(deps(llm).d, {
+      ...logInput,
+      newMessages: [],
+      staffRejectReason: 'ảnh mờ',
+    });
+    expect(r.decision).toBe('reply');
+    expect(r.projectLogs).toBeUndefined();
+    expect(requests[0]!.tools).toEqual(CHATBOT_TOOLS.filter((t) => t.name === 'reply'));
   });
 });

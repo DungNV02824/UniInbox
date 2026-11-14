@@ -2,6 +2,15 @@ import { index, jsonb, pgTable, text, uniqueIndex, uuid } from 'drizzle-orm/pg-c
 import { emptyTextArray, id, timestamps } from './_common';
 import { channelAccounts } from './channel-accounts';
 
+/** Giá trị một trường thông tin khách (contacts.profile_fields[key]). */
+export interface ContactProfileFieldValue {
+  label: string;
+  value: string;
+  source: 'ai' | 'user';
+  /** ISO. */
+  updatedAt: string;
+}
+
 /** Một người khách; có thể có nhiều danh tính trên nhiều kênh. */
 export const contacts = pgTable(
   'contacts',
@@ -13,6 +22,10 @@ export const contacts = pgTable(
     avatarUrl: text('avatar_url'),
     tags: text('tags').array().notNull().default(emptyTextArray),
     notes: text('notes'),
+    /** Nguồn của phone: 'ai' (bot điền, được cập nhật lại) | 'user' (nhân viên sửa, bot không ghi đè) | null (có sẵn). */
+    phoneSource: text('phone_source').$type<'ai' | 'user'>(),
+    /** Trường thông tin bot thu thập / nhân viên sửa (khóa ⇒ ContactProfileFieldValue), vd. need = "Nhu cầu". */
+    profileFields: jsonb('profile_fields').$type<Record<string, ContactProfileFieldValue>>().notNull().default({}),
     ...timestamps(),
   },
   // Dùng để gộp danh tính theo số điện thoại (7.6).

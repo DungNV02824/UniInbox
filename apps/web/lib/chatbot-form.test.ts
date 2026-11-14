@@ -1,4 +1,4 @@
-import type { ChatbotDto } from '@dezon/shared';
+import { DEFAULT_CAPTURE_CONFIG, DEFAULT_PROJECT_LOG_CONFIG, type ChatbotDto } from '@dezon/shared';
 import { describe, expect, it } from 'vitest';
 import { ApiError } from './api';
 import {
@@ -56,6 +56,22 @@ const dto: ChatbotDto = {
   replyDelaySec: 10,
   maxWaitSec: 45,
   maxRepliesPerHour: 20,
+  capture: {
+    enabled: true,
+    fields: [
+      { key: 'phone', label: 'SĐT', hint: 'Số khách gõ.', enabled: true },
+      { key: 'need', label: 'Nhu cầu', hint: 'Tóm tắt.', enabled: false },
+      { key: 'khu_vuc', label: 'Khu vực', hint: 'Tỉnh/thành.', enabled: true },
+    ],
+    phoneTag: 'Tiềm năng',
+    projectLog: {
+      enabled: true,
+      fields: [
+        ...DEFAULT_PROJECT_LOG_CONFIG.fields,
+        { key: 'hang_muc', label: 'Hạng mục', hint: 'Hạng mục thi công.', enabled: true },
+      ],
+    },
+  },
   conversationCount: 3,
   createdAt: '2026-11-01T00:00:00.000Z',
   updatedAt: '2026-11-01T00:00:00.000Z',
@@ -97,6 +113,7 @@ describe('chatbotToForm / formToRequest', () => {
       replyDelaySec: 10,
       maxWaitSec: 45,
       maxRepliesPerHour: 20,
+      capture: dto.capture,
     });
   });
 
@@ -558,5 +575,103 @@ describe('tiện ích', () => {
   it('usageText', () => {
     expect(usageText(0)).toBe('Chưa dùng ở hội thoại nào');
     expect(usageText(1234)).toBe('Đang dùng ở 1.234 hội thoại');
+  });
+});
+
+describe('tab "Thu thập thông tin" (capture)', () => {
+  it('form mới / API cũ thiếu capture ⇒ mặc định; bản sao giữ cấu hình', () => {
+    expect(formToRequest(emptyChatbotForm()).capture).toEqual(DEFAULT_CAPTURE_CONFIG);
+    const legacy = { ...dto, capture: undefined } as unknown as ChatbotDto;
+    expect(formToRequest(chatbotToForm(legacy)).capture).toEqual(DEFAULT_CAPTURE_CONFIG);
+    expect(duplicateRequest(dto, []).capture).toEqual(dto.capture);
+  });
+
+  it('isFormDirty nhận ra đổi cấu hình; tab đếm/đánh dấu lỗi đúng tab', () => {
+    const baseline = form();
+    expect(isFormDirty(form(), baseline)).toBe(false);
+    expect(isFormDirty(form({ capture: { ...baseline.capture, enabled: false } }), baseline)).toBe(true);
+    expect(isFormDirty(form({ capture: { ...baseline.capture, phoneTag: '' } }), baseline)).toBe(true);
+    expect(tabsWithErrors({ 'capture.fields.2.label': 'x' })).toEqual(new Set(['capture']));
+  });
+
+  it('tên trường trống / quá dài / trùng ⇒ lỗi tiếng Việt đúng ô', () => {
+    const base = form().capture;
+    const empty = validateChatbotForm(
+      form({ capture: { ...base, fields: base.fields.map((f, i) => (i === 2 ? { ...f, label: ' ' } : f)) } }),
+    );
+    expect(empty.ok).toBe(false);
+    if (!empty.ok) expect(empty.errors['capture.fields.2.label']).toBe('Nhập tên trường');
+
+    const long = validateChatbotForm(
+      form({
+        capture: {
+          ...base,
+          fields: base.fields.map((f, i) => (i === 2 ? { ...f, hint: 'x'.repeat(301) } : f)),
+        },
+      }),
+    );
+    if (!long.ok) expect(long.errors['capture.fields.2.hint']).toBe('Hướng dẫn tối đa 300 ký tự');
+    else throw new Error('phải lỗi');
+
+    const dup = validateChatbotForm(
+      form({
+        capture: {
+          ...base,
+          fields: [...base.fields, { key: 'khu_vuc_2', label: 'khu vuc', hint: '', enabled: true }],
+        },
+      }),
+    );
+    expect(dup.ok).toBe(false);
+    if (!dup.ok) expect(dup.errors['capture.fields.3.label']).toBe('Trùng tên với trường khác');
+  });
+
+  it('lỗi API capture.* ⇒ ô đúng + tab Thu thập thông tin', () => {
+    const err = new ApiError(400, 'Bad', { errors: [{ path: 'capture.fields.2.label', message: 'x' }] });
+    const mapped = apiErrorToForm(err, form());
+    expect(mapped.errors['capture.fields.2.label']).toBe('Nhập tên trường');
+    expect(tabsWithErrors(mapped.errors)).toEqual(new Set(['capture']));
+  });
+
+  it('Nhật ký công trình: API cũ thiếu projectLog ⇒ mặc định; khứ hồi + bản sao giữ cấu hình; dirty', () => {
+    expect(formToRequest(form()).capture?.projectLog).toEqual(dto.capture.projectLog);
+    expect(duplicateRequest(dto, []).capture?.projectLog).toEqual(dto.capture.projectLog);
+    const legacy = {
+      ...dto,
+      capture: { ...dto.capture, projectLog: undefined },
+    } as unknown as ChatbotDto;
+    expect(formToRequest(chatbotToForm(legacy)).capture?.projectLog).toEqual(DEFAULT_PROJECT_LOG_CONFIG);
+    const baseline = form();
+    expect(
+      isFormDirty(
+        form({
+          capture: { ...baseline.capture, projectLog: { ...baseline.capture.projectLog, enabled: false } },
+        }),
+        baseline,
+      ),
+    ).toBe(true);
+  });
+
+  it('Nhật ký công trình: tên trống / trùng ⇒ lỗi đúng ô + tab Thu thập thông tin', () => {
+    const base = form().capture;
+    const res = validateChatbotForm(
+      form({
+        capture: {
+          ...base,
+          projectLog: {
+            ...base.projectLog,
+            fields: [
+              ...base.projectLog.fields.map((f, i) => (i === 4 ? { ...f, label: ' ' } : f)),
+              { key: 'ngay_2', label: 'NGÀY CHỤP', hint: '', enabled: true },
+            ],
+          },
+        },
+      }),
+    );
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.errors['capture.projectLog.fields.4.label']).toBe('Nhập tên trường');
+      expect(res.errors['capture.projectLog.fields.5.label']).toBe('Trùng tên với trường khác');
+      expect(tabsWithErrors(res.errors)).toEqual(new Set(['capture']));
+    }
   });
 });

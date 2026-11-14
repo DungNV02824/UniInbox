@@ -1,6 +1,6 @@
 import { sql } from 'drizzle-orm';
 import { boolean, check, integer, jsonb, pgTable, real, text, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
-import type { AgentReplyMode, AiHandoffMode, ResponseSpeed } from '@dezon/shared';
+import type { AgentReplyMode, AiHandoffMode, CaptureConfig, ResponseSpeed } from '@dezon/shared';
 import { emptyTextArray, id, timestamps } from './_common';
 import { users } from './users';
 
@@ -60,6 +60,11 @@ export const chatbots = pgTable(
     agentPauseMinutes: integer('agent_pause_minutes'),
     /** Nhắc lại "chưa ai nhận hội thoại" sau N phút kể từ lúc chuyển người; 0 = tắt (mặc định). */
     handoffReminderMin: integer('handoff_reminder_min').notNull().default(0),
+    /**
+     * Tab "Thu thập thông tin" (CaptureConfig): AI điền SĐT / Nhu cầu / trường riêng vào hồ sơ khách, tự gắn nhãn khi
+     * có SĐT. NULL = chưa cấu hình (bot cũ) ⇒ dùng DEFAULT_CAPTURE_CONFIG (tắt).
+     */
+    capture: jsonb('capture').$type<CaptureConfig>(),
     createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
     ...timestamps(),
   },

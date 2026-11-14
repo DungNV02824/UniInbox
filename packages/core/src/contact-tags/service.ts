@@ -316,3 +316,15 @@ export async function normalizeContactTags(
   }
   return out;
 }
+
+/**
+ * Tìm nhãn trong danh sách nhãn theo tên (so khớp như khi nhân viên gắn nhãn: trim, không phân biệt hoa thường).
+ * Có ⇒ cách viết của danh sách; không có ⇒ null (dùng khi bot tự gắn nhãn — chỉ gắn nhãn có trong danh sách).
+ */
+export async function resolveCatalogTag(db: DbLike, name: string): Promise<string | null> {
+  const key = tagKey(name);
+  if (!key) return null;
+  // Danh sách nhãn nhỏ (≤ CONTACT_TAGS_MAX): so khớp ở JS để giống hệt normalizeContactTags.
+  const catalog = await db.select({ name: contactTags.name }).from(contactTags);
+  return catalog.find((t) => tagKey(t.name) === key)?.name ?? null;
+}

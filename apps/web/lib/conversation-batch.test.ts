@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ConversationSummary } from '@dezon/shared';
 import { conv } from './__fixtures__/inbox';
-import { createConversationBatcher } from './conversation-batch';
+import { createConversationBatcher, createKeyedDebouncer } from './conversation-batch';
 
 /** Hẹn giờ giả: chạy tay bằng `tick()`. */
 function fakeTimers() {
@@ -72,5 +72,39 @@ describe('createConversationBatcher', () => {
     expect(t.armed()).toBe(false);
     b.flush();
     expect(calls).toEqual([['a']]);
+  });
+});
+
+describe('createKeyedDebouncer', () => {
+  it('gom theo khóa, chạy một lần sau khi hết dồn dập; dispose hủy hẹn', () => {
+    const handles = new Map<number, () => void>();
+    let seq = 0;
+    const timers = {
+      set: (f: () => void) => {
+        seq += 1;
+        handles.set(seq, f);
+        return seq;
+      },
+      clear: (h: unknown) => {
+        handles.delete(h as number);
+      },
+    };
+    const runAll = () => {
+      const fns = [...handles.values()];
+      handles.clear();
+      for (const f of fns) f();
+    };
+    const ran: string[] = [];
+    const d = createKeyedDebouncer((k) => ran.push(k), 400, timers);
+    d.push('a');
+    d.push('b');
+    d.push('a');
+    expect(handles.size).toBe(2);
+    runAll();
+    expect(ran.sort()).toEqual(['a', 'b']);
+    d.push('c');
+    d.dispose();
+    runAll();
+    expect(ran).toHaveLength(2);
   });
 });

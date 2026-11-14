@@ -18,7 +18,7 @@ import {
   REENGAGE_LIMITS,
   type HandoffReasonCode,
 } from '@dezon/shared';
-import { and, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { isAiPausedIndefinitely, type ChannelType } from '@dezon/shared';
 import type { CredentialsCipher } from '../channels/service';
 import type { ChannelConnector } from '../connectors/types';
@@ -28,12 +28,15 @@ import type { InboxContext } from '../inbox/types';
 import type { MediaStorage } from '../media/types';
 import type { PipelineLogger } from '../pipeline/types';
 import type { RealtimePublisher } from '../realtime';
+import { applyCapturedFields, fallbackPhoneFromTexts, normalizeVnPhone } from '../contacts/capture';
+import { recordProjectLogs } from '../project-logs/service';
 import { toChatbotConfig } from './config';
 import type { ReengageGuidance } from './prompt';
 import {
   botCanSend,
   bubbleDelays,
   countBotTurnsLastHour,
+  emitConversationUpdated,
   emitMessagesCreated,
   errorText,
   insertBotMessages,
@@ -43,7 +46,7 @@ import { escalateConversation } from './escalate';
 import { notifyStaffKeyword, type NotifyStaffInput } from './notify-staff';
 import type { LlmClient } from './llm';
 import { HANDOFF_CLAIM_GUARD, runChatbotTurn } from './orchestrator';
-import { CHATBOT_MAX_BUBBLES } from './tools';
+import { CHATBOT_MAX_BUBBLES, enabledCaptureFields } from './tools';
 import { getAiSettings, getBusinessHours, SETTING_KEYS, type LarkFallback } from './settings';
 import {
   releaseEarlyAiTyping,
@@ -58,11 +61,12 @@ import {
   loadPendingMessages,
   loadPromptImages,
   loadTurnHistory,
+  orderPendingBySentAt,
   PENDING_MAX_AGE_HOURS,
   type LoadPendingOptions,
   type PendingMessage,
 } from './turn-input';
-import type { ChatbotTurnResult } from './types';
+import type { ChatbotConfig, ChatbotTurnResult } from './types';
 
 export { BOT_REQUEUE_MAX_AGE_SEC, requeueQueuedBotMessages } from './delivery';
 export {
@@ -825,6 +829,7 @@ async function runChatbotTurnAndCommit(
     loadPromptImages(deps.storage, pending, deps.logger),
     getBusinessHours(db),
   ]);
+  const chatbot = toChatbotConfig(bot);
   const result = await runChatbotTurn(
     {
       llm: deps.llm,
@@ -833,7 +838,7 @@ async function runChatbotTurnAndCommit(
       minConfidence: deps.config.minConfidence,
     },
     {
-      chatbot: toChatbotConfig(bot),
+      chatbot,
       history,
       newMessages,
       channelName: conv.channelName,
@@ -890,6 +895,15 @@ async function runChatbotTurnAndCommit(
     staffNotified = out.staffNotified;
     return out;
   } finally {
+    // "Thu thập thông tin": lượt đã commit thật (không hủy, không lỗi) ⇒ ghi vào hồ sơ khách. Sau phần gửi/chuyển người
+    // (không làm chậm tin bot); lỗi chỉ log, không bao giờ ảnh hưởng lượt bot.
+    if (!saved.race && result.decision !== 'error') {
+      await captureCustomerInfoSafe(db, deps, conversationId, chatbot.capture, result, pending);
+    }
+    // "Nhật ký công trình": lượt reply / escalate đã commit thật ⇒ ghi các công trình bot tiếp nhận (lỗi chỉ log).
+    if (!saved.race && (result.decision === 'reply' || result.decision === 'escalate')) {
+      await recordProjectLogsSafe(db, deps, conversationId, chatbot, result, pending, saved);
+    }
     const notifyKeyword =
       result.notifiedKeyword &&
       (saved.race ||
@@ -904,6 +918,139 @@ async function runChatbotTurnAndCommit(
         aiRunId: saved.aiRunId,
       });
     }
+  }
+}
+
+/**
+ * Thông tin khách cần ghi của một lượt: `captured` model điền (ChatbotTurnResult.captured, đã lọc theo trường bật) +
+ * dự phòng SĐT (trường phone bật): CHỈ khi model không điền `captured` hoặc điền `phone` mà sai dạng — model đã điền
+ * `captured` mà bỏ phone thì tôn trọng (số trong tin có thể là của người khác) — lấy SĐT từ tin khách của lượt này
+ * (fallbackPhoneFromTexts: tin chỉ để cho SĐT), đánh dấu phoneGuessed (chỉ điền khi khách chưa có SĐT, không gắn
+ * nhãn). Lượt có Nhật ký công trình (`projectLogs` khác rỗng) ⇒ KHÔNG dự phòng: số trong tin lượt đó thường là
+ * SĐT nhà thầu, không phải của người nhắn. Không có gì ⇒ null.
+ */
+export function turnCapturedInfo(
+  capture: ChatbotConfig['capture'],
+  captured: Record<string, string> | undefined,
+  customerTexts: readonly (string | null)[],
+  projectLogs?: readonly Record<string, string>[],
+): { phone: string | null; phoneGuessed?: true; fields: Record<string, string> } | null {
+  const enabledKeys = new Set(enabledCaptureFields(capture).map((f) => f.key));
+  if (enabledKeys.size === 0) return null;
+  const { phone: modelPhone, ...rest } = captured ?? {};
+  const fields = Object.fromEntries(Object.entries(rest).filter(([k]) => enabledKeys.has(k)));
+  let phone: string | null = null;
+  let phoneGuessed = false;
+  if (enabledKeys.has('phone')) {
+    phone = modelPhone ? normalizeVnPhone(modelPhone) : null;
+    if (!phone && (captured === undefined || modelPhone) && !projectLogs?.length) {
+      phone = fallbackPhoneFromTexts(customerTexts);
+      phoneGuessed = phone !== null;
+    }
+  }
+  if (!phone && Object.keys(fields).length === 0) return null;
+  return { phone, ...(phoneGuessed && { phoneGuessed: true as const }), fields };
+}
+
+/**
+ * Ghi thông tin khách bot thu thập được (applyCapturedFields, transaction riêng — contact lấy lại từ hội thoại trong
+ * transaction để đúng khách sau khi gộp); có thay đổi (trường / nhãn) ⇒ phát conversation.updated cho hộp thư đang mở.
+ * Bot tắt thu thập ⇒ không làm gì. KHÔNG BAO GIỜ ném: lỗi chỉ log warn.
+ */
+async function captureCustomerInfoSafe(
+  db: Db,
+  deps: AiRuntimeDeps,
+  conversationId: string,
+  capture: ChatbotConfig['capture'],
+  result: ChatbotTurnResult,
+  pending: readonly PendingMessage[],
+): Promise<void> {
+  if (!capture.enabled) return;
+  try {
+    const info = turnCapturedInfo(
+      capture,
+      result.captured,
+      pending.map((m) => m.text),
+      result.projectLogs,
+    );
+    if (!info) return;
+    const out = await db.transaction(async (tx) => {
+      const [conv] = await tx
+        .select({ contactId: conversations.contactId })
+        .from(conversations)
+        .where(eq(conversations.id, conversationId));
+      if (!conv) return null;
+      return applyCapturedFields(tx, {
+        contactId: conv.contactId,
+        config: capture,
+        captured: info,
+        now: deps.ctx.now(),
+      });
+    });
+    if (!out || (out.changedKeys.length === 0 && out.tagged === null)) return;
+    deps.logger.info(
+      { conversationId, keys: out.changedKeys, tagged: out.tagged !== null },
+      'Bot thu thập thông tin khách',
+    );
+    await emitConversationUpdated(db, deps, conversationId);
+  } catch (error) {
+    deps.logger.warn({ conversationId, err: errorText(error) }, 'Không ghi được thông tin khách (thu thập)');
+  }
+}
+
+/**
+ * Ghi "Nhật ký công trình" của một lượt reply / escalate đã commit (recordProjectLogs, transaction riêng — chống trùng
+ * theo aiRunId): công trình model điền (ChatbotTurnResult.projectLogs, đã lọc trường bật), gắn với tin khách của lượt
+ * (theo thứ tự gửi) + tin bot của lượt (bong bóng reply; escalate: tin gửi khách lúc chuyển — đọc theo ai_run_id vì
+ * escalateConversation tự chèn). Có dòng mới ⇒ phát conversation.updated (web tải lại chi tiết, có projectLogs).
+ * Bot tắt nhật ký / không có công trình ⇒ không làm gì. KHÔNG BAO GIỜ ném: lỗi chỉ log warn.
+ */
+async function recordProjectLogsSafe(
+  db: Db,
+  deps: AiRuntimeDeps,
+  conversationId: string,
+  chatbot: ChatbotConfig,
+  result: ChatbotTurnResult,
+  pending: readonly PendingMessage[],
+  saved: { aiRunId: string; messageIds: string[] },
+): Promise<void> {
+  const config = chatbot.capture.projectLog;
+  const entries = result.projectLogs ?? [];
+  if (!config?.enabled || entries.length === 0) return;
+  try {
+    const ids = await db.transaction(async (tx) => {
+      const botMessageIds =
+        result.decision === 'reply'
+          ? saved.messageIds
+          : (
+              await tx
+                .select({ id: messages.id })
+                .from(messages)
+                .where(
+                  and(
+                    eq(messages.conversationId, conversationId),
+                    eq(messages.aiRunId, saved.aiRunId),
+                    eq(messages.senderType, 'bot'),
+                  ),
+                )
+                .orderBy(asc(messages.createdAt), asc(messages.id))
+            ).map((m) => m.id);
+      return recordProjectLogs(tx, {
+        conversationId,
+        chatbotId: chatbot.id,
+        aiRunId: saved.aiRunId,
+        config,
+        entries,
+        customerMessageIds: orderPendingBySentAt(pending).map((m) => m.id),
+        botMessageIds,
+        now: deps.ctx.now(),
+      });
+    });
+    if (ids.length === 0) return;
+    deps.logger.info({ conversationId, count: ids.length }, 'Bot ghi nhật ký công trình');
+    await emitConversationUpdated(db, deps, conversationId);
+  } catch (error) {
+    deps.logger.warn({ conversationId, err: errorText(error) }, 'Không ghi được nhật ký công trình');
   }
 }
 

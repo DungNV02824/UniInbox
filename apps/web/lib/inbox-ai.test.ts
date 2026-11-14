@@ -2,7 +2,6 @@ import { AI_PAUSED_INDEFINITELY_ISO } from '@dezon/shared';
 import { describe, expect, it } from 'vitest';
 import { conv, msg } from './__fixtures__/inbox';
 import {
-  AI_RUN_DECISION_LABELS,
   AI_STOPPED_BY_AGENT_TEXT,
   aiPausedText,
   CHATBOT_LOCKED_HINT,
@@ -14,7 +13,6 @@ import {
   chatbotSelectOptions,
   conversationAiState,
   extractConversation,
-  formatLatency,
   handoffAckedText,
   handoffBotNote,
   handoffButtonLabels,
@@ -219,13 +217,6 @@ describe('hiển thị', () => {
       label: 'Cũ (đã tắt)',
     });
     expect(chatbotSelectOptions(bots, BOT)).toHaveLength(2);
-  });
-
-  it('nhãn quyết định + độ trễ', () => {
-    expect(AI_RUN_DECISION_LABELS.escalate).toBe('Chuyển người');
-    expect(formatLatency(850)).toBe('850 ms');
-    expect(formatLatency(1234)).toBe('1,2 s');
-    expect(formatLatency(Number.NaN)).toBe('—');
   });
 });
 

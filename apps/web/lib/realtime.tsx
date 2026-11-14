@@ -24,8 +24,13 @@ import { api, API_URL } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { contactTagKeys } from '@/lib/contact-tags-api';
 import { inboxKeys } from '@/lib/inbox-keys';
-import { createConversationBatcher } from '@/lib/conversation-batch';
-import { applyConversationUpdates, applyMessageUpdated, applyNewMessage } from '@/lib/realtime-cache';
+import { createConversationBatcher, createKeyedDebouncer } from '@/lib/conversation-batch';
+import {
+  applyConversationUpdates,
+  applyMessageUpdated,
+  applyNewMessage,
+  refreshConversationDetail,
+} from '@/lib/realtime-cache';
 import { startRealtime } from '@/lib/socket';
 
 export type HandoffListener = (payload: HandoffCreatedPayload) => void;
@@ -67,9 +72,9 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
     const batcher = createConversationBatcher((convs) =>
       applyConversationUpdates(queryClient, convs, viewer),
     );
-    /** Nhật ký AI (nếu đang mở) có lần chạy mới. */
-    const refreshAiRuns = (conversationId: string) =>
-      void queryClient.invalidateQueries({ queryKey: inboxKeys.aiRuns(conversationId) });
+    // Hồ sơ khách (SĐT, trường bot điền vào Ghi chú…) không có trong bản tóm tắt ⇒ tải lại chi tiết của
+    // hội thoại đang mở (gom sự kiện dồn dập). Ô đang gõ giữ bản nháp (xem ContactFieldEditor).
+    const detailRefresher = createKeyedDebouncer((id) => refreshConversationDetail(queryClient, id));
     const listeners = handoffListeners.current;
     const stop = startRealtime({
       url: API_URL,
@@ -83,10 +88,14 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
           applyNewMessage(queryClient, message);
           aiTyping.handleMessage(message);
           batcher.push(conversation);
-          if (message.senderType === 'bot') refreshAiRuns(message.conversationId);
+          // Lượt bot vừa trả lời có thể đã ghi Nhật ký công trình / điền Ghi chú ⇒ tải lại chi tiết (nếu đang mở).
+          if (message.senderType === 'bot') detailRefresher.push(message.conversationId);
         },
         'message.updated': (payload) => applyMessageUpdated(queryClient, payload),
-        'conversation.updated': ({ conversation }) => batcher.push(conversation),
+        'conversation.updated': ({ conversation }) => {
+          batcher.push(conversation);
+          detailRefresher.push(conversation.id);
+        },
         'ai.typing': (payload) => aiTyping.handleTyping(payload),
         // Danh sách nhãn đổi (thêm/đổi tên/đổi màu/xóa): tải lại danh sách + hồ sơ khách đang mở
         // (đổi tên/xóa nhãn sửa luôn tags trên khách).
@@ -95,7 +104,6 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
           void queryClient.invalidateQueries({ queryKey: inboxKeys.details() });
         },
         'handoff.created': (payload) => {
-          refreshAiRuns(payload.conversationId);
           for (const listener of listeners) {
             try {
               listener(payload);
@@ -119,6 +127,7 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
     return () => {
       stop();
       batcher.dispose();
+      detailRefresher.dispose();
       aiTyping.clearAll();
       setConnected(false);
     };

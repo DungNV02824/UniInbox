@@ -307,11 +307,14 @@ describe('mergeSummaryIntoDetail', () => {
         displayName: 'Chị Lan',
         avatarUrl: null,
         phone: null,
+        phoneSource: null,
         email: null,
         tags: ['vip'],
         notes: 'ghi chú',
+        profileFields: [],
         identities: [],
       },
+      projectLogs: [],
     };
     const merged = mergeSummaryIntoDetail(
       detail,
@@ -336,11 +339,14 @@ describe('đổi nhãn khách trong cache', () => {
       displayName: c.contact.displayName,
       avatarUrl: null,
       phone: null,
+      phoneSource: null,
       email: null,
       tags: ['cũ'],
       notes: null,
+      profileFields: [],
       identities: [],
     },
+    projectLogs: [],
   });
 
   it('patchContactTagsInList: sửa mọi hội thoại của khách (mọi trang), giữ nguyên khách khác', () => {

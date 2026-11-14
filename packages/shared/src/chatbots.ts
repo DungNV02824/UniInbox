@@ -193,6 +193,8 @@ export interface ChatbotDto {
   handoffResolveMessage: string | null;
   /** "Khi AI tự chuyển người thật" (xem AI_HANDOFF_MODES). Mặc định 'stop'. */
   aiHandoffMode: AiHandoffMode;
+  /** Tab "Thu thập thông tin" (xem captureConfigSchema). Bot cũ chưa cấu hình ⇒ DEFAULT_CAPTURE_CONFIG. */
+  capture: CaptureConfig;
   /** "Khi nhân viên vào nhắn tin" (xem AGENT_REPLY_MODES). Mặc định 'pause'. */
   agentReplyMode: AgentReplyMode;
   /** Số phút tạm nghỉ khi agentReplyMode = 'pause'; null = AI_PAUSE_AFTER_AGENT_MIN của server (30). */
@@ -230,6 +232,17 @@ export interface ChatbotRef {
   handoffResolveLabel?: string;
   /** true = bot đặt aiHandoffMode 'continue' (banner Cần người ghi "bot vẫn đang trả lời"). */
   aiHandoffContinues?: boolean;
+  /**
+   * Trường "Thu thập thông tin" đang bật của bot (theo thứ tự cấu hình, gồm cả 'phone'/'need') — mục Ghi chú của
+   * khách hiện sẵn các trường này (trống nếu AI chưa điền). Chỉ kèm khi tab Thu thập bật và có ít nhất một trường.
+   */
+  captureFields?: CaptureFieldRef[];
+}
+
+/** Trường thu thập rút gọn (khóa + tên) gửi kèm ChatbotRef. */
+export interface CaptureFieldRef {
+  key: string;
+  label: string;
 }
 
 const exampleSchema = z.object({
@@ -283,6 +296,8 @@ const chatbotFields = {
     .optional(),
   /** 0 = tắt nhắc lại. Bỏ trống khi tạo ⇒ DB mặc định 0. */
   handoffReminderMin: z.number().int().min(0).max(CHATBOT_LIMITS.handoffReminderMinMax).optional(),
+  /** Tab "Thu thập thông tin". Bỏ trống khi tạo ⇒ DEFAULT_CAPTURE_CONFIG. (lazy: schema khai báo cuối tệp.) */
+  capture: z.lazy(() => captureConfigSchema).optional(),
 };
 
 /** POST /chatbots (admin). Trường bỏ trống dùng mặc định của DB. */
@@ -677,3 +692,152 @@ export interface ReengageStartResult {
   /** Phút tới lượt đầu tiên của lần này: > 0 khi nối sau các khách tái chăm sóc còn chờ từ trước (0 = bắt đầu ngay). */
   startsInMinutes: number;
 }
+
+// ---------- Thu thập thông tin khách (tab "Thu thập thông tin" của bot) ----------
+
+/** Trường có sẵn: SĐT (lưu ở contacts.phone) và Nhu cầu. Trường riêng do admin thêm dùng khóa khác. */
+export const CAPTURE_BUILTIN_KEYS = ['phone', 'need'] as const;
+export type CaptureBuiltinKey = (typeof CAPTURE_BUILTIN_KEYS)[number];
+export const CAPTURE_BUILTIN_LABELS: Record<CaptureBuiltinKey, string> = { phone: 'SĐT', need: 'Nhu cầu' };
+/** Nhãn gợi ý tự gắn khi bot lấy được SĐT. */
+export const DEFAULT_CAPTURE_PHONE_TAG = 'Tiềm năng';
+
+export const CAPTURE_LIMITS = {
+  /** Tối đa số trường (kể cả 2 trường có sẵn). */
+  maxFields: 10,
+  labelMax: 40,
+  /** Hướng dẫn cho AI về trường (lấy gì, viết thế nào). */
+  hintMax: 300,
+  /** Độ dài tối đa một giá trị đã điền (ký tự). */
+  valueMax: 1000,
+  /** SĐT tối đa (ký tự). */
+  phoneMax: 30,
+} as const;
+
+/** Khóa trường: chữ thường/số/gạch dưới, bắt đầu bằng chữ (vd. 'phone', 'need', 'khu_vuc'). */
+export const CAPTURE_KEY_PATTERN = /^[a-z][a-z0-9_]{0,31}$/;
+
+export const captureFieldSchema = z.object({
+  key: z.string().regex(CAPTURE_KEY_PATTERN, { message: 'Khóa trường không hợp lệ' }),
+  label: z.string().trim().min(1, { message: 'Nhập tên trường' }).max(CAPTURE_LIMITS.labelMax),
+  hint: z.string().trim().max(CAPTURE_LIMITS.hintMax).default(''),
+  enabled: z.boolean().default(true),
+});
+export type CaptureField = z.output<typeof captureFieldSchema>;
+
+/**
+ * Cấu hình "Thu thập thông tin" của một bot (chatbots.capture). enabled ⇒ mỗi lượt bot trả lời, AI điền các trường
+ * bật (enabled) khai thác được từ chat vào hồ sơ khách (contacts.phone / contacts.profile_fields); trường nhân viên
+ * đã tự sửa thì AI không ghi đè. phoneTag (nhãn trong danh sách Nhãn khách) ⇒ tự gắn khi bot lấy được SĐT; null = không.
+ * fields luôn gồm đủ 2 trường có sẵn (phone, need — có thể tắt), khóa không trùng.
+ */
+// ---------- Nhật ký công trình (mục "Nhật ký công trình" trong tab "Thu thập thông tin") ----------
+
+/** 4 trường có sẵn của một dòng nhật ký công trình (có thể tắt, không xóa). */
+export const PROJECT_LOG_BUILTIN_KEYS = ['dia_chi', 'nha_thau', 'sdt_nha_thau', 'ngay_chup'] as const;
+export type ProjectLogBuiltinKey = (typeof PROJECT_LOG_BUILTIN_KEYS)[number];
+export const PROJECT_LOG_BUILTIN_LABELS: Record<ProjectLogBuiltinKey, string> = {
+  dia_chi: 'Địa chỉ công trình',
+  nha_thau: 'Nhà thầu',
+  sdt_nha_thau: 'SĐT nhà thầu',
+  ngay_chup: 'Ngày chụp',
+};
+export const PROJECT_LOG_LIMITS = {
+  /** Tối đa số trường (kể cả 4 trường có sẵn). */
+  maxFields: 10,
+  /** Tối đa số công trình AI ghi trong MỘT lượt trả lời. */
+  maxEntriesPerTurn: 5,
+  /** Số dòng nhật ký gần nhất trả kèm chi tiết hội thoại (ConversationDetail.projectLogs). */
+  detailMaxItems: 100,
+} as const;
+
+/**
+ * Cấu hình "Nhật ký công trình" (nằm trong CaptureConfig.projectLog, cùng cột chatbots.capture). enabled ⇒ lượt bot
+ * xác nhận tiếp nhận một công trình người nhắn gửi (ảnh/địa chỉ…), AI ghi một dòng nhật ký gồm các trường bật, gắn
+ * với các tin của lượt đó (bấm dòng ⇒ khung chat cuộn tới). Độc lập với CaptureConfig.enabled (Ghi chú khách).
+ * fields luôn gồm đủ 4 trường có sẵn (PROJECT_LOG_BUILTIN_KEYS), khóa không trùng.
+ */
+export const projectLogConfigSchema = z
+  .object({
+    enabled: z.boolean(),
+    fields: z.array(captureFieldSchema).max(PROJECT_LOG_LIMITS.maxFields),
+  })
+  .superRefine((v, ctx) => {
+    const keys = v.fields.map((f) => f.key);
+    if (new Set(keys).size !== keys.length)
+      ctx.addIssue({ code: 'custom', path: ['fields'], message: 'Trùng khóa trường' });
+    for (const k of PROJECT_LOG_BUILTIN_KEYS)
+      if (!keys.includes(k))
+        ctx.addIssue({ code: 'custom', path: ['fields'], message: `Thiếu trường có sẵn "${k}"` });
+  });
+export type ProjectLogConfig = z.output<typeof projectLogConfigSchema>;
+
+/** Mặc định: tắt, 4 trường có sẵn. */
+export const DEFAULT_PROJECT_LOG_CONFIG: ProjectLogConfig = {
+  enabled: false,
+  fields: [
+    {
+      key: 'dia_chi',
+      label: PROJECT_LOG_BUILTIN_LABELS.dia_chi,
+      hint: 'Địa chỉ công trình (đọc từ ảnh Timemark hoặc tin nhắn).',
+      enabled: true,
+    },
+    {
+      key: 'nha_thau',
+      label: PROJECT_LOG_BUILTIN_LABELS.nha_thau,
+      hint: 'Tên nhà thầu / công ty thi công trên biển báo.',
+      enabled: true,
+    },
+    {
+      key: 'sdt_nha_thau',
+      label: PROJECT_LOG_BUILTIN_LABELS.sdt_nha_thau,
+      hint: 'Số điện thoại nhà thầu trên biển báo.',
+      enabled: true,
+    },
+    {
+      key: 'ngay_chup',
+      label: PROJECT_LOG_BUILTIN_LABELS.ngay_chup,
+      hint: 'Ngày chụp ảnh (theo dấu Timemark), dạng dd/mm/yyyy.',
+      enabled: true,
+    },
+  ],
+};
+
+export const captureConfigSchema = z
+  .object({
+    enabled: z.boolean(),
+    fields: z.array(captureFieldSchema).max(CAPTURE_LIMITS.maxFields),
+    phoneTag: z.string().trim().min(1).max(50).nullable(),
+    /** Nhật ký công trình; cấu hình cũ chưa có ⇒ DEFAULT_PROJECT_LOG_CONFIG. */
+    projectLog: projectLogConfigSchema.default(DEFAULT_PROJECT_LOG_CONFIG),
+  })
+  .superRefine((v, ctx) => {
+    const keys = v.fields.map((f) => f.key);
+    if (new Set(keys).size !== keys.length)
+      ctx.addIssue({ code: 'custom', path: ['fields'], message: 'Trùng khóa trường' });
+    for (const k of CAPTURE_BUILTIN_KEYS)
+      if (!keys.includes(k))
+        ctx.addIssue({ code: 'custom', path: ['fields'], message: `Thiếu trường có sẵn "${k}"` });
+  });
+export type CaptureConfig = z.output<typeof captureConfigSchema>;
+
+/** Cấu hình mặc định (bot mới / bot cũ chưa cấu hình): tắt, 2 trường có sẵn, gắn "Tiềm năng" khi có SĐT. */
+export const DEFAULT_CAPTURE_CONFIG: CaptureConfig = {
+  enabled: false,
+  fields: [
+    {
+      key: 'phone',
+      label: CAPTURE_BUILTIN_LABELS.phone,
+      hint: 'Số điện thoại khách tự gõ trong chat.',
+      enabled: true,
+    },
+    {
+      key: 'need',
+      label: CAPTURE_BUILTIN_LABELS.need,
+      hint: 'Tóm tắt ngắn nhu cầu của khách (cần gì, quy mô, khu vực nếu có).',
+      enabled: true,
+    },
+  ],
+  phoneTag: DEFAULT_CAPTURE_PHONE_TAG,
+  projectLog: DEFAULT_PROJECT_LOG_CONFIG,
+};

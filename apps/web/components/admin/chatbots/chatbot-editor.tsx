@@ -22,6 +22,7 @@ import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useToast } from '@/components/ui/toast';
 import { ApiError } from '@/lib/api';
+import { captureTabCount, defaultPhoneTagFor } from '@/lib/chatbot-capture';
 import {
   apiErrorToForm,
   chatbotToForm,
@@ -37,6 +38,7 @@ import {
 } from '@/lib/chatbot-form';
 import { withBotContinues } from '@/lib/chatbot-test';
 import { chatbotKeys, chatbotsApi } from '@/lib/chatbots-api';
+import { useContactTags } from '@/lib/contact-tags-api';
 import { errorText } from '@/lib/inbox-queries';
 import { cn } from '@/lib/utils';
 import { UNSAVED_MESSAGE, useUnsavedGuard } from '../use-unsaved-guard';
@@ -44,6 +46,7 @@ import { ChatTestPanel, DraftInvalidError, type RunTest } from './chat-test-pane
 import { CharCounter, Field } from './fields';
 import { ReengageDialog } from './reengage-dialog';
 import { AdvancedTab, HandoffTab, StaffTab } from './tab-behavior';
+import { CaptureTab } from './tab-capture';
 import { ExamplesTab, InstructionsTab, KnowledgeTab } from './tab-content';
 
 const TAB_LABELS: Record<EditorTab, string> = {
@@ -52,6 +55,7 @@ const TAB_LABELS: Record<EditorTab, string> = {
   examples: 'Câu trả lời mẫu',
   handoff: 'Chuyển người thật',
   staff: 'Phối hợp nhân viên',
+  capture: 'Thu thập thông tin',
   advanced: 'Nâng cao',
 };
 
@@ -162,6 +166,20 @@ function ChatbotEditor({
   const [tab, setTab] = useState<EditorTab>('instructions');
   const [reengageOpen, setReengageOpen] = useState(false);
   const submitted = useRef<ChatbotFormValues | null>(null);
+
+  // Bot mới: nhãn mặc định "Tiềm năng" khi lấy được SĐT chỉ giữ nếu có trong danh sách Nhãn khách.
+  const tagCatalog = useContactTags();
+  const isNew = !initial;
+  useEffect(() => {
+    if (!isNew || !tagCatalog.data) return;
+    const catalog = tagCatalog.data;
+    const fix = (f: ChatbotFormValues): ChatbotFormValues => {
+      const next = defaultPhoneTagFor(f.capture.phoneTag, catalog);
+      return next === null ? f : { ...f, capture: { ...f.capture, phoneTag: next } };
+    };
+    setForm(fix);
+    setBaseline(fix);
+  }, [isNew, tagCatalog.data]);
 
   const dirty = isFormDirty(form, baseline);
   useUnsavedGuard(dirty);
@@ -404,6 +422,7 @@ function ChatbotEditor({
                 counts={{
                   examples: form.examples.length,
                   handoff: form.handoffKeywords.length + form.notifyKeywords.length,
+                  capture: captureTabCount(form.capture),
                 }}
               />
             </div>
@@ -418,6 +437,7 @@ function ChatbotEditor({
               {tab === 'examples' && <ExamplesTab form={form} update={update} errors={errors} />}
               {tab === 'handoff' && <HandoffTab form={form} update={update} errors={errors} />}
               {tab === 'staff' && <StaffTab form={form} update={update} errors={errors} />}
+              {tab === 'capture' && <CaptureTab form={form} update={update} errors={errors} />}
               {tab === 'advanced' && (
                 <AdvancedTab
                   form={form}

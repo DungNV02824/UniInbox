@@ -1,4 +1,9 @@
-import { DEFAULT_BUSINESS_HOURS } from '@dezon/shared';
+import {
+  DEFAULT_BUSINESS_HOURS,
+  DEFAULT_CAPTURE_CONFIG,
+  DEFAULT_PROJECT_LOG_CONFIG,
+  type CaptureConfig,
+} from '@dezon/shared';
 import { describe, expect, it } from 'vitest';
 import type { LlmPart } from './llm';
 import { promptImagesFromTest } from './orchestrator';
@@ -7,12 +12,15 @@ import {
   buildChatbotDefaults,
   buildChatbotPrompt,
   buildImageParts,
+  captureSection,
+  CHATBOT_CAPTURE_HEADING,
   CHATBOT_DEFAULTS_HEADING,
   CHATBOT_HISTORY_LIMIT,
   CHATBOT_INSTRUCTIONS_HEADING,
   CHATBOT_IMAGE_MIMES,
   CHATBOT_MAX_IMAGES,
   CHATBOT_MAX_IMAGES_TOTAL_BYTES,
+  CHATBOT_PROJECT_LOG_HEADING,
   CHATBOT_SAFETY_FRAME,
   isPromptImageMime,
   formatWaitDuration,
@@ -25,6 +33,7 @@ import {
   notifyTurnNote,
   LLM_TIMEOUT_PER_IMAGE_MS,
   planPromptImages,
+  projectLogSection,
   TURN_CONTEXT_LABEL,
   type BuildChatbotPromptInput,
 } from './prompt';
@@ -41,6 +50,7 @@ const chatbot: ChatbotConfig = {
   model: null,
   temperature: 0.4,
   escalateWhenUnsure: true,
+  capture: DEFAULT_CAPTURE_CONFIG,
 };
 
 const now = new Date('2026-11-09T14:05:00+07:00'); // Thứ Hai, trong giờ
@@ -954,5 +964,132 @@ describe('buildChatbotPrompt — lượt "Không đạt" (nhân viên bấm nút
   it('lý do rỗng/khoảng trắng ⇒ như lượt thường', () => {
     const plain = buildChatbotPrompt(input());
     expect(lastPartText(buildChatbotPrompt(input({ staffRejectReason: '   ' })))).toBe(lastPartText(plain));
+  });
+});
+
+describe('buildChatbotPrompt — "Thu thập thông tin" (capture)', () => {
+  const capture: CaptureConfig = {
+    enabled: true,
+    fields: [
+      ...DEFAULT_CAPTURE_CONFIG.fields,
+      { key: 'khu_vuc', label: 'Khu vực', hint: 'Tỉnh/thành  nơi xây', enabled: true },
+      { key: 'ngan_sach', label: 'Ngân sách', hint: '', enabled: false },
+    ],
+    phoneTag: 'Tiềm năng',
+    projectLog: DEFAULT_PROJECT_LOG_CONFIG,
+  };
+  const on = { ...chatbot, capture };
+
+  it('bot tắt thu thập ⇒ systemInstruction giữ nguyên, không có mục', () => {
+    const off = buildChatbotPrompt(input()).systemInstruction;
+    expect(off).not.toContain('# Thu thập thông tin');
+    expect(off).not.toContain('captured');
+    // Bật nhưng không còn trường nào bật ⇒ như tắt.
+    const noFields = {
+      ...chatbot,
+      capture: { ...capture, fields: capture.fields.map((f) => ({ ...f, enabled: false })) },
+    };
+    expect(buildChatbotPrompt(input({ chatbot: noFields })).systemInstruction).toBe(off);
+    expect(captureSection(chatbot)).toBeNull();
+  });
+
+  it('bật ⇒ mục cuối liệt kê trường bật (khóa (nhãn): gợi ý) + quy tắc; ổn định giữa các lượt', () => {
+    const a = buildChatbotPrompt(input({ chatbot: on })).systemInstruction;
+    const section = captureSection(on)!;
+    expect(a.endsWith(`\n\n${section}`)).toBe(true);
+    expect(section.startsWith(CHATBOT_CAPTURE_HEADING)).toBe(true);
+    expect(section).toContain('- phone (SĐT): Số điện thoại khách tự gõ trong chat.');
+    expect(section).toContain('- need (Nhu cầu): Tóm tắt ngắn nhu cầu');
+    expect(section).toContain('- khu_vuc (Khu vực): Tỉnh/thành nơi xây');
+    expect(section).not.toContain('ngan_sach');
+    expect(section).toContain('`captured`');
+    expect(section).toContain('`reply`, `escalate` hoặc `no_reply`');
+    expect(section).toContain('MỚI NHẤT');
+    // Chỉ trường mới / thay đổi trong tin mới (không lặp lại mọi trường cũ — đỡ token, không điền lại trường nhân viên đã xóa).
+    expect(section).toContain('trong các tin MỚI của lượt này');
+    expect(section).not.toContain('kể cả các tin cũ');
+    expect(section).toContain('nhu cầu ĐẦY ĐỦ hiện tại');
+    expect(section).toContain('Không đoán');
+    expect(section).toContain('[Bot] hay [NV …] KHÔNG phải thông tin của người nhắn');
+    expect(section).toContain('tối đa 2 câu');
+    expect(section).toContain('KHÔNG thay đổi điều bạn nói');
+    // Không phụ thuộc giờ / tin của lượt.
+    const b = buildChatbotPrompt(
+      input({
+        chatbot: on,
+        now: new Date('2026-11-10T22:00:00+07:00'),
+        newMessages: [{ role: 'customer', text: 'Hi' }],
+      }),
+    ).systemInstruction;
+    expect(b).toBe(a);
+    // Phần trước mục giữ nguyên như bot tắt.
+    expect(a.slice(0, a.length - section.length - 2)).toBe(buildChatbotPrompt(input()).systemInstruction);
+  });
+});
+
+describe('buildChatbotPrompt — "Nhật ký công trình" (projectLog)', () => {
+  const projectLog = {
+    enabled: true,
+    fields: [
+      ...DEFAULT_PROJECT_LOG_CONFIG.fields.map((f) => (f.key === 'nha_thau' ? { ...f, enabled: false } : f)),
+      { key: 'hang_muc', label: 'Hạng mục', hint: 'Phần việc  đang thi công', enabled: true },
+    ],
+  };
+  const on = { ...chatbot, capture: { ...DEFAULT_CAPTURE_CONFIG, projectLog } };
+
+  it('tắt / không trường nào bật ⇒ systemInstruction giữ nguyên, không có mục', () => {
+    const off = buildChatbotPrompt(input()).systemInstruction;
+    expect(off).not.toContain(CHATBOT_PROJECT_LOG_HEADING);
+    expect(off).not.toContain('project_logs');
+    const noFields = {
+      ...chatbot,
+      capture: {
+        ...DEFAULT_CAPTURE_CONFIG,
+        projectLog: { ...projectLog, fields: projectLog.fields.map((f) => ({ ...f, enabled: false })) },
+      },
+    };
+    expect(buildChatbotPrompt(input({ chatbot: noFields })).systemInstruction).toBe(off);
+    expect(projectLogSection(chatbot)).toBeNull();
+  });
+
+  it('bật ⇒ mục cuối liệt kê trường bật + quy tắc; ổn định giữa các lượt; phần trước giữ nguyên', () => {
+    const a = buildChatbotPrompt(input({ chatbot: on })).systemInstruction;
+    const section = projectLogSection(on)!;
+    expect(a.endsWith(`\n\n${section}`)).toBe(true);
+    expect(section.startsWith(CHATBOT_PROJECT_LOG_HEADING)).toBe(true);
+    expect(section).toContain('- dia_chi (Địa chỉ công trình): Địa chỉ công trình (đọc từ ảnh Timemark');
+    expect(section).toContain('- sdt_nha_thau (SĐT nhà thầu): Số điện thoại nhà thầu trên biển báo.');
+    expect(section).toContain('- ngay_chup (Ngày chụp):');
+    expect(section).toContain('- hang_muc (Hạng mục): Phần việc đang thi công');
+    expect(section).not.toContain('- nha_thau (');
+    expect(section).toContain('`project_logs`');
+    expect(section).toContain('xác nhận đã tiếp nhận');
+    expect(section).toContain('Timemark');
+    expect(section).toContain('biển báo');
+    expect(section).toContain('đã được tiếp nhận ở lượt trước');
+    expect(section).toContain('yêu cầu gửi lại');
+    expect(section).toContain('KHÔNG đoán');
+    expect(section).toContain('dd/mm/yyyy');
+    expect(section).toContain('KHÔNG thay đổi điều bạn nói');
+    const b = buildChatbotPrompt(
+      input({
+        chatbot: on,
+        now: new Date('2026-11-10T22:00:00+07:00'),
+        newMessages: [{ role: 'customer', text: 'Hi' }],
+      }),
+    ).systemInstruction;
+    expect(b).toBe(a);
+    expect(a.slice(0, a.length - section.length - 2)).toBe(buildChatbotPrompt(input()).systemInstruction);
+  });
+
+  it('cùng bật "Thu thập thông tin" ⇒ mục nhật ký đứng SAU mục thu thập', () => {
+    const both = { ...chatbot, capture: { ...DEFAULT_CAPTURE_CONFIG, enabled: true, projectLog } };
+    const s = buildChatbotPrompt(input({ chatbot: both })).systemInstruction;
+    expect(s.indexOf(CHATBOT_CAPTURE_HEADING)).toBeGreaterThan(0);
+    expect(s.indexOf(CHATBOT_PROJECT_LOG_HEADING)).toBeGreaterThan(s.indexOf(CHATBOT_CAPTURE_HEADING));
+    expect(s.endsWith(projectLogSection(both)!)).toBe(true);
+    // Thông tin công trình không lẫn vào hồ sơ người nhắn.
+    expect(projectLogSection(both)).toContain('KHÔNG ghi vào `captured`');
+    expect(projectLogSection(on)).not.toContain('captured');
   });
 });

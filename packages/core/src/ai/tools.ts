@@ -1,5 +1,13 @@
 // Ba tool bot BẮT BUỘC gọi đúng một (mục 7.3): reply / escalate / no_reply. Khai báo + Zod parse args.
-import { HANDOFF_REASON_CODES, type HandoffReasonCode } from '@dezon/shared';
+import {
+  CAPTURE_KEY_PATTERN,
+  CAPTURE_LIMITS,
+  HANDOFF_REASON_CODES,
+  PROJECT_LOG_LIMITS,
+  type CaptureConfig,
+  type CaptureField,
+  type HandoffReasonCode,
+} from '@dezon/shared';
 import { z } from 'zod';
 import type { LlmFunctionDeclaration } from './llm';
 import type { ChatbotConfig } from './types';
@@ -18,10 +26,69 @@ export const CHATBOT_MAX_SUMMARY_CHARS = 500;
 /** Độ dài tối đa lý do no_reply. */
 export const CHATBOT_MAX_REASON_CHARS = 500;
 
+/** Cắt chuỗi còn tối đa `max` ký tự (đếm theo ký tự Unicode, không cắt đôi cặp surrogate). */
+function clipChars(text: string, max: number): string {
+  const chars = Array.from(text);
+  return chars.length <= max ? text : chars.slice(0, max).join('').trimEnd();
+}
+
+/**
+ * Chuẩn hóa `captured` model trả (xem buildChatbotTools): CHỈ nhận object; khóa phải đúng CAPTURE_KEY_PATTERN;
+ * giá trị phải là chuỗi (khác chuỗi ⇒ bỏ), gộp khoảng trắng/xuống dòng thành một dấu cách, trim, bỏ rỗng,
+ * ≤ CAPTURE_LIMITS.valueMax ký tự; tối đa CAPTURE_LIMITS.maxFields khóa. Không có gì dùng được ⇒ undefined.
+ * KHÔNG BAO GIỜ ném / làm hỏng lời gọi tool. Lọc theo trường bật của bot làm ở orchestrator (filterCaptured).
+ */
+export function normalizeCapturedArg(value: unknown): Record<string, string> | undefined {
+  return normalizeStringRecord(value, CAPTURE_LIMITS.maxFields);
+}
+
+/** Lõi của normalizeCapturedArg / normalizeProjectLogsArg: object ⇒ { khóa hợp lệ: chuỗi đã gọn }, ≤ maxKeys khóa. */
+function normalizeStringRecord(value: unknown, maxKeys: number): Record<string, string> | undefined {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const out: Record<string, string> = {};
+  let count = 0;
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (count >= maxKeys) break;
+    if (!CAPTURE_KEY_PATTERN.test(key)) continue;
+    if (typeof raw !== 'string') continue;
+    const cleaned = clipChars(raw.replace(/\s+/g, ' ').trim(), CAPTURE_LIMITS.valueMax);
+    if (!cleaned) continue;
+    out[key] = cleaned;
+    count++;
+  }
+  return count > 0 ? out : undefined;
+}
+
+/** Thuộc tính tùy chọn `captured` của 3 tool: lỏng tuyệt đối (sai dạng ⇒ undefined, không làm args không hợp lệ). */
+const capturedArgSchema = z.unknown().transform(normalizeCapturedArg).optional();
+
+/**
+ * Chuẩn hóa `project_logs` model trả (Nhật ký công trình — xem buildChatbotTools): mảng các object (object đơn ⇒ coi
+ * như mảng một phần tử); mỗi phần tử chuẩn hóa như `captured` (khóa đúng CAPTURE_KEY_PATTERN, giá trị chuỗi đã gọn,
+ * bỏ rỗng, ≤ PROJECT_LOG_LIMITS.maxFields khóa); phần tử sai dạng / rỗng ⇒ bỏ; tối đa
+ * PROJECT_LOG_LIMITS.maxEntriesPerTurn phần tử. Không có gì dùng được ⇒ undefined. KHÔNG BAO GIỜ ném. Lọc theo
+ * trường bật của bot làm ở orchestrator (filterProjectLogs).
+ */
+export function normalizeProjectLogsArg(value: unknown): Array<Record<string, string>> | undefined {
+  const items = Array.isArray(value) ? value : value !== null && typeof value === 'object' ? [value] : [];
+  const out: Array<Record<string, string>> = [];
+  for (const item of items) {
+    if (out.length >= PROJECT_LOG_LIMITS.maxEntriesPerTurn) break;
+    const entry = normalizeStringRecord(item, PROJECT_LOG_LIMITS.maxFields);
+    if (entry) out.push(entry);
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+/** Thuộc tính tùy chọn `project_logs` của reply / escalate: lỏng tuyệt đối như `captured`. */
+const projectLogsArgSchema = z.unknown().transform(normalizeProjectLogsArg).optional();
+
 /** Model có thể trả nhiều hơn 3 bong bóng dù khai báo maxItems: nhận hết rồi orchestrator cắt còn 3. */
 export const replyArgsSchema = z.object({
   messages: z.array(z.string()).min(1),
   confidence: z.number().min(0).max(1),
+  captured: capturedArgSchema,
+  project_logs: projectLogsArgSchema,
 });
 export type ReplyArgs = z.infer<typeof replyArgsSchema>;
 
@@ -44,10 +111,12 @@ export const escalateArgsSchema = z.object({
             : v,
     z.array(z.string()).optional(),
   ),
+  captured: capturedArgSchema,
+  project_logs: projectLogsArgSchema,
 });
 export type EscalateArgs = z.infer<typeof escalateArgsSchema>;
 
-export const noReplyArgsSchema = z.object({ reason: z.string() });
+export const noReplyArgsSchema = z.object({ reason: z.string(), captured: capturedArgSchema });
 export type NoReplyArgs = z.infer<typeof noReplyArgsSchema>;
 
 export const CHATBOT_TOOLS: LlmFunctionDeclaration[] = [
@@ -117,26 +186,97 @@ export const STAFF_REJECT_TOOLS: LlmFunctionDeclaration[] = CHATBOT_TOOLS.filter
 /** Lý do escalate chỉ dành cho bot "không chắc ⇒ chuyển người" (escalateWhenUnsure = true). */
 export const UNSURE_REASON_CODES: readonly HandoffReasonCode[] = ['out_of_scope', 'low_confidence'];
 
+/** Tên thuộc tính thu thập thông tin khách trong args của reply / escalate / no_reply. */
+export const CAPTURED_ARG = 'captured';
+
+/** Trường "Thu thập thông tin" đang dùng: bot bật thu thập ⇒ các trường enabled (theo thứ tự cấu hình); tắt ⇒ []. */
+export function enabledCaptureFields(capture: CaptureConfig | undefined): CaptureField[] {
+  if (!capture?.enabled) return [];
+  return capture.fields.filter((f) => f.enabled);
+}
+
+/** Mô tả một trường trong tool/prompt: "<label>: <hint>" (hint rỗng ⇒ chỉ label), gọn trên một dòng. */
+export function captureFieldDescription(field: Pick<CaptureField, 'label' | 'hint'>): string {
+  const label = field.label.replace(/\s+/g, ' ').trim();
+  const hint = field.hint.replace(/\s+/g, ' ').trim();
+  return hint ? `${label}: ${hint}` : label;
+}
+
+/** Tên thuộc tính "Nhật ký công trình" trong args của reply / escalate (không có ở no_reply / lượt "Không đạt"). */
+export const PROJECT_LOGS_ARG = 'project_logs';
+
+/**
+ * Trường "Nhật ký công trình" đang dùng: capture.projectLog.enabled ⇒ các trường enabled (theo thứ tự cấu hình);
+ * tắt ⇒ []. Độc lập với capture.enabled (Ghi chú khách).
+ */
+export function enabledProjectLogFields(capture: CaptureConfig | undefined): CaptureField[] {
+  const projectLog = capture?.projectLog;
+  if (!projectLog?.enabled) return [];
+  return projectLog.fields.filter((f) => f.enabled);
+}
+
+/**
+ * JSON Schema của thuộc tính `project_logs`: mảng (≤ maxEntriesPerTurn) các object, mỗi trường bật một chuỗi, không
+ * bắt buộc trường nào. (Gemini nhận qua parametersJsonSchema — cùng kiểu khai báo với `messages` có maxItems.)
+ */
+function projectLogsProperty(fields: readonly CaptureField[]): Record<string, unknown> {
+  return {
+    type: 'array',
+    maxItems: PROJECT_LOG_LIMITS.maxEntriesPerTurn,
+    description:
+      'Nhật ký công trình (xem mục "Nhật ký công trình"): CHỈ điền khi trong lượt này người nhắn gửi một công trình MỚI (ảnh/thông tin) và lời bạn gửi xác nhận đã tiếp nhận; mỗi công trình khác nhau một phần tử. Chỉ điền trường đọc được chắc chắn, bỏ trường chưa biết. Không ảnh hưởng nội dung gửi người nhắn.',
+    items: {
+      type: 'object',
+      properties: Object.fromEntries(
+        fields.map((f) => [f.key, { type: 'string', description: captureFieldDescription(f) }]),
+      ),
+    },
+  };
+}
+
+/** JSON Schema của thuộc tính `captured`: một chuỗi cho mỗi trường bật, không bắt buộc trường nào. */
+function capturedProperty(fields: readonly CaptureField[]): Record<string, unknown> {
+  return {
+    type: 'object',
+    description:
+      'Thông tin người nhắn vừa TỰ cung cấp rõ ràng hoặc thay đổi trong các tin mới của lượt này (xem mục "Thu thập thông tin"). Chỉ điền trường đã biết chắc, dùng giá trị mới nhất; bỏ trường chưa biết hoặc không đổi. Không ảnh hưởng nội dung gửi người nhắn.',
+    properties: Object.fromEntries(
+      fields.map((f) => [f.key, { type: 'string', description: captureFieldDescription(f) }]),
+    ),
+  };
+}
+
 /**
  * Tool cho một bot. escalateWhenUnsure = false ⇒ enum reason_code của `escalate` bỏ UNSURE_REASON_CODES
  * (model không thể chuyển người vì "ngoài phạm vi / không chắc"; vẫn chuyển được theo Hướng dẫn / Mặc định
  * với lý do khác). Bật ⇒ đúng CHATBOT_TOOLS.
+ * Bot bật "Thu thập thông tin" (capture.enabled + ≥ 1 trường bật — enabledCaptureFields) ⇒ cả 3 tool có thêm thuộc
+ * tính TÙY CHỌN `captured` (object, mỗi trường bật một chuỗi, mô tả = nhãn + gợi ý); không bắt buộc. Tắt ⇒ tool giữ
+ * nguyên như trước (tiền tố ổn định cho cache ngầm). STAFF_REJECT_TOOLS (lượt "Không đạt") không bao giờ có `captured`.
+ * Bot bật "Nhật ký công trình" (capture.projectLog.enabled + ≥ 1 trường bật — enabledProjectLogFields) ⇒ RIÊNG reply và
+ * escalate có thêm thuộc tính TÙY CHỌN `project_logs` (mảng ≤ PROJECT_LOG_LIMITS.maxEntriesPerTurn object, mỗi trường
+ * bật một chuỗi). no_reply và STAFF_REJECT_TOOLS không bao giờ có.
  */
 export function buildChatbotTools(
-  chatbot: Pick<ChatbotConfig, 'escalateWhenUnsure'>,
+  chatbot: Pick<ChatbotConfig, 'escalateWhenUnsure'> & Partial<Pick<ChatbotConfig, 'capture'>>,
 ): LlmFunctionDeclaration[] {
-  if (chatbot.escalateWhenUnsure) return CHATBOT_TOOLS;
+  const fields = enabledCaptureFields(chatbot.capture);
+  const logFields = enabledProjectLogFields(chatbot.capture);
+  if (chatbot.escalateWhenUnsure && fields.length === 0 && logFields.length === 0) return CHATBOT_TOOLS;
   const allowed = HANDOFF_REASON_CODES.filter((c) => !UNSURE_REASON_CODES.includes(c));
+  const captured = fields.length > 0 ? capturedProperty(fields) : null;
+  const projectLogs = logFields.length > 0 ? projectLogsProperty(logFields) : null;
   return CHATBOT_TOOLS.map((tool) => {
-    if (tool.name !== 'escalate') return tool;
     const params = tool.parameters as { properties: Record<string, unknown> };
-    return {
-      ...tool,
-      parameters: {
-        ...tool.parameters,
-        properties: { ...params.properties, reason_code: { type: 'string', enum: allowed } },
-      },
-    };
+    const properties: Record<string, unknown> = { ...params.properties };
+    if (tool.name === 'escalate' && !chatbot.escalateWhenUnsure) {
+      properties.reason_code = { type: 'string', enum: allowed };
+    }
+    if (captured) properties[CAPTURED_ARG] = captured;
+    const withLogs = projectLogs !== null && (tool.name === 'reply' || tool.name === 'escalate');
+    if (withLogs) properties[PROJECT_LOGS_ARG] = projectLogs;
+    if (properties.reason_code === params.properties.reason_code && !captured && !withLogs) return tool;
+    return { ...tool, parameters: { ...tool.parameters, properties } };
   });
 }
 

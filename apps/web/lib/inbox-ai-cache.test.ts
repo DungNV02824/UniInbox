@@ -29,11 +29,14 @@ function detail(overrides: Partial<ConversationDetail> = {}): ConversationDetail
     contactDetail: {
       ...base.contact,
       phone: '0900000000',
+      phoneSource: null,
       email: null,
       tags: ['vip'],
       notes: 'ghi chú',
+      profileFields: [],
       identities: [],
     },
+    projectLogs: [],
     ...overrides,
   };
 }

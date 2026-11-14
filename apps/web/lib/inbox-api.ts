@@ -1,6 +1,5 @@
 // Lời gọi REST của hộp thư và trang Kênh (hợp đồng: @dezon/shared/inbox).
 import type {
-  AiRunDto,
   ChannelAccountDto,
   ChannelType,
   ChatbotSummary,
@@ -15,6 +14,7 @@ import type {
   FacebookLoginStartResponse,
   MessageDto,
   Page,
+  ProjectLogDto,
   RejectHandoffRequest,
   SendMessageRequest,
   SyncChannelRequest,
@@ -124,9 +124,15 @@ export const inboxApi = {
   rejectHandoff(id: string, body: RejectHandoffRequest) {
     return api.request<unknown>(`/conversations/${enc(id)}/handoff/reject`, { method: 'POST', body });
   },
-  /** Nhật ký AI (admin): 20 lần chạy gần nhất. */
-  listAiRuns(id: string) {
-    return api.request<AiRunDto[]>(`/conversations/${enc(id)}/ai-runs`);
+  /**
+   * Xóa một dòng Nhật ký công trình. Máy chủ trả 204 hoặc danh sách nhật ký mới (ProjectLogDto[]) — cả hai đều
+   * được; nơi gọi tải lại chi tiết hội thoại.
+   */
+  deleteProjectLog(conversationId: string, logId: string) {
+    return api.request<ProjectLogDto[] | undefined>(
+      `/conversations/${enc(conversationId)}/project-logs/${enc(logId)}`,
+      { method: 'DELETE' },
+    );
   },
   uploadMedia(file: File) {
     const form = new FormData();

@@ -1,6 +1,6 @@
 'use client';
 
-// Hook dữ liệu của tính năng Chatbot AI trong hộp thư: danh sách bot cho ô chọn, nhật ký AI,
+// Hook dữ liệu của tính năng Chatbot AI trong hộp thư: danh sách bot cho ô chọn,
 // các thao tác (gắn bot, tiếp tục AI, nhận / xong / không đạt handoff) cập nhật lạc quan + báo lỗi bằng toast.
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { ChatbotRef, ConversationSummary, RejectHandoffRequest } from '@dezon/shared';
@@ -25,16 +25,6 @@ export function useChatbotOptions(enabled = true) {
     queryFn: () => inboxApi.listChatbots(),
     staleTime: 60_000,
     enabled,
-  });
-}
-
-/** Nhật ký AI của một hội thoại (admin), chỉ tải khi mở mục. */
-export function useAiRuns(conversationId: string, enabled: boolean) {
-  return useQuery({
-    queryKey: inboxKeys.aiRuns(conversationId),
-    queryFn: () => inboxApi.listAiRuns(conversationId),
-    enabled,
-    staleTime: 15_000,
   });
 }
 

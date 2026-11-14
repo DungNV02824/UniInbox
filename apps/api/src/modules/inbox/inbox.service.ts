@@ -1,4 +1,5 @@
 import {
+  deleteProjectLog,
   getConversationDetail,
   type InboxContext,
   listConversations,
@@ -21,6 +22,7 @@ import {
   type ListMessagesQuery,
   type MessageDto,
   type Page,
+  type ProjectLogDto,
   REALTIME_EVENTS,
   type SendMessageRequest,
   type UpdateContactRequest,
@@ -106,12 +108,29 @@ export class InboxService {
   }
 
   /**
-   * Sửa khách; đổi tên hoặc tag ⇒ phát conversation.updated (summary có contact.displayName/tags mới) cho các
-   * hội thoại của khách để danh sách đang mở cập nhật ngay.
+   * Xóa một dòng "Nhật ký công trình" của hội thoại; phát conversation.updated để các máy đang mở hội thoại tải lại
+   * chi tiết (nhật ký). Trả nhật ký còn lại (mới nhất trước).
+   */
+  async deleteProjectLog(viewer: Viewer, id: string, logId: string): Promise<ProjectLogDto[]> {
+    const { projectLogs, conversation } = await deleteProjectLog(this.db, viewer, id, logId, this.ctx);
+    this.realtime.emit(roomsOf(conversation), REALTIME_EVENTS.conversationUpdated, { conversation });
+    return projectLogs;
+  }
+
+  /**
+   * Sửa khách (tên / ghi chú / tag / SĐT / trường thông tin); sửa bất kỳ mục nào ⇒ phát conversation.updated
+   * (summary có contact.displayName/tags mới) cho các hội thoại của khách để danh sách / máy khác đang mở cập nhật ngay
+   * (máy khác tải lại hồ sơ khách khi nhận conversation.updated).
    */
   async updateContact(viewer: Viewer, id: string, input: UpdateContactRequest): Promise<ContactDetail> {
     const detail = await updateContact(this.db, viewer, id, input, this.ctx);
-    if (input.tags !== undefined || input.displayName !== undefined) {
+    if (
+      input.tags !== undefined ||
+      input.displayName !== undefined ||
+      input.phone !== undefined ||
+      input.notes !== undefined ||
+      input.profileFields !== undefined
+    ) {
       await this.contactConversations.emitForContacts([detail.id]);
     }
     return detail;

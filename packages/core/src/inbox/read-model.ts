@@ -27,6 +27,8 @@ import type {
 import { asc, eq, sql, type SQL } from 'drizzle-orm';
 import type { NodePgQueryResultHKT } from 'drizzle-orm/node-postgres';
 import type { PgDatabase } from 'drizzle-orm/pg-core';
+import { captureFieldRefs } from '../ai/config';
+import { toProfileFieldDtos } from '../contacts/profile-fields';
 import { isAttachmentRetryPending } from '../pipeline/attachment-retry-policy';
 import { firstCustomerMessageAtSql } from '../pipeline/window-anchor';
 import { sendWindowInfo } from '../policy';
@@ -108,6 +110,8 @@ const summaryFields = {
   chatbotAckLabel: chatbots.handoffAckLabel,
   chatbotResolveLabel: chatbots.handoffResolveLabel,
   chatbotAiHandoffMode: chatbots.aiHandoffMode,
+  // Chỉ lấy cấu hình thu thập khi đang bật (bot tắt thu thập không cần tải jsonb về cho mỗi dòng danh sách).
+  chatbotCapture: sql<unknown>`case when ${chatbots.capture} -> 'enabled' = 'true'::jsonb then ${chatbots.capture} end`,
   handoff: openHandoffSql,
 };
 
@@ -137,6 +141,16 @@ export async function signAvatar(value: string | null, ctx: InboxContext): Promi
   if (!value) return null;
   if (/^https?:\/\//i.test(value)) return value;
   return ctx.signUrl(value);
+}
+
+/** Cột json từ biểu thức sql thô: driver thường đã parse; phòng khi nhận chuỗi. Chuỗi hỏng ⇒ null. */
+function parseJsonValue(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return null;
+  }
 }
 
 function parseLastMessage(value: unknown): LastMessagePreview | null {
@@ -186,6 +200,7 @@ export async function toSummary(row: SummaryRow, ctx: InboxContext): Promise<Con
     color: row.channelColor,
     status: row.channelStatus,
   };
+  const captureFields = row.chatbotId ? captureFieldRefs(parseJsonValue(row.chatbotCapture)) : undefined;
   return {
     id: row.id,
     status: row.status,
@@ -224,6 +239,8 @@ export async function toSummary(row: SummaryRow, ctx: InboxContext): Promise<Con
             ...(row.chatbotResolveLabel ? { handoffResolveLabel: row.chatbotResolveLabel } : {}),
             // Bot vẫn trả lời sau khi AI tự chuyển người (banner Cần người ghi rõ). Chỉ kèm khi true.
             ...(row.chatbotAiHandoffMode === 'continue' ? { aiHandoffContinues: true } : {}),
+            // Trường thu thập đang bật (mục Ghi chú của khách hiện sẵn). Chỉ kèm khi tab Thu thập bật.
+            ...(captureFields ? { captureFields } : {}),
           }
         : null,
     aiPausedUntil:
@@ -354,9 +371,12 @@ export async function loadContactDetail(
     displayName: contact.displayName,
     avatarUrl: await signAvatar(contact.avatarUrl, ctx),
     phone: contact.phone,
+    // SĐT trống (kể cả nhân viên đã xóa — phoneSource 'user' giữ làm dấu cho bot) ⇒ không có nguồn.
+    phoneSource: contact.phone ? (contact.phoneSource ?? null) : null,
     email: contact.email,
     tags: contact.tags,
     notes: contact.notes,
+    profileFields: toProfileFieldDtos(contact.profileFields),
     identities: identities.map((i) => ({
       id: i.id,
       externalUserId: i.externalUserId,

@@ -24,6 +24,8 @@ import type {
 import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { DEFAULT_AI_PAUSE_AFTER_AGENT_MIN, pauseAiAfterAgentMessage } from '../ai/agent-pause';
 import { normalizeContactTags } from '../contact-tags/service';
+import { normalizeVnPhone } from '../contacts/capture';
+import { defaultProfileFieldLabel } from '../contacts/profile-fields';
 import { firstCustomerMessageAt } from '../pipeline/window-anchor';
 import { canSend } from '../policy';
 import {
@@ -325,7 +327,16 @@ export async function updateConversation(
   return { conversation: await summaryOrThrow(db, conversationId, ctx), previousAssigneeId };
 }
 
-/** Sửa tên/ghi chú/tag khách. Viewer phải xem được ít nhất một hội thoại của khách (admin luôn được). */
+/**
+ * Sửa tên/ghi chú/tag/SĐT/trường thông tin khách — chỉ trường có trong input. Viewer phải xem được ít nhất một hội
+ * thoại của khách (admin luôn được).
+ * - phone: trim; rỗng/null ⇒ xóa (phone null, phoneSource 'user' — dấu "nhân viên đã xóa": bot không điền lại, không
+ *   gắn lại nhãn); có ⇒ lưu (SĐT VN hợp lệ ⇒ dạng chuẩn normalizeVnPhone, không ⇒ nguyên văn), phoneSource 'user'
+ *   (bot không ghi đè).
+ * - profileFields: mỗi mục { label (gửi lên ?? đang có ?? mặc định), value, source 'user' }; rỗng/null ⇒ value ''
+ *   (ẩn khi hiển thị — toProfileFieldDtos — nhưng giữ dấu để bot không điền lại).
+ * Audit 'contact.update' chỉ ghi TÊN trường ('phone', 'profileFields.<khóa>'…), không ghi giá trị.
+ */
 export async function updateContact(
   db: Db,
   viewer: Viewer,
@@ -333,11 +344,8 @@ export async function updateContact(
   input: UpdateContactRequest,
   ctx: InboxContext,
 ): Promise<ContactDetail> {
-  const [contact] = await db
-    .select({ id: contacts.id, tags: contacts.tags })
-    .from(contacts)
-    .where(eq(contacts.id, contactId));
-  if (!contact) throw new InboxNotFoundError('Không tìm thấy khách hàng');
+  const [exists] = await db.select({ id: contacts.id }).from(contacts).where(eq(contacts.id, contactId));
+  if (!exists) throw new InboxNotFoundError('Không tìm thấy khách hàng');
   if (viewer.role !== 'admin') {
     const [visible] = await db
       .select({ id: conversations.id })
@@ -347,28 +355,69 @@ export async function updateContact(
     if (!visible) throw new InboxForbiddenError('Bạn không có quyền sửa thông tin khách hàng này');
   }
 
-  const set: Partial<typeof contacts.$inferInsert> = {};
-  if (input.displayName !== undefined) set.displayName = input.displayName;
-  if (input.notes !== undefined) set.notes = input.notes;
-  // Nhãn mới phải có trong danh sách nhãn (đổi về cách viết của danh sách); nhãn cũ ngoài danh sách được giữ.
-  if (input.tags !== undefined) set.tags = await normalizeContactTags(db, contact.tags, input.tags);
-  const fields = Object.keys(set);
-  if (fields.length > 0) {
-    await db.transaction(async (tx) => {
-      await tx
-        .update(contacts)
-        .set({ ...set, updatedAt: ctx.now() })
-        .where(eq(contacts.id, contactId));
-      // Không ghi nội dung (thông tin cá nhân) vào audit, chỉ ghi tên trường đã sửa.
-      await tx.insert(auditLogs).values({
-        userId: viewer.id,
-        action: 'contact.update',
-        entity: 'contact',
-        entityId: contactId,
-        data: { fields },
-      });
+  await db.transaction(async (tx) => {
+    // Khóa dòng: bot có thể đang ghi thông tin thu thập (applyCapturedFields) cùng lúc.
+    const [contact] = await tx
+      .select({ tags: contacts.tags, profileFields: contacts.profileFields })
+      .from(contacts)
+      .where(eq(contacts.id, contactId))
+      .for('update');
+    if (!contact) throw new InboxNotFoundError('Không tìm thấy khách hàng');
+
+    const set: Partial<typeof contacts.$inferInsert> = {};
+    const fields: string[] = [];
+    if (input.displayName !== undefined) {
+      set.displayName = input.displayName;
+      fields.push('displayName');
+    }
+    if (input.notes !== undefined) {
+      set.notes = input.notes;
+      fields.push('notes');
+    }
+    // Nhãn mới phải có trong danh sách nhãn (đổi về cách viết của danh sách); nhãn cũ ngoài danh sách được giữ.
+    if (input.tags !== undefined) {
+      set.tags = await normalizeContactTags(tx, contact.tags, input.tags);
+      fields.push('tags');
+    }
+    if (input.phone !== undefined) {
+      const phone = input.phone?.trim() ?? '';
+      // SĐT Việt Nam hợp lệ ⇒ lưu dạng chuẩn (0xxxxxxxxx); không nhận ra ⇒ giữ nguyên như nhân viên gõ.
+      set.phone = phone === '' ? null : (normalizeVnPhone(phone) ?? phone);
+      // Xóa cũng là nhân viên sửa: giữ phoneSource 'user' để bot không điền lại SĐT cũ từ lịch sử chat.
+      set.phoneSource = 'user';
+      fields.push('phone');
+    }
+    if (input.profileFields !== undefined && input.profileFields.length > 0) {
+      const now = ctx.now().toISOString();
+      const next = { ...(contact.profileFields ?? {}) };
+      for (const item of input.profileFields) {
+        const value = item.value?.trim() ?? '';
+        const previous = Object.hasOwn(next, item.key) ? next[item.key] : undefined;
+        // Rỗng ⇒ value '' (không xóa khóa): dấu "nhân viên đã xóa" để bot không điền lại; hiển thị bỏ qua mục rỗng.
+        next[item.key] = {
+          label: item.label?.trim() || previous?.label || defaultProfileFieldLabel(item.key),
+          value,
+          source: 'user',
+          updatedAt: now,
+        };
+        fields.push(`profileFields.${item.key}`);
+      }
+      set.profileFields = next;
+    }
+    if (fields.length === 0) return;
+    await tx
+      .update(contacts)
+      .set({ ...set, updatedAt: ctx.now() })
+      .where(eq(contacts.id, contactId));
+    // Không ghi nội dung (thông tin cá nhân) vào audit, chỉ ghi tên trường đã sửa.
+    await tx.insert(auditLogs).values({
+      userId: viewer.id,
+      action: 'contact.update',
+      entity: 'contact',
+      entityId: contactId,
+      data: { fields: [...new Set(fields)] },
     });
-  }
+  });
 
   const detail = await loadContactDetail(db, contactId, ctx);
   if (!detail) throw new InboxNotFoundError('Không tìm thấy khách hàng');

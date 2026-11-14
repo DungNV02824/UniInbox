@@ -16,6 +16,7 @@ import {
   applyMessageCreated,
   applyMessageUpdated,
   markReadLocally,
+  refreshConversationDetail,
   setContactTagsLocally,
 } from './realtime-cache';
 
@@ -57,11 +58,14 @@ describe('realtime-cache', () => {
         displayName: 'Chị Lan',
         avatarUrl: null,
         phone: null,
+        phoneSource: null,
         email: null,
         tags: [],
         notes: null,
+        profileFields: [],
         identities: [],
       },
+      projectLogs: [],
     };
     qc.setQueryData(inboxKeys.detail('c-1'), detail);
 
@@ -175,7 +179,17 @@ describe('setContactTagsLocally', () => {
     );
     const detail = (c: typeof mine): ConversationDetail => ({
       ...c,
-      contactDetail: { ...c.contact, phone: null, email: null, tags: [], notes: null, identities: [] },
+      contactDetail: {
+        ...c.contact,
+        phone: null,
+        phoneSource: null,
+        email: null,
+        tags: [],
+        notes: null,
+        profileFields: [],
+        identities: [],
+      },
+      projectLogs: [],
     });
     qc.setQueryData(inboxKeys.detail('c-1'), detail(mine));
     qc.setQueryData(inboxKeys.detail('c-3'), detail(mine2));
@@ -199,5 +213,16 @@ describe('setContactTagsLocally', () => {
     expect(qc.getQueryData<ConversationsData>(inboxKeys.list({}))!.pages[0]!.items[0]!.contact.tags).toEqual(
       [],
     );
+  });
+});
+
+describe('refreshConversationDetail', () => {
+  it('đánh dấu cũ chi tiết đã có trong cache; chưa có thì không tạo query', async () => {
+    const qc = new QueryClient();
+    qc.setQueryData(inboxKeys.detail('c-1'), { id: 'c-1' });
+    refreshConversationDetail(qc, 'c-1');
+    refreshConversationDetail(qc, 'c-404');
+    expect(qc.getQueryState(inboxKeys.detail('c-1'))!.isInvalidated).toBe(true);
+    expect(qc.getQueryState(inboxKeys.detail('c-404'))).toBeUndefined();
   });
 });

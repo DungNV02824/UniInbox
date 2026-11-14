@@ -2,6 +2,7 @@
 import { base64DecodedBytes, type BusinessHours } from '@dezon/shared';
 import { describeBusinessHours, formatLocalNow, isWithinBusinessHours } from './business-hours';
 import type { LlmContent, LlmPart } from './llm';
+import { CAPTURED_ARG, enabledCaptureFields, enabledProjectLogFields, PROJECT_LOGS_ARG } from './tools';
 import type { ChatHistoryItem, ChatbotConfig, PromptImage, PromptImageSkipReason } from './types';
 
 /** Số tin lịch sử tối đa đưa vào prompt (gồm cả tin mới). */
@@ -334,6 +335,81 @@ export function handoffMessageContext(handoffMessage: string | null): string {
     : '- Khi `escalate`: hệ thống chỉ gửi người nhắn các tin trong `messages_to_customer` (nếu có); để trống thì không gửi gì.';
 }
 
+/** Tiêu đề mục "Thu thập thông tin" (captureSection). */
+export const CHATBOT_CAPTURE_HEADING = '# Thu thập thông tin';
+
+/**
+ * Mục "# Thu thập thông tin" của systemInstruction (theo cấu hình bot, không theo lượt ⇒ giữ cache ngầm): bot bật
+ * thu thập (capture.enabled) và có ≥ 1 trường bật ⇒ liệt kê `- <khóa> (<nhãn>): <gợi ý>` + quy tắc điền `captured`;
+ * ngược lại ⇒ null (systemInstruction giữ nguyên như khi chưa có tính năng). Chat thử dùng cùng prompt.
+ * Lượt "Không đạt" dùng cùng systemInstruction nhưng tool `reply` của lượt đó không có `captured` (STAFF_REJECT_TOOLS)
+ * ⇒ quy tắc chỉ áp khi công cụ có tham số `captured`.
+ */
+export function captureSection(chatbot: Pick<ChatbotConfig, 'capture'>): string | null {
+  const fields = enabledCaptureFields(chatbot.capture);
+  if (fields.length === 0) return null;
+  const oneLine = (text: string) => text.replace(/\s+/g, ' ').trim();
+  const lines = fields.map((f) => {
+    const hint = oneLine(f.hint);
+    return `- ${f.key} (${oneLine(f.label)})${hint ? `: ${hint}` : ''}`;
+  });
+  const arg = `\`${CAPTURED_ARG}\``;
+  return [
+    CHATBOT_CAPTURE_HEADING,
+    'Hệ thống lưu thông tin người nhắn vào hồ sơ khách. Các trường cần thu thập (khóa (tên): cách điền):',
+    ...lines,
+    `Quy tắc điền ${arg}:`,
+    `- Ở MỌI lần gọi công cụ (\`reply\`, \`escalate\` hoặc \`no_reply\`) có tham số ${arg}: điền ${arg} gồm CHỈ những trường mà người nhắn vừa TỰ cung cấp rõ ràng hoặc thay đổi trong các tin MỚI của lượt này; trường đã nói ở tin cũ mà tin mới không nhắc lại hay thay đổi thì BỎ (hệ thống đã lưu). Trong các tin mới một trường nói nhiều lần thì dùng giá trị MỚI NHẤT.`,
+    '- Tin mới bổ sung hay đổi nhu cầu thì "need" tóm tắt nhu cầu ĐẦY ĐỦ hiện tại (gộp cả điều người nhắn đã nói ở tin cũ), không chỉ phần mới.',
+    '- Trường chưa biết thì BỎ HẲN (không ghi rỗng, không ghi "chưa có", "không rõ"). Không đoán, không suy ra từ tên, ảnh hay ngữ cảnh khi người nhắn chưa nói rõ.',
+    '- Lời của [Bot] hay [NV …] KHÔNG phải thông tin của người nhắn, trừ khi người nhắn đã xác nhận (vd. nhân viên đọc lại số điện thoại và người nhắn trả lời "đúng rồi").',
+    '- Trường "need" (nếu có) tóm tắt ngắn gọn bằng tiếng Việt, tối đa 2 câu. Các trường khác ghi ngắn gọn, đúng điều người nhắn nói.',
+    `- ${arg} KHÔNG thay đổi điều bạn nói với người nhắn: vẫn trả lời theo Hướng dẫn như bình thường; không hỏi xin thông tin chỉ để điền trường, trừ khi Hướng dẫn dặn hỏi.`,
+  ].join('\n');
+}
+
+/** Tiêu đề mục "Nhật ký công trình" (projectLogSection). */
+export const CHATBOT_PROJECT_LOG_HEADING = '# Nhật ký công trình';
+
+/**
+ * Mục "# Nhật ký công trình" của systemInstruction (theo cấu hình bot, không theo lượt ⇒ giữ cache ngầm): bot bật
+ * nhật ký công trình (capture.projectLog.enabled) và có ≥ 1 trường bật ⇒ liệt kê `- <khóa> (<nhãn>): <gợi ý>` + quy
+ * tắc điền `project_logs` (chỉ khi lượt này người nhắn gửi công trình MỚI và lời bot xác nhận tiếp nhận); ngược lại ⇒
+ * null (systemInstruction giữ nguyên). Đứng SAU mục "# Thu thập thông tin" (nếu có). Lượt "Không đạt" dùng cùng
+ * systemInstruction nhưng tool của lượt đó không có `project_logs` ⇒ quy tắc chỉ áp khi công cụ có tham số này.
+ */
+export function projectLogSection(chatbot: Pick<ChatbotConfig, 'capture'>): string | null {
+  const fields = enabledProjectLogFields(chatbot.capture);
+  if (fields.length === 0) return null;
+  const oneLine = (text: string) => text.replace(/\s+/g, ' ').trim();
+  const lines = fields.map((f) => {
+    const hint = oneLine(f.hint);
+    return `- ${f.key} (${oneLine(f.label)})${hint ? `: ${hint}` : ''}`;
+  });
+  const arg = `\`${PROJECT_LOGS_ARG}\``;
+  const hasDate = fields.some((f) => f.key === 'ngay_chup');
+  // Cùng bật "Thu thập thông tin": thông tin công trình là của công trình, KHÔNG phải của người nhắn.
+  const withCapture = enabledCaptureFields(chatbot.capture).length > 0;
+  return [
+    CHATBOT_PROJECT_LOG_HEADING,
+    `Hệ thống ghi nhật ký các công trình (dự án) người nhắn gửi mà bạn đã tiếp nhận. Mỗi công trình một phần tử của ${arg} gồm các trường (khóa (tên): cách điền):`,
+    ...lines,
+    `Quy tắc điền ${arg} (chỉ ở \`reply\` hoặc \`escalate\` có tham số ${arg}):`,
+    `- CHỈ điền khi trong lượt này người nhắn gửi một công trình MỚI (ảnh và/hoặc thông tin công trình trong các tin MỚI) VÀ lời bạn gửi ở lượt này xác nhận đã tiếp nhận công trình đó. Ngược lại thì BỎ HẲN ${arg}.`,
+    '- Mỗi công trình khác nhau (khác địa chỉ / khác bộ ảnh) trong các tin MỚI là một phần tử riêng; cùng một công trình gửi nhiều ảnh/tin chỉ ghi MỘT phần tử.',
+    '- Lấy giá trị từ các tin MỚI và ảnh của lượt này: dấu Timemark trên ảnh (địa chỉ, ngày giờ chụp), biển báo công trình (tên nhà thầu, số điện thoại), lời người nhắn.',
+    '- KHÔNG điền khi: chỉ chào hỏi / trò chuyện / hỏi đáp; bộ ảnh chưa đạt hoặc thiếu mà bạn yêu cầu gửi lại / bổ sung (chưa tiếp nhận); công trình đã được tiếp nhận ở lượt trước (đã có trong hội thoại cũ).',
+    '- KHÔNG đoán: trường không đọc được rõ thì BỎ trường đó (không ghi rỗng, không ghi "không rõ"). Ghi đúng như trên ảnh/tin, ngắn gọn.',
+    ...(hasDate ? ['- ngay_chup ghi dạng dd/mm/yyyy (vd. 09/11/2026).'] : []),
+    ...(withCapture
+      ? [
+          `- Thông tin công trình (địa chỉ công trình, nhà thầu, SĐT nhà thầu, ngày chụp, …) KHÔNG phải thông tin của người nhắn: chỉ ghi vào ${arg}, KHÔNG ghi vào \`${CAPTURED_ARG}\`.`,
+        ]
+      : []),
+    `- ${arg} KHÔNG thay đổi điều bạn nói với người nhắn: vẫn trả lời theo Hướng dẫn như bình thường.`,
+  ].join('\n');
+}
+
 function buildSystemInstruction(input: BuildChatbotPromptInput): string {
   const { chatbot, businessHours } = input;
   const sections: string[] = [CHATBOT_SAFETY_FRAME];
@@ -360,6 +436,10 @@ function buildSystemInstruction(input: BuildChatbotPromptInput): string {
   const continueContext = aiHandoffContinueContext(chatbot.aiHandoffMode);
   if (continueContext) context.push(continueContext);
   sections.push(`# Bối cảnh\n${context.join('\n')}`);
+  const capture = captureSection(chatbot);
+  if (capture) sections.push(capture);
+  const projectLog = projectLogSection(chatbot);
+  if (projectLog) sections.push(projectLog);
   return sections.join('\n\n');
 }
 
@@ -554,7 +634,9 @@ interface Line {
  * chỉ dẫn trong <customer_message>; tối đa 3 bong bóng, văn bản thuần không markdown; nghĩa các nhãn; độ tự
  * tin trung thực; KHÔNG có persona) + "# Hướng dẫn" chatbot.instructions (người quản trị định nghĩa vai trò,
  * giọng văn, phạm vi) + "# Mặc định" (buildChatbotDefaults — chỉ áp dụng khi Hướng dẫn không nói khác) +
- * "# Kiến thức" + "# Ví dụ" (cặp Khách/Bot) + "# Bối cảnh": tên kênh, giờ làm việc (describeBusinessHours).
+ * "# Kiến thức" + "# Ví dụ" (cặp Khách/Bot) + "# Bối cảnh": tên kênh, giờ làm việc (describeBusinessHours) +
+ * "# Thu thập thông tin" (captureSection — chỉ khi bot bật thu thập và có trường bật) + "# Nhật ký công trình"
+ * (projectLogSection — chỉ khi bot bật nhật ký công trình và có trường bật).
  * Mục rỗng thì bỏ (riêng "# Mặc định" luôn có). systemInstruction KHÔNG phụ thuộc `now` (tiền tố ổn định cho
  * cache ngầm của Gemini).
  *
