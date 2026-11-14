@@ -221,7 +221,12 @@ function HandoffBanner({ conversation: c }: { conversation: ConversationSummary 
         <Siren className={cn('size-4 shrink-0 text-blue-600', !collapsed && 'mt-0.5')} aria-hidden />
         <div className="flex min-w-0 flex-col gap-0.5">
           <p className={cn('font-semibold', collapsed && 'truncate')}>
-            Cần người: {h ? handoffReasonLabel(h.reasonCode) : 'Hội thoại đang chờ nhân viên xử lý'}
+            {/* "Lý do khác" (reasonCode 'other') không nói thêm gì ⇒ chỉ ghi "Cần người". */}
+            {!h
+              ? 'Cần người: Hội thoại đang chờ nhân viên xử lý'
+              : h.reasonCode === 'other'
+                ? 'Cần người'
+                : `Cần người: ${handoffReasonLabel(h.reasonCode)}`}
           </p>
           {!collapsed && summary && (
             <div className="text-sm">
