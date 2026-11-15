@@ -9,6 +9,7 @@ import {
   channelAccountOptions,
   channelFilterFor,
   channelOptionLabel,
+  channelsForFilterMenu,
   groupChannelsForFilter,
   isChannelActive,
   selectedChannelKey,
@@ -58,7 +59,12 @@ export function ChannelFilterMenu({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
-  const groups = useMemo(() => groupChannelsForFilter(channels), [channels]);
+  // Kênh đã ngắt không hiện trong menu (trừ kênh đang chọn).
+  const menuChannels = useMemo(
+    () => channelsForFilterMenu(channels, value.channelAccountId),
+    [channels, value.channelAccountId],
+  );
+  const groups = useMemo(() => groupChannelsForFilter(menuChannels), [menuChannels]);
   const options = useMemo(() => channelAccountOptions(groups), [groups]);
   const selectedKey = selectedChannelKey(value);
   const selectedIndex = Math.max(

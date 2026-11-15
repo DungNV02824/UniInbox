@@ -8,6 +8,7 @@ import {
   channelFilterFor,
   channelFilterOptions,
   channelOptionLabel,
+  channelsForFilterMenu,
   clearPopoverFilters,
   countPopoverFilters,
   defaultChannelId,
@@ -208,5 +209,20 @@ describe('lọc theo nhãn', () => {
       assignee: undefined,
       aiState: undefined,
     });
+  });
+});
+
+describe('kênh trong menu lọc', () => {
+  const ch = (id: string, status: 'connected' | 'disconnected') => ({ id, status });
+  it('ẩn kênh đã ngắt, trừ kênh đang chọn; giữ thứ tự', () => {
+    const list = [
+      ch('a', 'connected'),
+      ch('b', 'disconnected'),
+      ch('c', 'connected'),
+      ch('d', 'disconnected'),
+    ];
+    expect(channelsForFilterMenu(list, null).map((c) => c.id)).toEqual(['a', 'c']);
+    expect(channelsForFilterMenu(list, 'a').map((c) => c.id)).toEqual(['a', 'c']);
+    expect(channelsForFilterMenu(list, 'd').map((c) => c.id)).toEqual(['a', 'c', 'd']);
   });
 });

@@ -29,6 +29,17 @@ export function isChannelActive(ch: Pick<ChannelAccountDto, 'status'>): boolean 
   return ch.status === 'connected';
 }
 
+/**
+ * Kênh hiện trong menu lọc: chỉ kênh đang kết nối; kênh đã ngắt bị ẩn — trừ kênh ĐANG chọn (vẫn hiện để biết mình
+ * đang xem gì, vd. lựa chọn cũ còn lưu).
+ */
+export function channelsForFilterMenu<T extends Pick<ChannelAccountDto, 'id' | 'status'>>(
+  channels: readonly T[],
+  selectedId: string | null | undefined,
+): T[] {
+  return channels.filter((ch) => isChannelActive(ch) || ch.id === selectedId);
+}
+
 /** Tên kênh trong menu, kèm hậu tố khi kênh không hoạt động. */
 export function channelOptionLabel(ch: Pick<ChannelAccountDto, 'displayName' | 'status'>): string {
   return ch.status === 'connected'
