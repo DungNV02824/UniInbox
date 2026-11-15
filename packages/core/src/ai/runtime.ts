@@ -15,7 +15,9 @@ import {
   aiSettingsSchema,
   DEFAULT_AI_SETTINGS,
   HANDOFF_REASON_CODES,
+  REENGAGE_FOLLOWUP_MIN_IDLE_MINUTES,
   REENGAGE_LIMITS,
+  REENGAGE_MODE_LABELS,
   type HandoffReasonCode,
 } from '@dezon/shared';
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
@@ -33,6 +35,13 @@ import { recordProjectLogs } from '../project-logs/service';
 import { toChatbotConfig } from './config';
 import type { ReengageGuidance } from './prompt';
 import {
+  followUpAlreadySentSql,
+  hasRecentActivitySql,
+  lastNonSystemSenderSql,
+  lastOwnMessageFailedSql,
+  REENGAGE_FOLLOWUP_TOOL_LOG,
+} from './reengage';
+import {
   botCanSend,
   bubbleDelays,
   countBotTurnsLastHour,
@@ -44,7 +53,7 @@ import {
 } from './delivery';
 import { escalateConversation } from './escalate';
 import { notifyStaffKeyword, type NotifyStaffInput } from './notify-staff';
-import type { LlmClient } from './llm';
+import { isLlmOutageErrorText, type LlmClient } from './llm';
 import { HANDOFF_CLAIM_GUARD, runChatbotTurn } from './orchestrator';
 import { CHATBOT_MAX_BUBBLES, enabledCaptureFields } from './tools';
 import { getAiSettings, getBusinessHours, SETTING_KEYS, type LarkFallback } from './settings';
@@ -335,6 +344,10 @@ interface RunRecord {
   decision: 'reply' | 'escalate' | 'no_reply' | 'error';
   error?: string | null;
   result?: ChatbotTurnResult;
+  /** Mục mở đầu tool_calls (vd. đánh dấu lượt "Khách không bị bỏ sót" — REENGAGE_FOLLOWUP_TOOL_LOG). */
+  toolCallsPrefix?: unknown[];
+  /** reasoning_summary thay cho summary/reason của kết quả. */
+  summary?: string;
 }
 
 async function insertRun(db: DbLike, r: RunRecord): Promise<string> {
@@ -349,8 +362,8 @@ async function insertRun(db: DbLike, r: RunRecord): Promise<string> {
       outputTokens: r.result?.usage.outputTokens ?? 0,
       latencyMs: Math.max(0, Math.round(r.result?.latencyMs ?? 0)),
       decision: r.decision,
-      toolCalls: r.result?.toolCalls ?? [],
-      reasoningSummary: r.result?.summary ?? r.result?.reason ?? null,
+      toolCalls: [...(r.toolCallsPrefix ?? []), ...(r.result?.toolCalls ?? [])],
+      reasoningSummary: r.summary ?? r.result?.summary ?? r.result?.reason ?? null,
       error: r.error ?? null,
     })
     .returning({ id: aiRuns.id });
@@ -555,6 +568,7 @@ async function recoverLostSideEffects(db: Db, deps: AiRuntimeDeps, conversationI
     aiRunId: run.id,
     messages: runCustomerMessages(run),
     ...(runMatchedKeyword(run) ? { matchedKeyword: runMatchedKeyword(run) } : {}),
+    ...(run.decision === 'error' && isLlmOutageErrorText(run.error) ? { autoResume: true } : {}),
   });
 }
 
@@ -684,6 +698,8 @@ export interface AiReplyJobOptions {
    * pendingMaxAgeHours giờ (kẹp trong [PENDING_MAX_AGE_HOURS, REENGAGE_LIMITS.daysMax × 24]); hội thoại không còn gắn
    * chatbotId, đã đánh dấu "Đã xử lý", hoặc bị chặn vì BẤT KỲ lý do gì (kể cả công tắc dưới khóa) ⇒ không coi tin là đã xử lý; prompt có ghi
    * chú "trả lời muộn" (lateReplyTurnNote); không xóa khóa debounce của luồng thường.
+   * mode 'followup' ("Khách không bị bỏ sót") ⇒ lượt CHỦ ĐỘNG nhắn khơi gợi lại, không qua tin chưa xử lý — xem
+   * runFollowUpJob.
    */
   reengage?: AiReengageJobOptions;
 }
@@ -730,6 +746,8 @@ async function runAiReplyJob(
     await deps.redis.del(keys.first, keys.last);
   }
   await recoverLostSideEffects(db, deps, conversationId);
+  // "Khách không bị bỏ sót": không có tin khách chờ ⇒ lượt chủ động riêng (không qua loadPendingMessages / chống đua 6.4).
+  if (reengage?.mode === 'followup') return runFollowUpJob(db, deps, conversationId, reengage);
   const pendingOptions: LoadPendingOptions = reengage
     ? { maxAgeHours: reengagePendingMaxAgeHours(reengage) }
     : {};
@@ -1119,6 +1137,8 @@ async function afterTurnCommitted(
       ...(result.decision === 'escalate' && result.messages?.length ? { messages: result.messages } : {}),
       // Từ khóa chuyển người luôn dừng bot (kể cả bot 'continue').
       ...(result.matchedKeyword ? { matchedKeyword: result.matchedKeyword } : {}),
+      // Lỗi phía AI (hết tiền, quá tải, hết thời gian chờ…) ⇒ tự trả lại cho bot khi AI hoạt động lại.
+      ...(result.decision === 'error' && result.llmOutage ? { autoResume: true } : {}),
     });
     staffNotified = escalated.staffNotified;
     // Tin bot đầu tiên tự tắt dấu ba chấm (như reply) ⇒ không gửi typing_off.
@@ -1129,6 +1149,268 @@ async function afterTurnCommitted(
     botReplyQueued,
     ...(staffNotified !== undefined ? { staffNotified } : {}),
   };
+}
+
+// ---------- Tái chăm sóc "Khách không bị bỏ sót" (lượt chủ động) ----------
+
+/** Lý do chặn lượt "Khách không bị bỏ sót": khách đã nhắn sau tin cuối của bên mình ⇒ luồng debounce thường trả lời. */
+export const AI_BLOCKED_FOLLOWUP_CUSTOMER_WROTE = 'Khách vừa nhắn — để luồng trả lời thường xử lý';
+/** Lý do chặn lượt "Khách không bị bỏ sót": hội thoại có tin (bất kỳ bên nào) trong khoảng lặng tối thiểu. */
+export const AI_BLOCKED_FOLLOWUP_RECENT_ACTIVITY = `Hội thoại có tin nhắn trong ${REENGAGE_FOLLOWUP_MIN_IDLE_MINUTES} phút gần đây`;
+/** Lý do chặn lượt "Khách không bị bỏ sót": hội thoại chưa có tin nào của khách (không có gì để khơi gợi lại). */
+export const AI_BLOCKED_FOLLOWUP_NO_CUSTOMER = 'Hội thoại chưa có tin nhắn của khách';
+/** Lý do chặn lượt "Khách không bị bỏ sót": đã nhắn khơi gợi sau tin khách cuối mà khách chưa đáp ⇒ không nhắn dồn. */
+export const AI_BLOCKED_FOLLOWUP_ALREADY_SENT = 'Đã nhắn khơi gợi khách này rồi, khách chưa nhắn lại';
+/** Lý do chặn lượt "Khách không bị bỏ sót": tin cuối của bên mình gửi thất bại (khách có thể chưa nhận được). */
+export const AI_BLOCKED_FOLLOWUP_LAST_FAILED = 'Tin cuối của bên mình gửi thất bại — nhân viên cần kiểm tra';
+/** Lượt "Khách không bị bỏ sót" mà AI gọi `no_reply` (khách đã từ chối / đã xong / hội thoại đã kết thúc…) ⇒ không gửi. */
+export const AI_FOLLOWUP_DECLINED = 'AI quyết định không nhắn khơi gợi';
+/** Lượt "Khách không bị bỏ sót" mà AI không gọi `reply` (hoặc không còn bong bóng) ⇒ không gửi gì. */
+export const AI_FOLLOWUP_NO_REPLY = 'AI không soạn được tin chăm sóc';
+
+const FOLLOWUP_SUMMARY = `Tái chăm sóc «${REENGAGE_MODE_LABELS.followup}» — bot chủ động nhắn khơi gợi lại`;
+
+/** Mục đánh dấu đầu tool_calls (Nhật ký AI): chỉ độ dài chỉ dẫn gõ tay, không ghi nội dung. */
+function followUpToolLog(reengage: AiReengageJobOptions): unknown {
+  return {
+    name: REENGAGE_FOLLOWUP_TOOL_LOG,
+    args: {
+      mode: 'followup',
+      rulesChars: reengage.rules ? Array.from(reengage.rules).length : 0,
+      contentChars: reengage.content ? Array.from(reengage.content).length : 0,
+    },
+  };
+}
+
+/**
+ * Trạng thái tin nhắn của hội thoại cho lượt "Khách không bị bỏ sót" (cùng quy tắc với câu quét — reengage.ts): tin cuối
+ * không tính system / echo tự động là của khách ⇒ AI_BLOCKED_FOLLOWUP_CUSTOMER_WROTE; chưa có tin khách ⇒
+ * AI_BLOCKED_FOLLOWUP_NO_CUSTOMER; có tin (bất kỳ loại nào) trong REENGAGE_FOLLOWUP_MIN_IDLE_MINUTES phút ⇒
+ * AI_BLOCKED_FOLLOWUP_RECENT_ACTIVITY; đã nhắn khơi gợi sau tin khách cuối (followUpAlreadySentSql) ⇒
+ * AI_BLOCKED_FOLLOWUP_ALREADY_SENT; tin cuối của bên mình gửi thất bại ⇒ AI_BLOCKED_FOLLOWUP_LAST_FAILED. Không có gì
+ * ⇒ null.
+ */
+async function followUpStateReason(db: DbLike, conversationId: string): Promise<string | null> {
+  const conv = sql`${conversations.id}`;
+  const [row] = await db
+    .select({
+      lastSender: lastNonSystemSenderSql(conv),
+      recent: hasRecentActivitySql(conv),
+      hasCustomer: sql<boolean>`exists (select 1 from ${messages} cm
+        where cm.conversation_id = ${conv} and cm.sender_type = 'customer')`,
+      alreadySent: followUpAlreadySentSql(conv),
+      lastFailed: lastOwnMessageFailedSql(conv),
+    })
+    .from(conversations)
+    .where(eq(conversations.id, conversationId));
+  if (!row) return 'Không tìm thấy hội thoại';
+  if (row.lastSender === 'customer') return AI_BLOCKED_FOLLOWUP_CUSTOMER_WROTE;
+  if (!row.hasCustomer || row.lastSender === null) return AI_BLOCKED_FOLLOWUP_NO_CUSTOMER;
+  if (row.recent) return AI_BLOCKED_FOLLOWUP_RECENT_ACTIVITY;
+  if (row.alreadySent) return AI_BLOCKED_FOLLOWUP_ALREADY_SENT;
+  if (row.lastFailed) return AI_BLOCKED_FOLLOWUP_LAST_FAILED;
+  return null;
+}
+
+/**
+ * Kiểm lại DƯỚI KHÓA dòng hội thoại (SELECT … FOR UPDATE) ngay trước khi ghi tin bot của lượt "Khách không bị bỏ sót":
+ * vẫn ai_mode 'auto' + đúng bot, không chờ người (trừ bot 'continue'), không "Đã xử lý", không đang tạm dừng, và
+ * followUpStateReason (khách chưa nhắn thêm, hội thoại vẫn lặng). Trả lý do hủy hoặc null.
+ */
+async function followUpRaceReason(
+  tx: DbLike,
+  conversationId: string,
+  botId: string,
+  now: Date,
+): Promise<string | null> {
+  const [cur] = await tx
+    .select({
+      aiMode: conversations.aiMode,
+      chatbotId: conversations.chatbotId,
+      status: conversations.status,
+      aiPausedUntil: conversations.aiPausedUntil,
+    })
+    .from(conversations)
+    .where(eq(conversations.id, conversationId))
+    .for('update');
+  if (!cur || cur.aiMode !== 'auto' || cur.chatbotId !== botId) return 'Chatbot của hội thoại đã thay đổi';
+  if (cur.status === 'pending_human') {
+    const [bot] = await tx
+      .select({ aiHandoffMode: chatbots.aiHandoffMode })
+      .from(chatbots)
+      .where(eq(chatbots.id, botId));
+    if (!pendingHumanAllowsBot({ ...cur, aiHandoffMode: bot?.aiHandoffMode })) {
+      return 'Hội thoại đang chờ người thật xử lý';
+    }
+  }
+  if (cur.status === 'resolved') return AI_BLOCKED_REENGAGE_RESOLVED;
+  if (cur.aiPausedUntil && cur.aiPausedUntil > now) return AI_BLOCKED_PAUSED;
+  return followUpStateReason(tx, conversationId);
+}
+
+/**
+ * Lượt "Tái chăm sóc — Khách không bị bỏ sót" (AiReengageJobOptions.mode 'followup', admin bấm — reengage.ts): bên
+ * mình đã trả lời sau tin cuối của khách và hội thoại đã lặng ⇒ bot CHỦ ĐỘNG nhắn 1–2 tin khơi gợi lại. Không có tin
+ * khách nào được coi là đã xử lý (mọi ai_runs của lượt này trigger RỖNG).
+ * 1. AI tổng tắt / hội thoại không có ⇒ 'skipped' KHÔNG ghi ai_runs (như lượt thường).
+ * 2. Kiểm điều kiện (chưa gọi AI): còn gắn đúng chatbotId (AI_BLOCKED_REENGAGE_BOT_CHANGED), chưa "Đã xử lý"
+ *    (AI_BLOCKED_REENGAGE_RESOLVED), blockedReason (bot gỡ/tắt, chờ người trừ 'continue', tạm dừng, botCanSend, giới
+ *    hạn lượt/giờ), followUpStateReason (khách đã nhắn thêm ⇒ luồng debounce thường lo; chưa có tin khách; có tin trong
+ *    khoảng lặng; đã nhắn khơi gợi mà khách chưa đáp; tin cuối của bên mình gửi thất bại) ⇒ 'skipped' + ai_runs 'no_reply' (error = lý do, trigger rỗng). Không hẹn "đánh thức" khi tạm dừng.
+ * 3. Lịch sử (loadTurnHistory, không có tin mới) + runChatbotTurn({ followUp: true, reengageGuidance }) ⇒ chỉ tool
+ *    `reply` + `no_reply` (khách đã từ chối / đã xong ⇒ AI không nhắn: 'no_reply' AI_FOLLOWUP_DECLINED), không escalate / pre-filter / bộ chặn "tự nói đã chuyển", không captured / project_logs. Không ra 'reply'
+ *    có bong bóng ⇒ ghi ai_runs ('error' giữ nguyên lý do lỗi AI, còn lại 'no_reply' AI_FOLLOWUP_NO_REPLY), KHÔNG gửi
+ *    gì, KHÔNG chuyển người (trigger rỗng ⇒ recoverLostSideEffects cũng không escalate bù).
+ * 4. Transaction: followUpRaceReason dưới khóa + killSwitchReason (AI tổng, bot còn bật, giới hạn/giờ) ⇒ 'cancelled'
+ *    (ai_runs 'no_reply', "Đã hủy: …", trigger rỗng; không lên lịch lại — tin khách mới đã tự lên lịch debounce). Không
+ *    thì ai_runs 'reply' (trigger rỗng, tool_calls mở đầu REENGAGE_FOLLOWUP_TOOL_LOG) + tin bot (insertBotMessages).
+ * 5. Sau commit: enqueueOutbound từng tin (bubbleDelays) + message.created. KHÔNG ghi "Thu thập thông tin" / "Nhật ký
+ *    công trình", không báo nhân viên theo từ khóa.
+ * Lỗi hạ tầng (DB/Redis) ⇒ ném (BullMQ retry: lần chạy lại thấy tin bot vừa gửi trong khoảng lặng ⇒ tự bỏ qua).
+ */
+async function runFollowUpJob(
+  db: Db,
+  deps: AiRuntimeDeps,
+  conversationId: string,
+  reengage: AiReengageJobOptions,
+): Promise<AiReplyOutcome> {
+  const [ai, conv] = await Promise.all([getAiSettings(db), loadJobConversation(db, conversationId)]);
+  if (!ai.enabled) return { status: 'skipped', reason: AI_SKIP_DISABLED, aiRunId: null };
+  if (!conv) return { status: 'skipped', reason: AI_SKIP_NOT_FOUND, aiRunId: null };
+  const marker = followUpToolLog(reengage);
+  const blocked =
+    conv.bot?.id !== reengage.chatbotId
+      ? AI_BLOCKED_REENGAGE_BOT_CHANGED
+      : conv.status === 'resolved'
+        ? AI_BLOCKED_REENGAGE_RESOLVED
+        : ((await blockedReason(db, deps, conv)) ?? (await followUpStateReason(db, conversationId)));
+  if (blocked || !conv.bot) {
+    const reason = blocked ?? 'Hội thoại không bật chatbot';
+    const id = await insertRun(db, {
+      conversationId,
+      chatbotId: conv.bot?.id ?? null,
+      triggerMessageIds: [],
+      model: conv.bot?.model ?? deps.config.defaultModel,
+      decision: 'no_reply',
+      error: reason,
+      toolCallsPrefix: [marker],
+      summary: FOLLOWUP_SUMMARY,
+    });
+    deps.logger.info({ conversationId, reason }, 'Chatbot không chạy (tái chăm sóc chủ động)');
+    return { status: 'skipped', reason, aiRunId: id };
+  }
+  const bot = conv.bot;
+  const typing = startAiTyping(db, deps, typingTarget(conv));
+  let botReplyQueued = false;
+  try {
+    const outcome = await runFollowUpTurnAndCommit(db, deps, conv, bot, reengage, marker);
+    botReplyQueued = outcome.botReplyQueued;
+    return outcome.result;
+  } finally {
+    await typing.stop({ botReplyQueued });
+  }
+}
+
+/** Bước 3–5 của runFollowUpJob (sau khi đã qua điều kiện chạy). */
+async function runFollowUpTurnAndCommit(
+  db: Db,
+  deps: AiRuntimeDeps,
+  conv: JobConversation,
+  bot: NonNullable<JobConversation['bot']>,
+  reengage: AiReengageJobOptions,
+  marker: unknown,
+): Promise<{ result: AiReplyOutcome; botReplyQueued: boolean }> {
+  const conversationId = conv.id;
+  const model = bot.model ?? deps.config.defaultModel;
+  const [{ history }, businessHours] = await Promise.all([
+    loadTurnHistory(db, conversationId, []),
+    getBusinessHours(db),
+  ]);
+  const guidance: ReengageGuidance | null =
+    reengage.rules || reengage.content
+      ? {
+          ...(reengage.rules ? { rules: reengage.rules } : {}),
+          ...(reengage.content ? { content: reengage.content } : {}),
+        }
+      : null;
+  const result = await runChatbotTurn(
+    {
+      llm: deps.llm,
+      now: deps.ctx.now,
+      defaultModel: deps.config.defaultModel,
+      minConfidence: deps.config.minConfidence,
+    },
+    {
+      chatbot: toChatbotConfig(bot),
+      history,
+      newMessages: [],
+      channelName: conv.channelName,
+      businessHours,
+      followUp: true,
+      ...(guidance ? { reengageGuidance: guidance } : {}),
+    },
+  );
+  const base = {
+    conversationId,
+    chatbotId: bot.id,
+    model,
+    result,
+    triggerMessageIds: [] as string[],
+    toolCallsPrefix: [marker],
+    summary: FOLLOWUP_SUMMARY,
+  };
+
+  const bubbles = result.decision === 'reply' ? (result.messages ?? []) : [];
+  if (bubbles.length === 0) {
+    // Không gửi gì, không chuyển người: lượt chủ động không có khách nào đang chờ.
+    const decision = result.decision === 'error' ? 'error' : 'no_reply';
+    const error =
+      result.decision === 'error'
+        ? (result.reason ?? 'Lỗi AI')
+        : result.decision === 'no_reply'
+          ? `${AI_FOLLOWUP_DECLINED}: ${result.reason ?? ''}`.trim()
+          : `${AI_FOLLOWUP_NO_REPLY} (decision ${result.decision})`;
+    const aiRunId = await insertRun(db, { ...base, decision, error });
+    deps.logger.warn({ conversationId, decision: result.decision }, AI_FOLLOWUP_NO_REPLY);
+    return { result: { status: 'done', decision, aiRunId }, botReplyQueued: false };
+  }
+
+  const saved = await db.transaction(async (tx) => {
+    const race =
+      (await followUpRaceReason(tx, conversationId, bot.id, deps.ctx.now())) ??
+      (await killSwitchReason(tx, conversationId, bot.id, 'reply'))?.reason ??
+      null;
+    if (race) {
+      const aiRunId = await insertRun(tx, { ...base, decision: 'no_reply', error: `Đã hủy: ${race}` });
+      return { race, aiRunId, messageIds: [] as string[] };
+    }
+    const aiRunId = await insertRun(tx, { ...base, decision: 'reply', error: null });
+    const messageIds = await insertBotMessages(tx, conv, bubbles, aiRunId, deps.ctx.now());
+    return { race: null, aiRunId, messageIds };
+  });
+
+  if (saved.race) {
+    deps.logger.info(
+      { conversationId, reason: saved.race },
+      'Hủy lượt tái chăm sóc chủ động (kiểm lại dưới khóa)',
+    );
+    return {
+      result: { status: 'cancelled', reason: saved.race, aiRunId: saved.aiRunId },
+      botReplyQueued: false,
+    };
+  }
+  deps.logger.info(
+    { conversationId, latencyMs: result.latencyMs, model: result.model, bubbles: saved.messageIds.length },
+    'Lượt tái chăm sóc chủ động xong',
+  );
+  const delays = bubbleDelays(saved.messageIds.length, deps.random);
+  let botReplyQueued = false;
+  for (const [i, id] of saved.messageIds.entries()) {
+    await deps.scheduler.enqueueOutbound(id, delays[i] ?? 0);
+    botReplyQueued = true;
+  }
+  await emitMessagesCreated(db, deps, saved.messageIds, conversationId);
+  return { result: { status: 'done', decision: 'reply', aiRunId: saved.aiRunId }, botReplyQueued };
 }
 
 // ---------- Nhân viên nhắn ⇒ tạm dừng AI ----------

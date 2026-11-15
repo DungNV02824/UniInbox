@@ -184,7 +184,8 @@ async function insertRejectRun(db: DbLike, r: RunInsert): Promise<string> {
  *    vẫn chờ, debounce của chính nó trả lời. Lượt ai-reply commit TRƯỚC thì tin của nó đã gửi — chấp nhận; tool_calls mở đầu { name: 'staff_reject', args: { handoffId, reasonChars } }), tin system
  *    handoffRejectSystemText(tên nhân viên, lý do), tin bot (insertBotMessages: sender 'bot', queued, ai_run_id, cập
  *    nhật last_message_at), audit 'handoff.reject' { handoffId, reasonChars, aiRunId, bubbles } — KHÔNG ghi lý do.
- *    KHÔNG đổi handoff / status / ai_mode / ai_paused_until (tin bot không kích hoạt "nhân viên nhắn ⇒ tạm dừng bot").
+ *    KHÔNG đổi handoff / status / ai_mode / ai_paused_until (tin bot không kích hoạt "nhân viên nhắn ⇒ tạm dừng bot")
+ *    — TRỪ handoffs.auto_resume = false (handoff lỗi AI: nhân viên đã tự xử lý ⇒ worker KHÔNG tự trả lại cho bot).
  * 6. Sau commit: enqueueOutbound từng tin (bubbleDelays; lỗi chỉ log — sweeper gửi lại), message.created cho tin system
  *    + tin bot. Trả summary mới (API phát conversation.updated) + id.
  */
@@ -324,6 +325,11 @@ export async function rejectHandoffWithAiReply(
       error: null,
       triggerMessageIds,
     });
+    // Nhân viên đã tự xử lý handoff (kể cả handoff lỗi AI) ⇒ giữ "Cần người", không để worker tự trả lại cho bot.
+    await tx
+      .update(handoffs)
+      .set({ autoResume: false, updatedAt: now })
+      .where(and(eq(handoffs.id, handoffId), eq(handoffs.autoResume, true)));
     const [system] = await tx
       .insert(messages)
       .values({

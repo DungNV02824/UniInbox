@@ -516,6 +516,31 @@ export async function ackHandoff(
 }
 
 /**
+ * Trạng thái hội thoại khi "trả lại cho AI" (nút của nhân viên — resolveHandoff — và hệ thống tự trả lại khi AI hoạt
+ * động lại — resumeAiOutageHandoffs): status 'open', ai_mode = chatbot_id ? 'auto' : 'off', ai_paused_until null,
+ * handoff_reason / handoff_at null. Gọi trong transaction đã khóa dòng hội thoại (handoff đóng riêng). Trả ai_mode mới.
+ */
+export async function returnConversationToBot(
+  tx: Pick<Db, 'update'>,
+  conv: { id: string; chatbotId: string | null },
+  now: Date,
+): Promise<'auto' | 'off'> {
+  const aiMode = conv.chatbotId ? ('auto' as const) : ('off' as const);
+  await tx
+    .update(conversations)
+    .set({
+      status: 'open',
+      aiMode,
+      aiPausedUntil: null,
+      handoffReason: null,
+      handoffAt: null,
+      updatedAt: now,
+    })
+    .where(eq(conversations.id, conv.id));
+  return aiMode;
+}
+
+/**
  * POST /conversations/:id/handoff/resolve ("Đã xong, trả lại cho AI"). Mọi handoff mở ⇒ resolved_at = now
  * (ack luôn nếu chưa); conversation: status 'open', ai_mode = chatbot_id ? 'auto' : 'off',
  * ai_paused_until null, handoff_reason null, handoff_at null. Audit 'handoff.resolve'.
@@ -538,23 +563,10 @@ export async function resolveHandoff(
     const resolved = await resolveOpenHandoffs(tx, conv.id, viewer.id, now);
     resolvedHandoffIds = resolved;
     if (resolved.length === 0 && conv.status !== 'pending_human') return;
+    const aiMode = await returnConversationToBot(tx, conv, now);
     await tx
-      .update(conversations)
-      .set({
-        status: 'open',
-        aiMode: conv.chatbotId ? 'auto' : 'off',
-        aiPausedUntil: null,
-        handoffReason: null,
-        handoffAt: null,
-        updatedAt: now,
-      })
-      .where(eq(conversations.id, conv.id));
-    await tx.insert(auditLogs).values(
-      audit(viewer, 'handoff.resolve', conv.id, {
-        handoffIds: resolved,
-        aiMode: conv.chatbotId ? 'auto' : 'off',
-      }),
-    );
+      .insert(auditLogs)
+      .values(audit(viewer, 'handoff.resolve', conv.id, { handoffIds: resolved, aiMode }));
   });
   return { ...result, resolvedHandoffIds };
 }

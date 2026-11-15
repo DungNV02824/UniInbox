@@ -6,8 +6,12 @@ import {
   createGeminiClient,
   geminiThinkingConfig,
   hedgeAfterMsFromEnv,
+  isLlmOutageError,
+  isLlmOutageErrorText,
   listGeminiModels,
+  LLM_CALL_ERROR_PREFIX,
   LlmError,
+  toLlmError,
   runHedged,
   type LlmRequest,
 } from './llm';
@@ -434,5 +438,58 @@ describe('listGeminiModels', () => {
     const names = await listGeminiModels(API_KEY, { fetch: f });
     expect(names).toEqual(['gemini-2.5-flash', 'gemini-flash-latest']);
     expect(calls.length).toBe(2);
+  });
+});
+
+describe('isLlmOutageError — lỗi gọi AI có phải "AI ngừng hoạt động" (tự trả lại cho bot khi AI chạy lại)', () => {
+  const http = (status: number, message = 'x') =>
+    new LlmError(
+      `Gemini HTTP ${status}: ${message}`,
+      status === 408 || status === 429 || status >= 500,
+      status,
+    );
+
+  it.each([
+    ['402 hết tiền nạp trước', http(402, 'Your prepayment credits are depleted')],
+    ['403 billing', http(403, 'Billing account is disabled for this project')],
+    ['403 permission', http(403, 'Permission denied: Consumer has been suspended')],
+    ['401 sai key', http(401, 'Request had invalid authentication credentials')],
+    ['400 API key not valid', http(400, 'API key not valid. Please pass a valid API key.')],
+    ['408', http(408)],
+    ['429 quá tải / hạn mức', http(429, 'Resource has been exhausted')],
+    ['500', http(500)],
+    ['503', http(503, 'The model is overloaded')],
+    ['hết thời gian chờ', new LlmError('Hết thời gian chờ AI (30s)', true, undefined, true)],
+    ['lỗi mạng (fetch failed)', toLlmError(new TypeError('fetch failed'), 'k', false, 30_000)],
+  ])('%s ⇒ outage', (_label, err) => {
+    expect(isLlmOutageError(err)).toBe(true);
+  });
+
+  it.each([
+    ['400 request sai', http(400, 'Invalid JSON payload received')],
+    ['403 không nói về tài khoản', http(403, 'Request blocked')],
+    ['404 sai tên model', http(404, 'models/gemini-x is not found')],
+    ['nội dung bị chặn', new LlmError('Gemini chặn nội dung (SAFETY)', false)],
+    ['lỗi không retryable không có status', new LlmError('Lỗi gọi Gemini: Unexpected token', false)],
+    ['lỗi không phải LlmError', new Error('boom')],
+    ['không phải lỗi', 'x'],
+  ])('%s ⇒ không phải outage', (_label, err) => {
+    expect(isLlmOutageError(err)).toBe(false);
+  });
+
+  it('isLlmOutageErrorText: phân loại từ ai_runs.error (escalate bù)', () => {
+    const t = (rest: string) => `${LLM_CALL_ERROR_PREFIX}${rest}`;
+    expect(isLlmOutageErrorText(t('Gemini HTTP 402: Your prepayment credits are depleted'))).toBe(true);
+    expect(isLlmOutageErrorText(t('Gemini HTTP 429: Resource exhausted'))).toBe(true);
+    expect(isLlmOutageErrorText(t('Gemini HTTP 503: overloaded'))).toBe(true);
+    expect(isLlmOutageErrorText(t('Gemini HTTP 403: Billing account disabled'))).toBe(true);
+    expect(isLlmOutageErrorText(t('Hết thời gian chờ AI (30s)'))).toBe(true);
+    expect(isLlmOutageErrorText(t('Lỗi gọi Gemini: fetch failed'))).toBe(true);
+    expect(isLlmOutageErrorText(t('Gemini HTTP 400: Invalid argument'))).toBe(false);
+    expect(isLlmOutageErrorText(t('Gemini HTTP 404: model not found'))).toBe(false);
+    expect(isLlmOutageErrorText(t('Lỗi gọi Gemini: Unexpected token'))).toBe(false);
+    expect(isLlmOutageErrorText('AI gọi reply với tham số không hợp lệ')).toBe(false);
+    expect(isLlmOutageErrorText('Lỗi chatbot: boom')).toBe(false);
+    expect(isLlmOutageErrorText(null)).toBe(false);
   });
 });

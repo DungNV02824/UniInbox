@@ -60,13 +60,24 @@ export function lastAgentMessageAtSql(conv: SQL | string): SQL {
 }
 
 /**
+ * Handoff (alias `alias`) do HỆ THỐNG tự trả lại cho bot khi AI hoạt động lại (resumeAiOutageHandoffs): đã đóng,
+ * auto_resume, không ai nhận (nhân viên bấm "trả lại cho AI" luôn ghi người nhận). Nhân viên KHÔNG xử lý gì ⇒ không
+ * là mốc "đã xử lý" của loadPendingMessages và không thành dòng [Hệ thống] trong lịch sử của bot.
+ */
+export function autoResumedHandoffSql(alias: string): SQL {
+  const h = sql.raw(alias);
+  return sql`(${h}.resolved_at is not null and ${h}.auto_resume and ${h}.acknowledged_by is null)`;
+}
+
+/**
  * Mốc "trả lại cho AI" gần nhất (handoffs.resolved_at): nhân viên đã lo các tin trước đó (kể cả xử lý ngoài hệ thống,
- * không nhắn gì) — TRỪ handoff mà bot vẫn trả lời suốt lúc chờ người (aiHandoffMode 'continue': tin system của handoff
+ * không nhắn gì) — TRỪ handoff hệ thống tự trả lại khi AI hoạt động lại (autoResumedHandoffSql), và handoff mà bot vẫn trả lời suốt lúc chờ người (aiHandoffMode 'continue': tin system của handoff
  * có dấu handoffBotContinues và không bị dừng giữa chừng — handoffBotStopped): tin khách chưa xử lý lúc bấm là việc
  * của bot (đang/sắp trả lời).
  */
 export function lastResolvedHandoffAtSql(conv: SQL | string): SQL {
   return sql`(select max(h.resolved_at) from ${handoffs} h where h.conversation_id = ${conv}
+    and not ${autoResumedHandoffSql('h')}
     and not (
       exists (select 1 from ${messages} s where s.conversation_id = ${conv} and s.sender_type = 'system'
         and s.raw -> 'handoffBotContinues' ->> 'handoffId' = h.id::text)
@@ -236,6 +247,8 @@ export async function loadTurnHistory(
     .where(
       and(
         eq(handoffs.conversationId, conversationId),
+        // Chuyển người vì lỗi AI rồi hệ thống tự trả lại: không phải yêu cầu nhân viên đã xử lý ⇒ bot không cần biết.
+        sql`not ${autoResumedHandoffSql('"handoffs"')}`,
         since
           ? sql`(${handoffs.resolvedAt} is null or coalesce(${handoffs.resolvedAt}, ${handoffs.createdAt}) >= ${since.toISOString()}::timestamptz)`
           : undefined,

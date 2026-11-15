@@ -5,6 +5,7 @@ import {
   buildChatbotTools,
   CHATBOT_TOOLS,
   escalateArgsSchema,
+  FOLLOWUP_TOOLS,
   noReplyArgsSchema,
   normalizeCapturedArg,
   normalizeProjectLogsArg,
@@ -65,6 +66,9 @@ describe('buildChatbotTools — captured', () => {
     expect(paramsOf(CHATBOT_TOOLS, 'reply').properties.captured).toBeUndefined();
     expect(STAFF_REJECT_TOOLS.map((t) => t.name)).toEqual(['reply']);
     expect(paramsOf(STAFF_REJECT_TOOLS, 'reply').properties.captured).toBeUndefined();
+    // Lượt "Khách không bị bỏ sót": reply + no_reply (được phép không nhắn), không escalate, không captured.
+    expect(FOLLOWUP_TOOLS.map((t) => t.name)).toEqual(['reply', 'no_reply']);
+    expect(JSON.stringify(FOLLOWUP_TOOLS)).not.toContain('captured');
   });
 });
 

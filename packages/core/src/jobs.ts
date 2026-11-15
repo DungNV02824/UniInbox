@@ -69,6 +69,11 @@ export interface AiReengageJobOptions {
   rules?: string;
   /** "Nội dung chăm sóc lại" admin gõ tay lúc bấm (đã trim, ≤ guidanceMaxChars); thiếu ⇒ không có. */
   content?: string;
+  /**
+   * 'followup' ("Khách không bị bỏ sót"): không có tin khách chờ — bot CHỦ ĐỘNG nhắn khơi gợi lại (chỉ tool reply, không
+   * coi tin nào là đã xử lý). Thiếu / 'missed' ⇒ lượt tái chăm sóc như trước (trả lời tin khách đang chờ).
+   */
+  mode?: 'missed' | 'followup';
 }
 export const AI_REPLY_JOB_NAME = 'reply';
 export const aiReplyJobId = (conversationId: string): string => `ai-${conversationId}`;
@@ -97,6 +102,14 @@ export interface AiKickJobData {
 }
 export const AI_KICK_JOB_NAME = 'kick';
 export const aiKickJobId = (conversationId: string): string => `ai-kick-${conversationId}`;
+
+/**
+ * Cùng hàng đợi `ai-reply`, job định kỳ "ai-auto-resume" (job scheduler AI_AUTO_RESUME_SCHEDULER_ID, mỗi
+ * AI_AUTO_RESUME_EVERY_MS — ai/auto-resume.ts): hội thoại "Cần người" vì lỗi phía AI (handoffs.auto_resume) được tự
+ * trả lại cho bot khi AI hoạt động lại. Worker gọi resumeAiOutageHandoffs(db, deps). Không có data.
+ */
+export const AI_AUTO_RESUME_JOB_NAME = 'ai-auto-resume';
+export const AI_AUTO_RESUME_SCHEDULER_ID = 'ai-reply:auto-resume';
 
 /** Giãn cách giữa các bong bóng bot (delay BullMQ của job outbound), ngẫu nhiên trong [min, max]. */
 export const BOT_BUBBLE_GAP_MIN_MS = 800;

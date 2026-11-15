@@ -27,6 +27,7 @@ import {
   chatbotLockedHint,
   chatbotSelectOptions,
   handoffAckedText,
+  handoffAiOutageNote,
   handoffBotNote,
   handoffButtonLabels,
   handoffReasonLabel,
@@ -188,7 +189,8 @@ function AiPausedNotice({ conversation: c }: { conversation: ConversationSummary
  * riêng cho hai nút, vd. "Nghiệm thu" / "Đã chuyển tiền"). Bot đặt "vẫn trả lời khách" ⇒ thêm dòng "Bot vẫn đang
  * trả lời khách" (nút nhận chỉ ghi nhận; nút xong đóng yêu cầu, bot vốn đã bật). Nút "Không đạt" (đứng trước, chỉ
  * khi có chatbot gắn — canRejectHandoff) mở hộp thoại gõ lý do ⇒ AI báo khách khéo léo, yêu cầu chuyển người giữ
- * nguyên.
+ * nguyên. Chuyển người vì lỗi phía AI (handoff.autoResume, chưa ai nhận) ⇒ thêm dòng vàng "AI tạm lỗi — bot sẽ tự trả
+ * lời lại…"; các nút vẫn dùng được như thường.
  */
 function HandoffBanner({ conversation: c }: { conversation: ConversationSummary }) {
   const { user } = useAuth();
@@ -202,6 +204,7 @@ function HandoffBanner({ conversation: c }: { conversation: ConversationSummary 
   const [collapsed, setCollapsed] = useHandoffBannerCollapsed();
   if (c.status !== 'pending_human') return null;
   const botNote = handoffBotNote(c, now);
+  const outageNote = handoffAiOutageNote(c);
   const h = c.handoff ?? null;
   const ackedBy = h?.acknowledgedBy ?? null;
   const busy = ack.isPending || resolve.isPending || reject.isPending;
@@ -256,6 +259,12 @@ function HandoffBanner({ conversation: c }: { conversation: ConversationSummary 
           {!collapsed && ackedBy && (
             <p className="text-xs text-blue-800/80">
               {handoffAckedText(labels, ackedBy.id === user?.id ? 'bạn' : ackedBy.name)}
+            </p>
+          )}
+          {!collapsed && outageNote && (
+            <p className="flex items-start gap-1 text-xs text-amber-800">
+              <AlertTriangle className="mt-px size-3.5 shrink-0 text-amber-600" aria-hidden />
+              {outageNote}
             </p>
           )}
           {!collapsed && botNote && (

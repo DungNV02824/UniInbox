@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { check, index, pgTable, text, uuid } from 'drizzle-orm/pg-core';
+import { boolean, check, index, pgTable, text, uuid } from 'drizzle-orm/pg-core';
 import { id, timestamps, tstz } from './_common';
 import { conversations } from './conversations';
 import { handoffReasonCodeEnum } from './enums';
@@ -26,6 +26,11 @@ export const handoffs = pgTable(
     acknowledgedBy: uuid('acknowledged_by').references(() => users.id, { onDelete: 'set null' }),
     acknowledgedAt: tstz('acknowledged_at'),
     resolvedAt: tstz('resolved_at'),
+    /**
+     * true = AI chuyển người vì lỗi phía AI (billing/quota/timeout/5xx/mạng) ⇒ worker tự trả lại cho bot khi AI hoạt động
+     * lại (nếu nhân viên chưa nhận xử lý / chưa nhắn khách sau lúc lỗi). Xem ConversationHandoff.autoResume.
+     */
+    autoResume: boolean('auto_resume').notNull().default(false),
     ...timestamps(),
   },
   (t) => [

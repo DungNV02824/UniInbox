@@ -281,6 +281,12 @@ export interface ConversationHandoff {
   at: string;
   /** Nhân viên đã bấm "Nhận xử lý"; null = chưa ai nhận. */
   acknowledgedBy: UserRef | null;
+  /**
+   * true = chuyển người vì LỖI PHÍA AI (hết tiền/billing, quá tải 429, quá thời gian chờ, Gemini 5xx, mạng…), không vì
+   * nội dung hội thoại ⇒ khi AI hoạt động lại, hệ thống TỰ trả lại cho bot (trừ khi nhân viên đã nhận xử lý hoặc đã
+   * nhắn khách sau lúc lỗi). Banner ghi "AI tạm lỗi — bot sẽ tự trả lời lại khi AI hoạt động".
+   */
+  autoResume?: boolean;
 }
 
 export interface ContactIdentityDto {

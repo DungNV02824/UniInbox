@@ -18,7 +18,7 @@ import {
   type ChatbotTurnDeps,
   type ChatbotTurnInput,
 } from './orchestrator';
-import { handoffContinueTurnNote, staffRejectTurnNote } from './prompt';
+import { followUpTurnNote, handoffContinueTurnNote, staffRejectTurnNote } from './prompt';
 import { CHATBOT_TOOLS } from './tools';
 import type { ChatbotConfig } from './types';
 
@@ -643,6 +643,26 @@ describe('runChatbotTurn', () => {
     expect(plain.requests[0]!.timeoutMs).toBe(30_000);
   });
 
+  it('lỗi phía AI (402 hết tiền, 429, timeout, 5xx, mạng) ⇒ error kèm llmOutage; lỗi khác ⇒ không', async () => {
+    const outage = async (err: LlmError | Error) =>
+      (await runChatbotTurn(deps(fakeLlm([err, err, err]).llm).d, baseInput)).llmOutage;
+    expect(
+      await outage(new LlmError('Gemini HTTP 402: Your prepayment credits are depleted', false, 402)),
+    ).toBe(true);
+    expect(await outage(new LlmError('Gemini HTTP 429: exhausted', true, 429))).toBe(true);
+    expect(await outage(new LlmError('Gemini HTTP 503: overloaded', true, 503))).toBe(true);
+    expect(await outage(new LlmError('Hết thời gian chờ AI (30s)', true, undefined, true))).toBe(true);
+    expect(await outage(new LlmError('Lỗi gọi Gemini: fetch failed', true))).toBe(true);
+    expect(await outage(new LlmError('Gemini HTTP 400: Invalid argument', false, 400))).toBeUndefined();
+    expect(await outage(new LlmError('Gemini HTTP 404: model not found', false, 404))).toBeUndefined();
+    expect(await outage(new Error('boom'))).toBeUndefined();
+    // Model trả kết quả không dùng được (không phải lỗi gọi) ⇒ không phải outage.
+    const bad = fakeLlm([res({ functionCall: { name: 'reply', args: { messages: 'sai' } } })]);
+    const r = await runChatbotTurn(deps(bad.llm).d, baseInput);
+    expect(r.decision).toBe('error');
+    expect(r.llmOutage).toBeUndefined();
+  });
+
   it('lỗi không retryable (hoặc lỗi lạ) ⇒ không thử lại', async () => {
     const a = fakeLlm([new LlmError('HTTP 400: API key not valid', false, 400)]);
     const r = await runChatbotTurn(deps(a.llm).d, baseInput);
@@ -1073,6 +1093,82 @@ describe('runChatbotTurn — lượt "Không đạt" (staffRejectReason)', () =>
     const { llm } = fakeLlm([new LlmError('Gemini 400', false, 400)]);
     const r = await runChatbotTurn(deps(llm).d, rejectInput);
     expect(r.decision).toBe('error');
+  });
+});
+
+describe('runChatbotTurn — lượt "Khách không bị bỏ sót" (followUp)', () => {
+  const followInput: ChatbotTurnInput = {
+    ...baseInput,
+    history: [
+      { role: 'customer', text: 'Cho em gặp nhân viên tư vấn nhà phố' },
+      { role: 'system', text: 'Hội thoại đã được chuyển cho nhân viên (lý do: Khác).', handoffOpen: true },
+      { role: 'bot', text: 'Dạ bên em có nhận thi công nhà phố ạ' },
+    ],
+    newMessages: [],
+    chatbot: {
+      ...chatbot,
+      aiHandoffMode: 'continue',
+      handoffKeywords: ['nhân viên'],
+      notifyKeywords: ['nhà phố'],
+      capture: { ...DEFAULT_CAPTURE_CONFIG, enabled: true },
+    },
+    followUp: true,
+  };
+  const lastText = (req: LlmRequest) => {
+    const last = req.contents[req.contents.length - 1]!;
+    const part = last.parts[last.parts.length - 1];
+    return part && 'text' in part ? part.text : '';
+  };
+
+  it('tool reply + no_reply (không escalate); độ tự tin thấp vẫn là reply; có ghi chú khơi gợi, không ghi chú continue; không captured', async () => {
+    const { llm, requests } = fakeLlm([
+      res({
+        functionCall: {
+          name: 'reply',
+          args: {
+            messages: ['Dạ anh còn quan tâm nhà phố không ạ?'],
+            confidence: 0.1,
+            captured: { need: 'x' },
+          },
+        },
+      }),
+    ]);
+    const r = await runChatbotTurn(deps(llm, { minConfidence: 0.6 }).d, followInput);
+    expect(r).toMatchObject({ decision: 'reply', messages: ['Dạ anh còn quan tâm nhà phố không ạ?'] });
+    expect(r.captured).toBeUndefined();
+    expect(r.notifiedKeyword).toBeUndefined();
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.tools.map((t) => t.name)).toEqual(['reply', 'no_reply']);
+    expect(JSON.stringify(requests[0]!.tools)).not.toContain('captured');
+    expect(lastText(requests[0]!).endsWith(followUpTurnNote())).toBe(true);
+    expect(lastText(requests[0]!)).not.toContain(handoffContinueTurnNote());
+  });
+
+  it('khách đã bảo đừng nhắn nữa ⇒ model gọi no_reply ⇒ quyết định no_reply (không nhắn, không escalate)', async () => {
+    const { llm, requests } = fakeLlm([
+      res({ functionCall: { name: 'no_reply', args: { reason: 'Khách đã bảo đừng nhắn nữa' } } }),
+    ]);
+    const r = await runChatbotTurn(deps(llm).d, {
+      ...followInput,
+      history: [
+        { role: 'customer', text: 'Thôi em không cần nữa, đừng nhắn nữa nhé' },
+        { role: 'bot', text: 'Dạ vâng ạ' },
+      ],
+    });
+    expect(requests).toHaveLength(1);
+    expect(lastText(requests[0]!)).toContain('bảo đừng nhắn/liên hệ nữa');
+    expect(r).toMatchObject({ decision: 'no_reply', reason: 'Khách đã bảo đừng nhắn nữa' });
+    expect(r.messages).toBeUndefined();
+  });
+
+  it('reply tự nói "đã chuyển nhân viên" ⇒ KHÔNG chạy bộ chặn (không đổi thành escalate)', async () => {
+    const said = ['Dạ em đã chuyển cho nhân viên rồi ạ, anh cần gì thêm không ạ?'];
+    const { llm, requests } = fakeLlm([
+      res({ functionCall: { name: 'reply', args: { messages: said, confidence: 0.9 } } }),
+    ]);
+    const r = await runChatbotTurn(deps(llm).d, followInput);
+    expect(requests).toHaveLength(1);
+    expect(r).toMatchObject({ decision: 'reply', messages: said });
   });
 });
 

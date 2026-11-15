@@ -339,7 +339,7 @@ function ChatbotEditor({
               variant="outline"
               size="sm"
               onClick={() => setReengageOpen(true)}
-              title="Bot trả lời khách đã nhắn mà chưa ai trả lời"
+              title="Bot trả lời khách bị bỏ sót hoặc chủ động nhắn khơi gợi lại khách đã im lặng"
               aria-haspopup="dialog"
             >
               <HeartHandshake aria-hidden />

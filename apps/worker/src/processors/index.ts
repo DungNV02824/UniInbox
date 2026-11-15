@@ -8,6 +8,7 @@ import {
   AI_REPLY_QUEUE,
   aiReplyHandlers,
   createAiReplyProcessor,
+  registerAiReplySchedulers,
   type AiReplyHandlers,
 } from './ai-reply.processor';
 import {
@@ -73,7 +74,12 @@ export function channelSyncProcessor(
 }
 
 export function aiReplyProcessor(handlers: AiReplyHandlers): ProcessorDefinition {
-  return { queue: AI_REPLY_QUEUE, createProcessor: (logger) => createAiReplyProcessor(handlers, logger) };
+  return {
+    queue: AI_REPLY_QUEUE,
+    createProcessor: (logger) => createAiReplyProcessor(handlers, logger),
+    // Định kỳ tự trả lại cho bot các hội thoại "Cần người" vì lỗi AI (chỉ khi có GEMINI_API_KEY).
+    registerSchedulers: (queue) => registerAiReplySchedulers(queue, handlers.enabled),
+  };
 }
 
 export interface ProcessorsConfig {

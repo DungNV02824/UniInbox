@@ -1,8 +1,20 @@
-import { describe, expect, it } from 'vitest';
-import { REENGAGE_LIMITS } from '@dezon/shared';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { REENGAGE_LIMITS, reengagePreviewSchema, reengageStartSchema } from '@dezon/shared';
 import { ApiError } from './api';
 import {
   alreadyQueuedText,
+  eligibleHeadingText,
+  followupGuidanceHint,
+  loadReengageMode,
+  outsideWindowTexts,
+  parseReengageMode,
+  reengageDescription,
+  reengageModeHint,
+  reengageModeStorageKey,
+  reengagePreviewBody,
+  reengageStartBody,
+  rowTimeLabel,
+  saveReengageMode,
   excerptText,
   formatEstimatedMinutes,
   formatWaitingSince,
@@ -180,5 +192,158 @@ describe('ô chỉ dẫn gõ tay (Quy tắc chăm sóc / Nội dung chăm sóc l
 
   it('khóa lưu riêng theo bot', () => {
     expect(reengageGuidanceStorageKey('bot-1')).toBe('dezon:reengage-guidance:bot-1');
+  });
+});
+
+describe('đối tượng tái chăm sóc (Khách bị bỏ sót / Khách không bị bỏ sót)', () => {
+  const uuid = '11111111-1111-4111-8111-111111111111';
+
+  it('parseReengageMode: giá trị lạ / thiếu ⇒ missed', () => {
+    expect(parseReengageMode('followup')).toBe('followup');
+    expect(parseReengageMode('missed')).toBe('missed');
+    expect(parseReengageMode(null)).toBe('missed');
+    expect(parseReengageMode('khác')).toBe('missed');
+    expect(parseReengageMode(1)).toBe('missed');
+  });
+
+  it('mô tả hộp thoại theo đối tượng', () => {
+    expect(reengageDescription('missed', 'Bot A')).toBe(
+      'Tìm khách đã nhắn "Bot A" mà chưa ai trả lời, rồi cho bot trả lời lần lượt.',
+    );
+    const f = reengageDescription('followup', 'Bot A');
+    expect(f).toContain('Tìm khách bên mình đã trả lời nhưng chưa nhắn lại');
+    expect(f).toContain('rồi cho bot chủ động nhắn khơi gợi lại câu chuyện.');
+    expect(reengageModeHint('missed')).toContain('chưa ai trả lời');
+    expect(reengageModeHint('followup')).toContain('khơi gợi');
+  });
+
+  it('tóm tắt / tiêu đề / nhãn thời gian theo đối tượng', () => {
+    const p = { days: 15, eligible: items(4) as never, truncated: false, alreadyQueued: 0 };
+    expect(previewSummaryText(p)).toBe(previewSummaryText(p, 'missed'));
+    expect(previewSummaryText(p, 'followup')).toBe('Bot sẽ nhắn khơi gợi 4 khách (≈ 4 lần gọi AI)');
+    expect(
+      previewSummaryText(
+        { ...p, eligible: items(300) as never, truncated: true, alreadyQueued: 2 },
+        'followup',
+      ),
+    ).toBe(
+      'Bot sẽ nhắn khơi gợi 300+ khách (≈ 300+ lần gọi AI) · 2 khách đã được xếp hàng từ lần trước, đang chờ bot',
+    );
+    const none = previewSummaryText({ ...p, days: 7, eligible: [] }, 'followup');
+    expect(none).toContain('7 ngày');
+    expect(none).not.toContain('bỏ sót');
+    expect(eligibleHeadingText('missed', 3)).toBe('Bot sẽ trả lời (3)');
+    expect(eligibleHeadingText('followup', 3)).toBe('Bot sẽ nhắn (3)');
+    expect(rowTimeLabel('missed')).toBe('Tin cuối');
+    expect(rowTimeLabel('followup')).toBe('Tin cuối của khách');
+  });
+
+  it('mục khách bot không gửi được: "missed" bảo nhân viên trả lời; "followup" không bảo "trả lời ngay"', () => {
+    expect(outsideWindowTexts('missed', 'done', 2)).toEqual({
+      heading: 'Bot không kịp gửi — nhân viên trả lời ngay (2)',
+      blurb:
+        'Khung gửi tin của kênh đã hoặc sẽ đóng trước lượt của bot, nên bot không gửi những khách này. Mở hội thoại để nhân viên trả lời.',
+    });
+    expect(outsideWindowTexts('missed', 'preview', 4).heading).toBe(
+      'Quá khung giờ Facebook — nhân viên tự xử lý (4)',
+    );
+    expect(outsideWindowTexts('missed', 'preview', 4).blurb).toContain('Mở hội thoại để nhân viên trả lời.');
+    for (const when of ['done', 'preview'] as const) {
+      const t = outsideWindowTexts('followup', when, 3);
+      expect(t.heading).toContain('(3)');
+      expect(t.heading).not.toContain('trả lời');
+      expect(t.blurb).not.toContain('trả lời');
+      expect(t.blurb).toContain('nếu nhân viên muốn tự nhắn khơi gợi');
+    }
+    expect(outsideWindowTexts('followup', 'done', 1).heading).toBe(
+      'Bot không kịp nhắn — nhân viên tự quyết định có nhắn không (1)',
+    );
+  });
+
+  it('kết quả bắt đầu / bỏ qua theo đối tượng', () => {
+    const r = {
+      queued: 2,
+      alreadyQueued: 0,
+      skipped: 0,
+      spacingSec: 15,
+      startsInMinutes: 0,
+      estimatedMinutes: 1,
+    };
+    expect(startResultText(r, 'followup')).toBe(
+      'Đã xếp hàng 2 khách, bot nhắn lần lượt ~15 giây/khách, xong trong khoảng 1 phút.',
+    );
+    expect(startResultText(r)).toContain('bot trả lời lần lượt');
+    expect(startResultText({ ...r, queued: 0 }, 'followup')).toContain('không còn phù hợp');
+    expect(skippedText(1, 'followup')).toContain('khách vừa nhắn lại');
+    expect(skippedText(1)).toContain('không còn chờ trả lời');
+    expect(skippedText(0, 'followup')).toBeNull();
+  });
+
+  it('gợi ý điền Nội dung chỉ khi followup và cả hai ô trống (không chặn)', () => {
+    expect(followupGuidanceHint('missed', { rules: '', content: '' })).toBeNull();
+    expect(followupGuidanceHint('followup', { rules: ' ', content: '' })).toContain('Nội dung chăm sóc lại');
+    expect(followupGuidanceHint('followup', { rules: 'Xưng em', content: '' })).toBeNull();
+    expect(followupGuidanceHint('followup', { rules: '', content: 'Ưu đãi' })).toBeNull();
+  });
+
+  it('thân gửi lên máy chủ luôn kèm mode và hợp lệ theo schema', () => {
+    expect(reengagePreviewBody(15, 'followup')).toEqual({ days: 15, mode: 'followup' });
+    expect(reengagePreviewSchema.parse(reengagePreviewBody(7, 'missed'))).toEqual({
+      days: 7,
+      mode: 'missed',
+    });
+    const body = reengageStartBody({
+      days: 15,
+      mode: 'followup',
+      conversationIds: [uuid],
+      guidance: { rules: '  ', content: ' Ưu đãi tháng 11 ' },
+    });
+    expect(body).toEqual({ days: 15, mode: 'followup', conversationIds: [uuid], content: 'Ưu đãi tháng 11' });
+    expect(reengageStartSchema.parse(body).mode).toBe('followup');
+    expect(
+      reengageStartBody({
+        days: 3,
+        mode: 'missed',
+        conversationIds: [uuid],
+        guidance: { rules: '', content: '' },
+      }),
+    ).toEqual({ days: 3, mode: 'missed', conversationIds: [uuid] });
+  });
+
+  describe('nhớ đối tượng theo bot (localStorage)', () => {
+    afterEach(() => vi.unstubAllGlobals());
+
+    function stubStorage(store: Map<string, string>) {
+      vi.stubGlobal('window', {
+        localStorage: {
+          getItem: (k: string) => store.get(k) ?? null,
+          setItem: (k: string, v: string) => void store.set(k, v),
+          removeItem: (k: string) => void store.delete(k),
+        },
+      });
+    }
+
+    it('lưu followup, mặc định thì xóa khóa', () => {
+      const store = new Map<string, string>();
+      stubStorage(store);
+      expect(reengageModeStorageKey('bot-1')).toBe('dezon:reengage-mode:bot-1');
+      expect(loadReengageMode('bot-1')).toBe('missed');
+      saveReengageMode('bot-1', 'followup');
+      expect(store.get('dezon:reengage-mode:bot-1')).toBe('followup');
+      expect(loadReengageMode('bot-1')).toBe('followup');
+      expect(loadReengageMode('bot-2')).toBe('missed');
+      saveReengageMode('bot-1', 'missed');
+      expect(store.has('dezon:reengage-mode:bot-1')).toBe(false);
+    });
+
+    it('localStorage bị chặn ⇒ mặc định, không ném lỗi', () => {
+      vi.stubGlobal('window', {
+        get localStorage(): Storage {
+          throw new Error('SecurityError');
+        },
+      });
+      expect(loadReengageMode('bot-1')).toBe('missed');
+      expect(() => saveReengageMode('bot-1', 'followup')).not.toThrow();
+    });
   });
 });

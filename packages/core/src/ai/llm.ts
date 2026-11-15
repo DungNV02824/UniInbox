@@ -98,6 +98,56 @@ export class LlmError extends Error {
   }
 }
 
+/** Thông điệp HTTP 403 cho thấy lỗi TÀI KHOẢN AI (thanh toán/hạn mức/khóa API/quyền). */
+const LLM_ACCOUNT_ERROR_PATTERN =
+  /billing|prepay|credit|quota|payment|api[ _-]?key|permission|unauthori[sz]ed|unauthenticated|suspended|denied/i;
+/** HTTP 400 chỉ coi là lỗi tài khoản khi nói thẳng về khóa API / thanh toán (400 khác = request sai). */
+const LLM_BAD_KEY_400_PATTERN = /api[ _-]?key|billing|prepay|credit|quota/i;
+
+/**
+ * Lỗi gọi LLM có phải "AI ngừng hoạt động" (lỗi PHÍA AI — sẽ tự hết khi nạp tiền / hết quá tải / mạng ổn) không:
+ * - hết thời gian chờ, lỗi mạng (LlmError retryable không có HTTP status) ⇒ có;
+ * - HTTP 402 (hết tiền nạp trước), 408, 429 (quá tải/hạn mức), 5xx ⇒ có;
+ * - HTTP 401; 403 mà thông điệp nói về thanh toán / hạn mức / API key / quyền; 400 mà nói về API key / thanh toán
+ *   (Gemini trả 400 "API key not valid") ⇒ có (admin sửa tài khoản là AI chạy lại);
+ * - còn lại (400 request sai, 404 sai tên model, nội dung bị chặn, lỗi không phải LlmError) ⇒ không.
+ * Lỗi do model trả kết quả không dùng được (không gọi tool, tham số sai) không đi qua đây (không có LlmError).
+ */
+export function isLlmOutageError(err: unknown): boolean {
+  if (!(err instanceof LlmError)) return false;
+  if (err.timedOut) return true;
+  const status = err.status;
+  if (status === undefined) return err.retryable;
+  if (status === 402 || status === 408 || status === 429 || status >= 500) return true;
+  if (status === 401) return true;
+  if (status === 403) return LLM_ACCOUNT_ERROR_PATTERN.test(err.message);
+  if (status === 400) return LLM_BAD_KEY_400_PATTERN.test(err.message);
+  return false;
+}
+
+/** Tiền tố reason của lượt 'error' vì lời gọi LLM hỏng (orchestrator: `Lỗi gọi AI: <LlmError.message>`). */
+export const LLM_CALL_ERROR_PREFIX = 'Lỗi gọi AI: ';
+
+/**
+ * Như isLlmOutageError nhưng từ CHỮ lỗi đã lưu (ai_runs.error = `Lỗi gọi AI: <message>` — escalate bù sau khi worker
+ * chết không còn đối tượng lỗi): "Hết thời gian chờ AI…", "Gemini HTTP <status>: …" (phân loại theo status như trên),
+ * "Lỗi gọi Gemini: fetch failed…" (lỗi mạng). Không có tiền tố LLM_CALL_ERROR_PREFIX ⇒ false.
+ */
+export function isLlmOutageErrorText(text: string | null | undefined): boolean {
+  if (!text?.startsWith(LLM_CALL_ERROR_PREFIX)) return false;
+  const rest = text.slice(LLM_CALL_ERROR_PREFIX.length);
+  if (rest.startsWith('Hết thời gian chờ AI')) return true;
+  const http = /^Gemini HTTP (\d{3}): ([\s\S]*)$/.exec(rest);
+  if (http) {
+    const status = Number(http[1]);
+    return isLlmOutageError(new LlmError(http[2] ?? '', isRetryableStatus(status), status));
+  }
+  return (
+    rest.startsWith('Lỗi gọi Gemini: ') &&
+    /fetch failed|network|socket|ECONN|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|aborted/i.test(rest)
+  );
+}
+
 export interface GeminiClientOptions {
   /** Ghi đè endpoint (test/proxy). */
   baseUrl?: string;

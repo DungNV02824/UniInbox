@@ -10,14 +10,21 @@ import {
   Eraser,
   ExternalLink,
   Info,
+  Lightbulb,
   Loader2,
   Search,
   Send,
 } from 'lucide-react';
 import {
+  REENGAGE_FOLLOWUP_MIN_IDLE_MINUTES,
   REENGAGE_LIMITS,
+  REENGAGE_MODE_LABELS,
+  REENGAGE_MODES,
   type ReengageConversationItem,
+  type ReengageMode,
   type ReengagePreview,
+  type ReengagePreviewRequest,
+  type ReengageStartRequest,
   type ReengageStartResult,
 } from '@dezon/shared';
 import { Alert, AlertDescription } from '@/components/ui/alert';
@@ -27,9 +34,10 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import {
+  eligibleHeadingText,
   excerptText,
+  followupGuidanceHint,
   formatWaitingSince,
-  guidanceBody,
   guidanceError,
   guidanceLength,
   inboxConversationHref,
@@ -37,10 +45,18 @@ import {
   isAllSelected,
   isStartResultError,
   loadReengageGuidance,
+  loadReengageMode,
+  outsideWindowTexts,
   parseReengageDays,
   previewSummaryText,
+  reengageDescription,
   reengageErrorText,
+  reengageModeHint,
+  reengagePreviewBody,
+  reengageStartBody,
+  rowTimeLabel,
   saveReengageGuidance,
+  saveReengageMode,
   selectedIds,
   selectionCapText,
   skippedText,
@@ -52,6 +68,7 @@ import {
 import { chatbotsApi } from '@/lib/chatbots-api';
 import { CHANNEL_TYPE_LABELS } from '@/lib/inbox-format';
 import { useNow } from '@/lib/use-now';
+import { cn } from '@/lib/utils';
 
 const MAX = REENGAGE_LIMITS.maxPerRun;
 const GUIDANCE_MAX = REENGAGE_LIMITS.guidanceMaxChars;
@@ -111,14 +128,29 @@ function contactText(item: ReengageConversationItem): string {
   return item.contactName?.trim() || 'Khách chưa có tên';
 }
 
+/** Mốc thời gian + số tin đang chờ (chỉ 'missed' — 'followup' luôn 0 tin chờ nên ẩn). */
+function RowMeta({ item, mode, now }: { item: ReengageConversationItem; mode: ReengageMode; now: Date }) {
+  return (
+    <span className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
+      <span className="inline-flex items-center gap-1">
+        <Clock className="size-3" aria-hidden />
+        {rowTimeLabel(mode)} {formatWaitingSince(item.lastCustomerMessageAt, now)}
+      </span>
+      {mode === 'missed' && <span className="tabular-nums">{item.waitingMessages} tin đang chờ</span>}
+    </span>
+  );
+}
+
 function EligibleRow({
   item,
+  mode,
   checked,
   disabled,
   onToggle,
   now,
 }: {
   item: ReengageConversationItem;
+  mode: ReengageMode;
   checked: boolean;
   disabled: boolean;
   onToggle: () => void;
@@ -147,20 +179,14 @@ function EligibleRow({
           <span className="line-clamp-2 text-xs break-words text-muted-foreground">
             “{excerptText(item)}”
           </span>
-          <span className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
-            <span className="inline-flex items-center gap-1">
-              <Clock className="size-3" aria-hidden />
-              Tin cuối {formatWaitingSince(item.lastCustomerMessageAt, now)}
-            </span>
-            <span className="tabular-nums">{item.waitingMessages} tin đang chờ</span>
-          </span>
+          <RowMeta item={item} mode={mode} now={now} />
         </span>
       </label>
     </li>
   );
 }
 
-function OutsideRow({ item, now }: { item: ReengageConversationItem; now: Date }) {
+function OutsideRow({ item, mode, now }: { item: ReengageConversationItem; mode: ReengageMode; now: Date }) {
   return (
     <li className="flex flex-col gap-1 px-3 py-2.5 sm:flex-row sm:items-start sm:gap-3">
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
@@ -169,13 +195,7 @@ function OutsideRow({ item, now }: { item: ReengageConversationItem; now: Date }
           <span className="truncate text-xs text-muted-foreground">{channelText(item)}</span>
         </span>
         <span className="line-clamp-2 text-xs break-words text-muted-foreground">“{excerptText(item)}”</span>
-        <span className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
-          <span className="inline-flex items-center gap-1">
-            <Clock className="size-3" aria-hidden />
-            Tin cuối {formatWaitingSince(item.lastCustomerMessageAt, now)}
-          </span>
-          <span className="tabular-nums">{item.waitingMessages} tin đang chờ</span>
-        </span>
+        <RowMeta item={item} mode={mode} now={now} />
         {item.reason && <span className="text-xs text-amber-700 dark:text-amber-400">{item.reason}</span>}
       </div>
       <Button variant="outline" size="sm" className="w-fit shrink-0" asChild>
@@ -189,7 +209,60 @@ function OutsideRow({ item, now }: { item: ReengageConversationItem; now: Date }
   );
 }
 
-/** Hộp thoại "Tái chăm sóc khách bị bỏ sót": kiểm tra (không tốn AI) rồi xếp hàng bot trả lời. */
+/** Chọn đối tượng tái chăm sóc: radio gốc (nhóm radio + phím mũi tên sẵn có), trình bày dạng hai thẻ. */
+function ModeSelector({
+  name,
+  value,
+  onChange,
+  disabled,
+}: {
+  name: string;
+  value: ReengageMode;
+  onChange: (mode: ReengageMode) => void;
+  disabled: boolean;
+}) {
+  return (
+    <fieldset className="flex flex-col gap-2" disabled={disabled}>
+      <legend className="mb-1 text-sm font-medium">Đối tượng tái chăm sóc</legend>
+      <div className="grid gap-2 sm:grid-cols-2">
+        {REENGAGE_MODES.map((mode) => {
+          const checked = value === mode;
+          const hintId = `${name}-${mode}-hint`;
+          return (
+            <label
+              key={mode}
+              className={cn(
+                'flex cursor-pointer items-start gap-2.5 rounded-lg border bg-background p-3 transition-colors focus-within:ring-[3px] focus-within:ring-ring/50 hover:border-brand/40 has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-60',
+                checked && 'border-brand bg-brand/5',
+              )}
+            >
+              <input
+                type="radio"
+                name={name}
+                value={mode}
+                checked={checked}
+                onChange={() => onChange(mode)}
+                aria-describedby={hintId}
+                className="mt-0.5 size-4 shrink-0 accent-[var(--brand)] outline-none"
+              />
+              <span className="flex min-w-0 flex-col gap-0.5">
+                <span className="text-sm font-medium">{REENGAGE_MODE_LABELS[mode]}</span>
+                <span id={hintId} className="text-xs text-muted-foreground">
+                  {reengageModeHint(mode)}
+                </span>
+              </span>
+            </label>
+          );
+        })}
+      </div>
+    </fieldset>
+  );
+}
+
+/**
+ * Hộp thoại "Tái chăm sóc khách": chọn đối tượng (khách bị bỏ sót / không bị bỏ sót), kiểm tra (không tốn AI) rồi
+ * xếp hàng bot trả lời / chủ động nhắn khơi gợi.
+ */
 export function ReengageDialog({
   chatbotId,
   botName,
@@ -210,21 +283,23 @@ export function ReengageDialog({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   // Hai ô chỉ dẫn gõ tay: nhớ bản gõ lần trước của bot này (chỉ trên trình duyệt này) để sửa tiếp.
   const [guidance, setGuidance] = useState<ReengageGuidanceDraft>(() => loadReengageGuidance(chatbotId));
+  // Đối tượng chọn lần trước của bot này (chỉ trên trình duyệt này); mặc định "Khách bị bỏ sót".
+  const [mode, setMode] = useState<ReengageMode>(() => loadReengageMode(chatbotId));
   const now = new Date(useNow(60_000));
 
   useEffect(() => {
     saveReengageGuidance(chatbotId, guidance);
   }, [chatbotId, guidance]);
 
-  const preview = useMutation<ReengagePreview, unknown, number>({
-    mutationFn: (n) => chatbotsApi.reengagePreview(chatbotId, { days: n }),
+  useEffect(() => {
+    saveReengageMode(chatbotId, mode);
+  }, [chatbotId, mode]);
+
+  const preview = useMutation<ReengagePreview, unknown, ReengagePreviewRequest>({
+    mutationFn: (body) => chatbotsApi.reengagePreview(chatbotId, body),
     onSuccess: (data) => setSelected(initialSelection(data.eligible, MAX)),
   });
-  const start = useMutation<
-    ReengageStartResult,
-    unknown,
-    { days: number; conversationIds: string[]; rules?: string; content?: string }
-  >({
+  const start = useMutation<ReengageStartResult, unknown, ReengageStartRequest>({
     mutationFn: (body) => chatbotsApi.reengageStart(chatbotId, body),
   });
 
@@ -238,6 +313,15 @@ export function ReengageDialog({
   const hasGuidance = !!guidance.rules.trim() || !!guidance.content.trim();
   // Chỉ dẫn đã gửi kèm lần "Bắt đầu" vừa rồi (để báo khách đã xếp hàng từ trước vẫn dùng chỉ dẫn cũ).
   const sentGuidance = !!start.variables && (!!start.variables.rules || !!start.variables.content);
+  // Kết quả đang hiện luôn thuộc đúng đối tượng đang chọn (đổi đối tượng ⇒ xóa kết quả cũ).
+  const followup = mode === 'followup';
+  const guidanceHint = followupGuidanceHint(mode, guidance);
+  const startHintId = `${idPrefix}-start-hint`;
+
+  function clearResults() {
+    if (preview.data || preview.error) preview.reset();
+    if (start.data || start.error) start.reset();
+  }
 
   function onCheck(e: FormEvent) {
     e.preventDefault();
@@ -249,36 +333,46 @@ export function ReengageDialog({
     }
     setDaysError(null);
     start.reset();
-    preview.mutate(parsed.days);
+    preview.mutate(reengagePreviewBody(parsed.days, mode));
   }
 
   function onDaysChange(value: string) {
     setDays(value);
     setDaysError(null);
     // Kết quả cũ thuộc số ngày cũ: bỏ đi để không bắt đầu nhầm.
-    if (preview.data || preview.error) preview.reset();
-    if (start.data || start.error) start.reset();
+    clearResults();
+  }
+
+  function onModeChange(next: ReengageMode) {
+    if (busy || next === mode) return;
+    setMode(next);
+    // Kết quả cũ thuộc đối tượng cũ: bỏ đi để không bắt đầu nhầm.
+    clearResults();
   }
 
   function onStart() {
     if (!data || ids.length === 0 || busy || done || guidanceInvalid) return;
-    start.mutate({ days: data.days, conversationIds: ids, ...guidanceBody(guidance) });
+    start.mutate(reengageStartBody({ days: data.days, mode, conversationIds: ids, guidance }));
   }
 
   return (
     <Dialog
       open
       onOpenChange={(o) => !busy && onOpenChange(o)}
-      title="Tái chăm sóc khách bị bỏ sót"
-      description={`Tìm khách đã nhắn "${botName}" mà chưa ai trả lời, rồi cho bot trả lời lần lượt.`}
+      title="Tái chăm sóc khách"
+      description={reengageDescription(mode, botName)}
       className="sm:max-w-2xl"
     >
       {!botActive && (
         <Alert>
           <Info aria-hidden />
-          <AlertDescription>Bot đang tắt — bật bot và lưu trước thì bot mới trả lời được.</AlertDescription>
+          <AlertDescription>
+            Bot đang tắt — bật bot và lưu trước thì bot mới {followup ? 'nhắn' : 'trả lời'} được.
+          </AlertDescription>
         </Alert>
       )}
+
+      <ModeSelector name={`${idPrefix}-mode`} value={mode} onChange={onModeChange} disabled={busy} />
 
       <form className="flex flex-col gap-2" onSubmit={onCheck} noValidate>
         <Label htmlFor={daysId}>Khách nhắn trong bao nhiêu ngày gần nhất</Label>
@@ -320,8 +414,11 @@ export function ReengageDialog({
             </h3>
             <p className="text-xs text-muted-foreground">
               Gõ tay cho từng chủ đề, áp dụng cho các khách bấm “Bắt đầu” lần này (không sửa Hướng dẫn của
-              bot). Để trống thì bot trả lời như bình thường. Nội dung gõ lần trước được giữ lại — kiểm tra
-              trước khi bắt đầu.
+              bot).{' '}
+              {followup
+                ? 'Để trống thì bot chỉ hỏi thăm chung chung theo Hướng dẫn của bot.'
+                : 'Để trống thì bot trả lời như bình thường.'}{' '}
+              Nội dung gõ lần trước được giữ lại — kiểm tra trước khi bắt đầu.
             </p>
           </div>
           {hasGuidance && (
@@ -350,7 +447,11 @@ export function ReengageDialog({
         <GuidanceField
           id={`${idPrefix}-content`}
           label="Nội dung chăm sóc lại"
-          hint="Chủ đề / thông tin bot cần nhắn khách lần này. Bot viết lại tự nhiên và vẫn trả lời tin khách đang chờ."
+          hint={
+            followup
+              ? 'Chủ đề / thông tin bot cần nhắn khách lần này (nên điền). Bot viết lại tự nhiên thành 1–2 tin ngắn.'
+              : 'Chủ đề / thông tin bot cần nhắn khách lần này. Bot viết lại tự nhiên và vẫn trả lời tin khách đang chờ.'
+          }
           placeholder="Ví dụ: Tháng này bên em có chương trình tặng gói thiết kế 3D khi ký hợp đồng trước 30/11, mời anh/chị đặt lịch khảo sát miễn phí."
           value={guidance.content}
           onChange={(content) => setGuidance((g) => ({ ...g, content }))}
@@ -361,14 +462,34 @@ export function ReengageDialog({
       <Alert>
         <Info aria-hidden />
         <AlertDescription className="flex flex-col gap-1 text-xs">
-          <span>
-            Chỉ liệt kê khách <strong>bị bỏ sót</strong>: tin cuối là của khách và chưa ai trả lời. Tin trước
-            lần trả lời cuối của nhân viên coi như nhân viên đã lo.
-          </span>
-          <span>
-            Facebook chỉ cho bot nhắn trong <strong>24 giờ</strong> kể từ tin cuối của khách; khách quá khung
-            giờ được liệt kê riêng để nhân viên tự xử lý.
-          </span>
+          {followup ? (
+            <>
+              <span>
+                Chỉ liệt kê khách <strong>không bị bỏ sót</strong>: tin cuối là của bên mình (bot hoặc nhân
+                viên) và hội thoại đã im lặng ít nhất {REENGAGE_FOLLOWUP_MIN_IDLE_MINUTES} phút.
+              </span>
+              <span>
+                Bot chủ động nhắn <strong>1–2 tin ngắn</strong> theo “Quy tắc chăm sóc” / “Nội dung chăm sóc
+                lại” — nên điền Nội dung để bot có chủ đề.
+              </span>
+              <span>
+                Facebook chỉ cho bot nhắn trong <strong>24 giờ</strong> kể từ tin cuối của{' '}
+                <strong>khách</strong> (không phải tin của bên mình); khách quá khung giờ được liệt kê riêng
+                để nhân viên tự xử lý.
+              </span>
+            </>
+          ) : (
+            <>
+              <span>
+                Chỉ liệt kê khách <strong>bị bỏ sót</strong>: tin cuối là của khách và chưa ai trả lời. Tin
+                trước lần trả lời cuối của nhân viên coi như nhân viên đã lo.
+              </span>
+              <span>
+                Facebook chỉ cho bot nhắn trong <strong>24 giờ</strong> kể từ tin cuối của khách; khách quá
+                khung giờ được liệt kê riêng để nhân viên tự xử lý.
+              </span>
+            </>
+          )}
           <span>
             Chi phí: <strong>1 khách ≈ 1 lần gọi AI</strong>. Mỗi lần tối đa {MAX} khách.
           </span>
@@ -384,7 +505,7 @@ export function ReengageDialog({
 
       {data && (
         <div className="flex flex-col gap-4" aria-live="polite">
-          <p className="text-sm font-medium">{previewSummaryText(data)}</p>
+          <p className="text-sm font-medium">{previewSummaryText(data, mode)}</p>
           {data.truncated && (
             <p className="text-xs text-muted-foreground">
               Danh sách dài nên chỉ hiện {REENGAGE_LIMITS.previewMaxItems} dòng đầu mỗi mục. Bắt đầu xong bấm
@@ -397,7 +518,7 @@ export function ReengageDialog({
             <section className="flex flex-col gap-2" aria-labelledby={`${idPrefix}-eligible`}>
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <h3 id={`${idPrefix}-eligible`} className="text-sm font-semibold">
-                  Bot sẽ trả lời ({eligible.length})
+                  {eligibleHeadingText(mode, eligible.length)}
                 </h3>
                 <label className="flex cursor-pointer items-center gap-2 text-sm">
                   <input
@@ -415,7 +536,7 @@ export function ReengageDialog({
               </p>
               <ul
                 className="max-h-80 divide-y overflow-y-auto rounded-lg border"
-                aria-label="Khách bot sẽ trả lời"
+                aria-label={followup ? 'Khách bot sẽ nhắn' : 'Khách bot sẽ trả lời'}
               >
                 {eligible.map((item) => {
                   const checked = selected.has(item.conversationId);
@@ -423,6 +544,7 @@ export function ReengageDialog({
                     <EligibleRow
                       key={item.conversationId}
                       item={item}
+                      mode={mode}
                       checked={checked}
                       disabled={busy || (!checked && ids.length >= MAX)}
                       onToggle={() => setSelected((s) => toggleSelection(s, item.conversationId, MAX))}
@@ -445,9 +567,9 @@ export function ReengageDialog({
             <Alert variant={isStartResultError(done) ? 'destructive' : 'default'}>
               {isStartResultError(done) ? <AlertCircle aria-hidden /> : <CircleCheck aria-hidden />}
               <AlertDescription className="flex flex-col gap-1">
-                <span>{startResultText(done)}</span>
-                {skippedText(done.skipped) && (
-                  <span className="text-xs text-muted-foreground">{skippedText(done.skipped)}</span>
+                <span>{startResultText(done, mode)}</span>
+                {skippedText(done.skipped, mode) && (
+                  <span className="text-xs text-muted-foreground">{skippedText(done.skipped, mode)}</span>
                 )}
                 {sentGuidance && done.alreadyQueued > 0 && (
                   <span className="text-xs text-muted-foreground">
@@ -461,18 +583,17 @@ export function ReengageDialog({
           {done && done.outsideWindow.length > 0 && (
             <section className="flex flex-col gap-2" aria-labelledby={`${idPrefix}-done-outside`}>
               <h3 id={`${idPrefix}-done-outside`} className="text-sm font-semibold">
-                Bot không kịp gửi — nhân viên trả lời ngay ({done.outsideWindow.length})
+                {outsideWindowTexts(mode, 'done', done.outsideWindow.length).heading}
               </h3>
               <p className="text-xs text-muted-foreground">
-                Khung gửi tin của kênh đã hoặc sẽ đóng trước lượt của bot, nên bot không gửi những khách này.
-                Mở hội thoại để nhân viên trả lời.
+                {outsideWindowTexts(mode, 'done', done.outsideWindow.length).blurb}
               </p>
               <ul
                 className="max-h-72 divide-y overflow-y-auto rounded-lg border"
                 aria-label="Khách đã chọn mà bot không kịp gửi"
               >
                 {done.outsideWindow.map((item) => (
-                  <OutsideRow key={item.conversationId} item={item} now={now} />
+                  <OutsideRow key={item.conversationId} item={item} mode={mode} now={now} />
                 ))}
               </ul>
             </section>
@@ -481,23 +602,29 @@ export function ReengageDialog({
           {data.outsideWindow.length > 0 && (
             <section className="flex flex-col gap-2" aria-labelledby={`${idPrefix}-outside`}>
               <h3 id={`${idPrefix}-outside`} className="text-sm font-semibold">
-                Quá khung giờ Facebook — nhân viên tự xử lý ({data.outsideWindow.length})
+                {outsideWindowTexts(mode, 'preview', data.outsideWindow.length).heading}
               </h3>
               <p className="text-xs text-muted-foreground">
-                Kênh không cho bot nhắn những khách này nữa; bot sẽ không gửi. Mở hội thoại để nhân viên trả
-                lời.
+                {outsideWindowTexts(mode, 'preview', data.outsideWindow.length).blurb}
               </p>
               <ul
                 className="max-h-72 divide-y overflow-y-auto rounded-lg border"
                 aria-label="Khách nhân viên tự xử lý"
               >
                 {data.outsideWindow.map((item) => (
-                  <OutsideRow key={item.conversationId} item={item} now={now} />
+                  <OutsideRow key={item.conversationId} item={item} mode={mode} now={now} />
                 ))}
               </ul>
             </section>
           )}
         </div>
+      )}
+
+      {data && eligible.length > 0 && !done && guidanceHint && (
+        <p id={startHintId} className="flex items-start gap-1.5 text-xs text-amber-700 dark:text-amber-400">
+          <Lightbulb className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+          {guidanceHint}
+        </p>
       )}
 
       <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
@@ -510,6 +637,7 @@ export function ReengageDialog({
             variant="brand"
             onClick={onStart}
             disabled={busy || ids.length === 0 || guidanceInvalid}
+            aria-describedby={guidanceHint ? startHintId : undefined}
           >
             {start.isPending ? <Loader2 className="animate-spin" aria-hidden /> : <Send aria-hidden />}
             Bắt đầu ({ids.length} khách)

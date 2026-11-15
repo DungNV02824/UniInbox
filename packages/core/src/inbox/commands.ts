@@ -240,20 +240,25 @@ async function assertCanAssign(
 
 /**
  * Đóng mọi handoff đang mở của hội thoại (resolved_at = now; chưa ai nhận thì coi `userId` là người nhận).
+ * `userId` null (hệ thống tự trả lại cho bot khi AI hoạt động lại — resumeAiOutageHandoffs) ⇒ KHÔNG ghi người nhận.
  * Trả id các handoff vừa đóng. Gọi trong transaction đã khóa dòng hội thoại.
  */
 export async function resolveOpenHandoffs(
   tx: Pick<Db, 'update'>,
   conversationId: string,
-  userId: string,
+  userId: string | null,
   now: Date,
 ): Promise<string[]> {
   const rows = await tx
     .update(handoffs)
     .set({
       resolvedAt: now,
-      acknowledgedBy: sql`coalesce(${handoffs.acknowledgedBy}, ${userId}::uuid)`,
-      acknowledgedAt: sql`coalesce(${handoffs.acknowledgedAt}, ${now.toISOString()}::timestamptz)`,
+      ...(userId
+        ? {
+            acknowledgedBy: sql`coalesce(${handoffs.acknowledgedBy}, ${userId}::uuid)`,
+            acknowledgedAt: sql`coalesce(${handoffs.acknowledgedAt}, ${now.toISOString()}::timestamptz)`,
+          }
+        : {}),
       updatedAt: now,
     })
     .where(and(eq(handoffs.conversationId, conversationId), isNull(handoffs.resolvedAt)))

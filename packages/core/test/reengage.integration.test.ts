@@ -371,6 +371,7 @@ describe('startChatbotReengage', () => {
     expect(audit).toMatchObject({ userId: t.admin.id, entity: 'chatbot' });
     expect(audit!.data).toEqual({
       days: 15,
+      mode: 'missed',
       requested: 5,
       queued: 2,
       alreadyQueued: 0,
@@ -462,7 +463,16 @@ describe('startChatbotReengage', () => {
       .where(and(eq(auditLogs.action, 'chatbot.reengage'), eq(auditLogs.entityId, bot.id)));
     expect(audits.map((x) => x.data)).toEqual(
       expect.arrayContaining([
-        { days: 15, requested: 2, queued: 1, alreadyQueued: 1, skipped: 0, rulesChars: 0, contentChars: 0 },
+        {
+          days: 15,
+          mode: 'missed',
+          requested: 2,
+          queued: 1,
+          alreadyQueued: 1,
+          skipped: 0,
+          rulesChars: 0,
+          contentChars: 0,
+        },
       ]),
     );
   });

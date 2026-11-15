@@ -18,6 +18,11 @@ export interface HandoffCardInput {
    * trả lời. Header vàng "🔔 Khách cần nhân viên — bot vẫn đang trả lời" + dòng ghi chú.
    */
   botContinues?: boolean;
+  /**
+   * Chuyển người vì LỖI PHÍA AI (handoff auto_resume: hết tiền, quá tải, hết thời gian chờ…) ⇒ thẻ (kể cả nhắc lại)
+   * có dòng ghi chú LARK_AI_OUTAGE_NOTE.
+   */
+  aiOutage?: boolean;
   /** Thẻ thử từ POST /settings/lark/test. */
   test?: boolean;
 }
@@ -48,6 +53,9 @@ function mdField(label: string, value: string, short: boolean) {
   const v = value.trim() || '—';
   return { is_short: short, text: { tag: 'lark_md', content: `**${label}:**\n${escapeLarkMd(v)}` } };
 }
+
+/** Ghi chú thẻ Lark của handoff vì lỗi phía AI (auto_resume). */
+export const LARK_AI_OUTAGE_NOTE = 'Lỗi AI — sẽ tự trả lại cho bot khi AI hoạt động lại.';
 
 /** Tiêu đề thẻ Lark khi chỉ báo nhân viên (bot vẫn trả lời). */
 export const LARK_BOT_CONTINUES_TITLE = '🔔 Khách cần nhân viên — bot vẫn đang trả lời';
@@ -81,6 +89,8 @@ export function buildHandoffLarkCard(input: HandoffCardInput): LarkCardMessage {
       tag: 'note',
       elements: [{ tag: 'plain_text', content: 'Đây là thẻ thử — cấu hình Lark đang hoạt động.' }],
     });
+  } else if (input.aiOutage) {
+    elements.push({ tag: 'note', elements: [{ tag: 'plain_text', content: LARK_AI_OUTAGE_NOTE }] });
   } else if (input.botContinues && !input.reminder) {
     elements.push({
       tag: 'note',

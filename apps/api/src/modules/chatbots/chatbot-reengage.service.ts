@@ -10,7 +10,7 @@ import {
   startChatbotReengage,
 } from '@dezon/core';
 import type { Db } from '@dezon/db';
-import type { ReengagePreview, ReengageStartRequest, ReengageStartResult } from '@dezon/shared';
+import type { ReengageMode, ReengagePreview, ReengageStartRequest, ReengageStartResult } from '@dezon/shared';
 import { Inject, Injectable } from '@nestjs/common';
 import type { JobsOptions, Queue } from 'bullmq';
 import { withTimeout } from '../../common/with-timeout';
@@ -59,7 +59,10 @@ const RESERVE_SLOT_COMMAND = 'dezonReengageReserveSlot';
 /** Client Redis đã defineCommand(RESERVE_SLOT_COMMAND). */
 const slotCommandClients = new WeakSet<object>();
 
-/** "Tái chăm sóc khách bị bỏ sót": quét (preview) và xếp hàng các lượt bot trả lời giãn cách (start). */
+/**
+ * "Tái chăm sóc" ("Khách bị bỏ sót" / "Khách không bị bỏ sót" — mode): quét (preview) và xếp hàng các lượt bot giãn
+ * cách (start).
+ */
 @Injectable()
 export class ChatbotReengageService {
   private readonly queue: ReengageQueue = {
@@ -74,8 +77,9 @@ export class ChatbotReengageService {
     @Inject(AI_REPLY_QUEUE) private readonly aiReply: Queue<AiReplyJobData>,
   ) {}
 
-  preview(chatbotId: string, days: number): Promise<ReengagePreview> {
-    return previewChatbotReengage(this.db, this.ctx, chatbotId, days, this.queue);
+  /** `mode` thiếu ⇒ 'missed' ("Khách bị bỏ sót"); 'followup' ⇒ "Khách không bị bỏ sót". */
+  preview(chatbotId: string, days: number, mode?: ReengageMode): Promise<ReengagePreview> {
+    return previewChatbotReengage(this.db, this.ctx, chatbotId, days, this.queue, mode ?? 'missed');
   }
 
   start(actorUserId: string, chatbotId: string, input: ReengageStartRequest): Promise<ReengageStartResult> {
@@ -86,6 +90,7 @@ export class ChatbotReengageService {
         actorUserId,
         chatbotId,
         days: input.days,
+        mode: input.mode ?? 'missed',
         conversationIds: input.conversationIds,
         ...(input.rules ? { rules: input.rules } : {}),
         ...(input.content ? { content: input.content } : {}),

@@ -27,6 +27,7 @@ import type {
 import { asc, eq, sql, type SQL } from 'drizzle-orm';
 import type { NodePgQueryResultHKT } from 'drizzle-orm/node-postgres';
 import type { PgDatabase } from 'drizzle-orm/pg-core';
+import { aiOutageResumableSql } from '../ai/auto-resume-sql';
 import { captureFieldRefs } from '../ai/config';
 import { toProfileFieldDtos } from '../contacts/profile-fields';
 import { isAttachmentRetryPending } from '../pipeline/attachment-retry-policy';
@@ -60,14 +61,19 @@ const lastMessageSql = sql<unknown>`(
   limit 1
 )`;
 
-/** Handoff đang mở mới nhất (resolved_at null) kèm người đã "Nhận xử lý". */
+/**
+ * Handoff đang mở mới nhất (resolved_at null) kèm người đã "Nhận xử lý". autoResume = worker VẪN SẼ tự trả lại cho
+ * bot (aiOutageResumableSql — cùng điều kiện với job): nhân viên đã nhắn khách / bot bị gỡ hoặc tắt / quá 14 ngày ⇒
+ * false (banner không hứa "bot sẽ tự trả lời lại").
+ */
 const openHandoffSql = sql<unknown>`(
   select json_build_object(
     'reasonCode', h.reason_code,
     'summary', h.summary,
     'at', h.created_at,
     'ackId', h.acknowledged_by,
-    'ackName', u.name
+    'ackName', u.name,
+    'autoResume', ${aiOutageResumableSql('h', sql`now()`)}
   )
   from "handoffs" h
   left join "users" u on u.id = h.acknowledged_by
@@ -183,12 +189,15 @@ function parseHandoff(value: unknown): ConversationHandoff | null {
     at: string;
     ackId: string | null;
     ackName: string | null;
+    autoResume?: boolean | null;
   };
   return {
     reasonCode: o.reasonCode,
     summary: o.summary,
     at: new Date(o.at).toISOString(),
     acknowledgedBy: o.ackId && o.ackName ? { id: o.ackId, name: o.ackName } : null,
+    // Chỉ có khi true (lỗi phía AI ⇒ tự trả lại cho bot) — giữ nguyên dạng dữ liệu cũ cho handoff thường.
+    ...(o.autoResume === true ? { autoResume: true } : {}),
   };
 }
 

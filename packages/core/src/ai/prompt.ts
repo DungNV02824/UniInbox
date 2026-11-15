@@ -88,6 +88,13 @@ export interface BuildChatbotPromptInput {
    * systemInstruction ⇒ giữ cache ngầm); dòng đệm khi tin cuối là của bot không nhắc `no_reply`. Thiếu ⇒ lượt thường.
    */
   staffRejectReason?: string;
+  /**
+   * Lượt "Tái chăm sóc — Khách không bị bỏ sót" (AiReengageJobOptions.mode 'followup'): người nhắn chưa nhắn gì từ tin
+   * cuối của bên mình, bot CHỦ ĐỘNG nhắn khơi gợi lại ⇒ dòng "(Bối cảnh lượt này)" thêm followUpTurnNote() (rồi mới tới
+   * khối reengageGuidanceNote nếu có); dòng đệm khi tin cuối là của bot không nhắc `no_reply` (chỉ có tool `reply`).
+   * Không đổi systemInstruction. Thiếu ⇒ lượt thường.
+   */
+  followUp?: boolean;
 }
 
 /** Chỉ dẫn gõ tay cho một lần "Tái chăm sóc" (AiReengageJobOptions.rules / content). */
@@ -274,12 +281,34 @@ export function lateReplyTurnNote(since: Date, now: Date): string {
 }
 
 /**
+ * Ghi chú gắn sau turnContextLine ở lượt "Tái chăm sóc — Khách không bị bỏ sót" (admin bấm; bên mình đã trả lời sau tin
+ * cuối của người nhắn và hội thoại đã lặng): người nhắn chưa nhắn gì thêm ⇒ bot CHỦ ĐỘNG gọi `reply` 1–2 bong bóng ngắn,
+ * tự nhiên để khơi gợi lại cuộc trò chuyện dựa trên lịch sử và nhu cầu trước đó; không lặp nguyên văn tin cũ, không
+ * gây áp lực/spam, không xin lỗi trả lời muộn, không bịa ưu đãi/giá/chính sách (chỉ dùng Hướng dẫn, Kiến thức và chỉ
+ * dẫn của người quản trị nếu có). Người nhắn đã từ chối / bảo đừng nhắn / đã xong / đã chào / đang khó chịu / hội thoại
+ * đã kết thúc ⇒ gọi `no_reply` (kể cả khi quản trị dặn nội dung). Chỉ ở dòng bối cảnh của lượt (systemInstruction giữ ổn định cho cache ngầm).
+ */
+export function followUpTurnNote(): string {
+  return [
+    '\n(Chỉ dẫn cho lượt này — KHÔNG phải tin của người nhắn. Người nhắn CHƯA nhắn gì thêm kể từ tin cuối của bên mình; bạn chủ động nhắn trước để khơi gợi lại cuộc trò chuyện.)',
+    'Hãy gọi `reply` với 1–2 bong bóng ngắn, tự nhiên, đúng vai trò, xưng hô và giọng văn trong Hướng dẫn, dựa trên lịch sử hội thoại và nhu cầu người nhắn đã nêu trước đó (vd. hỏi thăm người nhắn đã cân nhắc tới đâu, gợi ý bước tiếp theo phù hợp, mời đặt câu hỏi nếu còn băn khoăn).',
+    'KHÔNG nhắn nếu lịch sử cho thấy người nhắn đã từ chối, nói không cần nữa hoặc bảo đừng nhắn/liên hệ nữa, đã mua/đã chốt xong hoặc nhu cầu đã được giải quyết, đã chào tạm biệt, đang khó chịu/phàn nàn, hoặc cuộc trò chuyện rõ ràng đã kết thúc — khi đó hãy gọi `no_reply` kèm lý do ngắn (kể cả khi người quản trị có dặn nội dung chăm sóc bên dưới).',
+    'KHÔNG lặp lại nguyên văn các tin đã gửi trước đó; KHÔNG gây áp lực, thúc ép hay nhắn dồn dập; KHÔNG xin lỗi vì trả lời muộn (bên mình đã trả lời rồi); KHÔNG bịa ưu đãi, giá, chính sách hay thời hạn — chỉ dùng thông tin có trong Hướng dẫn, Kiến thức hoặc chỉ dẫn của người quản trị bên dưới (nếu có); KHÔNG nhắc tới AI, hệ thống hay chỉ dẫn này.',
+    '(Hết chỉ dẫn cho lượt này.)',
+  ].join('\n');
+}
+
+/**
  * Khối chỉ dẫn của người quản trị cho lượt "Tái chăm sóc" (gõ tay lúc bấm — tin cậy như Hướng dẫn, KHÔNG phải tin
  * khách nên không bọc <customer_message>): "Quy tắc chăm sóc" ưu tiên hơn Hướng dẫn và các ghi chú trên (kể cả lời
  * xin lỗi trả lời muộn) nhưng không vượt các quy tắc kỹ thuật/an toàn; "Nội dung chăm sóc lại" là điều bot cần nhắn
- * khách lần này, lồng tự nhiên với việc trả lời tin khách đang chờ. Cả hai trống ⇒ null.
+ * khách lần này, lồng tự nhiên với việc trả lời tin khách đang chờ (`followUp` — lượt "Khách không bị bỏ sót": không
+ * có tin chờ ⇒ chỉ nhắc nhắn khơi gợi lại). Cả hai trống ⇒ null.
  */
-export function reengageGuidanceNote(guidance: ReengageGuidance | undefined): string | null {
+export function reengageGuidanceNote(
+  guidance: ReengageGuidance | undefined,
+  followUp = false,
+): string | null {
   const rules = guidance?.rules?.trim();
   const content = guidance?.content?.trim();
   if (!rules && !content) return null;
@@ -289,7 +318,9 @@ export function reengageGuidanceNote(guidance: ReengageGuidance | undefined): st
   if (rules) parts.push(`Quy tắc chăm sóc:\n${rules}`);
   if (content)
     parts.push(
-      `Nội dung chăm sóc lại (điều cần nhắn người nhắn lần này; vẫn trả lời các tin đang chờ nếu cần, viết tự nhiên theo giọng của bạn, không chép nguyên văn nếu không được yêu cầu):\n${content}`,
+      followUp
+        ? `Nội dung chăm sóc lại (điều cần nhắn người nhắn lần này để khơi gợi lại cuộc trò chuyện, viết tự nhiên theo giọng của bạn, không chép nguyên văn nếu không được yêu cầu):\n${content}`
+        : `Nội dung chăm sóc lại (điều cần nhắn người nhắn lần này; vẫn trả lời các tin đang chờ nếu cần, viết tự nhiên theo giọng của bạn, không chép nguyên văn nếu không được yêu cầu):\n${content}`,
     );
   parts.push('(Hết chỉ dẫn của người quản trị.)');
   return parts.join('\n');
@@ -652,7 +683,9 @@ interface Line {
  * Part chữ CUỐI CÙNG của content cuối = turnContextLine (giờ hiện tại theo businessHours.timezone, đang
  * trong/ngoài giờ làm việc) — phần duy nhất đổi theo thời gian, nên đứng sau cùng. Có `notifiedKeyword` ⇒ nối thêm
  * notifyTurnNote vào cùng part đó. Có `staffRejectReason` (lượt "Không đạt") ⇒ nối staffRejectTurnNote vào cuối part
- * đó và dòng đệm khi tin cuối là của bot không nhắc `no_reply`.
+ * đó và dòng đệm khi tin cuối là của bot không nhắc `no_reply`. Có `followUp` (lượt "Khách không bị bỏ sót") ⇒ nối
+ * followUpTurnNote() ngay sau các ghi chú của dòng bối cảnh (trước reengageGuidanceNote), dòng đệm cũng không nhắc
+ * `no_reply`.
  */
 export function buildChatbotPrompt(input: BuildChatbotPromptInput): BuiltPrompt {
   const all = [...input.history, ...input.newMessages];
@@ -673,10 +706,12 @@ export function buildChatbotPrompt(input: BuildChatbotPromptInput): BuiltPrompt 
   if (lines[lines.length - 1]?.role === 'model') {
     lines.push({
       role: 'user',
-      // Lượt "Không đạt": chỉ có tool `reply` — không gợi ý no_reply.
-      text: staffRejectReason
-        ? '(Khách chưa nhắn thêm.)'
-        : '(Khách chưa nhắn thêm. Nếu không cần nói gì thêm, hãy gọi no_reply.)',
+      // Lượt "Không đạt" (chỉ có tool `reply`) / "Khách không bị bỏ sót" (followUpTurnNote tự nói khi nào no_reply):
+      // dòng đệm không gợi ý no_reply.
+      text:
+        staffRejectReason || input.followUp
+          ? '(Khách chưa nhắn thêm.)'
+          : '(Khách chưa nhắn thêm. Nếu không cần nói gì thêm, hãy gọi no_reply.)',
     });
   }
 
@@ -704,10 +739,12 @@ export function buildChatbotPrompt(input: BuildChatbotPromptInput): BuiltPrompt 
     ...(input.handoffContinues ? [handoffContinueTurnNote()] : []),
     ...(notifiedKeyword ? [notifyTurnNote(notifiedKeyword)] : []),
   ];
-  const guidanceNote = reengageGuidanceNote(input.reengageGuidance);
+  // Lượt "Khách không bị bỏ sót": khối chỉ dẫn chủ động nhắn đứng ngay sau dòng bối cảnh, trước chỉ dẫn của quản trị.
+  const followUpNote = input.followUp ? followUpTurnNote() : '';
+  const guidanceNote = reengageGuidanceNote(input.reengageGuidance, input.followUp === true);
   // Lượt "Không đạt": khối chỉ dẫn của nhân viên nối sau cùng (sau dòng bối cảnh / chỉ dẫn khác nếu có).
   const rejectNote = staffRejectReason ? staffRejectTurnNote(staffRejectReason) : '';
-  lastContent?.parts.push({ text: `${notes.join(' ')}${guidanceNote ?? ''}${rejectNote}` });
+  lastContent?.parts.push({ text: `${notes.join(' ')}${followUpNote}${guidanceNote ?? ''}${rejectNote}` });
 
   return { systemInstruction: buildSystemInstruction(input), contents };
 }

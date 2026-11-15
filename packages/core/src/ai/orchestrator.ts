@@ -7,7 +7,15 @@ import {
   type LlmUsage,
 } from '@dezon/shared';
 import { claimsHandoffInReply } from './handoff-claim';
-import { LlmError, type LlmClient, type LlmContent, type LlmRequest, type LlmResponse } from './llm';
+import {
+  isLlmOutageError,
+  LLM_CALL_ERROR_PREFIX,
+  LlmError,
+  type LlmClient,
+  type LlmContent,
+  type LlmRequest,
+  type LlmResponse,
+} from './llm';
 import { keywordHandoffReason, matchHandoffKeyword } from './prefilter';
 import { buildChatbotPrompt, llmTimeoutExtraMsForImages, type ReengageGuidance } from './prompt';
 import { thinkingForSpeed } from './speed';
@@ -24,6 +32,7 @@ import {
   noReplyArgsSchema,
   replyArgsSchema,
   sanitizeAgentSummary,
+  FOLLOWUP_TOOLS,
   STAFF_REJECT_TOOLS,
   truncateAtWord,
 } from './tools';
@@ -85,6 +94,13 @@ export interface ChatbotTurnInput {
    * 'continue', không chạy bộ chặn "tự nói đã chuyển" (không bao giờ đổi thành escalate). Thiếu ⇒ lượt thường.
    */
   staffRejectReason?: string;
+  /**
+   * Lượt "Tái chăm sóc — Khách không bị bỏ sót" (runtime, AiReengageJobOptions.mode 'followup'): không có tin khách mới,
+   * bot CHỦ ĐỘNG nhắn khơi gợi lại ⇒ prompt thêm followUpTurnNote; tools `reply` + `no_reply` (FOLLOWUP_TOOLS — khách
+   * đã từ chối / đã xong ⇒ không nhắn); như lượt "Không đạt": không escalate vì độ tự tin thấp, không pre-filter từ khóa, không ghi chú handoff 'continue',
+   * không chạy bộ chặn "tự nói đã chuyển", không `captured` / `project_logs`. Thiếu ⇒ lượt thường.
+   */
+  followUp?: boolean;
 }
 
 /**
@@ -432,7 +448,7 @@ function toolCallEntries(response: LlmResponse): unknown[] {
  *      confidence TEXT_FALLBACK_CONFIDENCE (0.7), toolCalls ghi { name: 'text_fallback', args: { text } }.
  *    - Không có gì dùng được / tên lạ / args sai ⇒ decision 'error', reasonCode 'other', reason tiếng Việt.
  *    - Lỗi LLM sau khi hết lượt thử (hoặc lỗi không retryable) ⇒ decision 'error', reasonCode 'other',
- *      reason 'Lỗi gọi AI: <message>'.
+ *      reason 'Lỗi gọi AI: <message>'; lỗi là "AI ngừng hoạt động" (isLlmOutageError) ⇒ thêm llmOutage: true.
  * 3c. Bot bật "Thu thập thông tin": `captured` của tool đã gọi (reply / escalate / no_reply — kể cả reply bị đổi thành
  *    escalate low_confidence hoặc "tự nói đã chuyển"; lần gọi lại không điền ⇒ dùng của lần đầu) ⇒
  *    ChatbotTurnResult.captured, chỉ giữ khóa trường bật (filterCaptured). Lượt 'error' / "Không đạt" ⇒ không có.
@@ -442,6 +458,9 @@ function toolCallEntries(response: LlmResponse): unknown[] {
  * 4. latencyMs = deps.now() cuối − đầu; toolCalls = [{ name, args }] model trả về; model = response.model.
  * Lượt "Không đạt" (input.staffRejectReason): bỏ bước 1/1b, tools = STAFF_REJECT_TOOLS (chỉ reply), không escalate
  * low_confidence, không chạy bước 3b ⇒ kết quả chỉ là 'reply' / 'error' (hoặc quyết định lạ nếu model vẫn gọi tool khác).
+ * Lượt "Khách không bị bỏ sót" (input.followUp): y như lượt "Không đạt" (không 1/1b/3b, không escalate
+ * low_confidence, không captured / projectLogs) nhưng prompt dùng followUpTurnNote thay staffRejectTurnNote và tools =
+ * FOLLOWUP_TOOLS (reply + no_reply — khách đã từ chối / đã xong ⇒ model gọi no_reply, không nhắn).
  * KHÔNG bao giờ ném lỗi (mọi lỗi ⇒ decision 'error').
  */
 export async function runChatbotTurn(
@@ -450,6 +469,8 @@ export async function runChatbotTurn(
 ): Promise<ChatbotTurnResult> {
   const { chatbot } = input;
   const staffRejectReason = input.staffRejectReason?.trim() || undefined;
+  // Lượt chủ động chỉ có tool `reply` ("Không đạt" / "Khách không bị bỏ sót"): không pre-filter, không chuyển người.
+  const replyOnly = staffRejectReason !== undefined || input.followUp === true;
   const model = chatbot.model?.trim() || deps.defaultModel;
   const usage: LlmUsage = { inputTokens: 0, outputTokens: 0 };
   let startedAt = 0;
@@ -465,7 +486,7 @@ export async function runChatbotTurn(
 
   try {
     // 1. Pre-filter từ khóa chuyển người (lượt "Không đạt" không có tin khách mới ⇒ bỏ qua).
-    for (const msg of staffRejectReason ? [] : input.newMessages) {
+    for (const msg of replyOnly ? [] : input.newMessages) {
       if (msg.role !== 'customer' || !msg.text) continue;
       const keyword = matchHandoffKeyword(msg.text, chatbot.handoffKeywords);
       if (keyword) {
@@ -484,9 +505,7 @@ export async function runChatbotTurn(
     }
 
     // 1b. Từ khóa "Báo nhân viên, bot VẪN trả lời": nhớ lại rồi vẫn gọi LLM.
-    const notifiedKeyword = staffRejectReason
-      ? null
-      : matchNotifyKeyword(input.newMessages, chatbot.notifyKeywords);
+    const notifiedKeyword = replyOnly ? null : matchNotifyKeyword(input.newMessages, chatbot.notifyKeywords);
     const notified = notifiedKeyword ? { notifiedKeyword } : {};
     const notifyCalls: unknown[] = notifiedKeyword
       ? [{ name: NOTIFY_PREFILTER, args: { keyword: notifiedKeyword } }]
@@ -498,7 +517,7 @@ export async function runChatbotTurn(
     // 2. Gọi LLM có retry.
     const now = deps.now();
     startedAt = now.getTime();
-    const handoffContinues = !staffRejectReason && handoffContinuesInTurn(chatbot, input.history);
+    const handoffContinues = !replyOnly && handoffContinuesInTurn(chatbot, input.history);
     const prompt = buildChatbotPrompt({
       chatbot,
       history: input.history,
@@ -512,13 +531,20 @@ export async function runChatbotTurn(
       ...(input.lateReplySince ? { lateReplySince: input.lateReplySince } : {}),
       ...(input.reengageGuidance ? { reengageGuidance: input.reengageGuidance } : {}),
       ...(staffRejectReason ? { staffRejectReason } : {}),
+      ...(input.followUp ? { followUp: true } : {}),
     });
     const sleep = deps.sleep ?? defaultSleep;
     const request: LlmRequest = {
       model,
       systemInstruction: prompt.systemInstruction,
       contents: prompt.contents,
-      tools: staffRejectReason ? STAFF_REJECT_TOOLS : buildChatbotTools(chatbot),
+      // "Khách không bị bỏ sót": thêm `no_reply` để model được KHÔNG nhắn (khách đã từ chối / đã xong).
+      tools:
+        staffRejectReason !== undefined
+          ? STAFF_REJECT_TOOLS
+          : input.followUp
+            ? FOLLOWUP_TOOLS
+            : buildChatbotTools(chatbot),
       temperature: chatbot.temperature,
       // Ảnh làm Gemini chậm hơn: +3 s mỗi ảnh thật sự đính kèm (tối đa +30 s).
       timeoutMs: (deps.timeoutMs ?? LLM_TIMEOUT_MS) + llmTimeoutExtraMsForImages(input.images),
@@ -549,7 +575,9 @@ export async function runChatbotTurn(
     const first = await call(request);
     if (!('response' in first)) {
       return {
-        ...errorDecision(`Lỗi gọi AI: ${errorMessage(first.error)}`),
+        ...errorDecision(`${LLM_CALL_ERROR_PREFIX}${errorMessage(first.error)}`),
+        // Lỗi phía AI (hết tiền, quá tải, hết thời gian chờ…) ⇒ runtime đánh dấu handoff tự trả lại cho bot.
+        ...(isLlmOutageError(first.error) ? { llmOutage: true as const } : {}),
         ...notified,
         usage,
         model,
@@ -565,9 +593,7 @@ export async function runChatbotTurn(
     // 3. Quyết định.
     // Lượt "Không đạt": nhân viên đã quyết định ⇒ độ tự tin thấp không bao giờ thành escalate.
     const minConfidence =
-      chatbot.escalateWhenUnsure && !staffRejectReason
-        ? (deps.minConfidence ?? DEFAULT_MIN_CONFIDENCE)
-        : null;
+      chatbot.escalateWhenUnsure && !replyOnly ? (deps.minConfidence ?? DEFAULT_MIN_CONFIDENCE) : null;
     let decided = decide(response, minConfidence);
     let finalModel = response.model || model;
     // `captured` / `project_logs` của lần gọi đầu — giữ lại nếu lần gọi lại (bộ chặn 3b) không điền.
@@ -584,7 +610,7 @@ export async function runChatbotTurn(
       allowHandedOff: handoffContinues,
     };
     // Lượt "Không đạt" không chạy bộ chặn: chỉ có tool `reply`, và không bao giờ được đổi thành escalate.
-    if (!notifiedKeyword && !staffRejectReason && isClaimingReply(decided, tolerance)) {
+    if (!notifiedKeyword && !replyOnly && isClaimingReply(decided, tolerance)) {
       toolCalls.push({ name: HANDOFF_CLAIM_GUARD, args: { action: 'retry' } });
       let claim = decided;
       const second = await call({
@@ -620,12 +646,12 @@ export async function runChatbotTurn(
     // Thu thập thông tin: chỉ trường bật của bot; lượt "Không đạt" (tool không có `captured`) và lượt lỗi thì bỏ.
     const { captured: decidedCaptured, projectLogs: decidedProjectLogs, ...rest } = decided;
     const captured =
-      staffRejectReason || decided.decision === 'error'
+      replyOnly || decided.decision === 'error'
         ? undefined
         : filterCaptured(decidedCaptured ?? firstCaptured, chatbot);
     // Nhật ký công trình: chỉ lượt reply / escalate (không no_reply / lỗi / "Không đạt"), chỉ trường bật.
     const projectLogs =
-      staffRejectReason || (decided.decision !== 'reply' && decided.decision !== 'escalate')
+      replyOnly || (decided.decision !== 'reply' && decided.decision !== 'escalate')
         ? undefined
         : filterProjectLogs(decidedProjectLogs ?? firstProjectLogs, chatbot);
     return {

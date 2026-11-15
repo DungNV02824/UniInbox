@@ -131,6 +131,27 @@ async function missedConversation(chatbotId: string, agoMs: number, name = 'Anh 
   return conv!.id;
 }
 
+/** Như missedConversation nhưng bot đã trả lời cách đây `replyAgoMs` (khách không bị bỏ sót). */
+async function answeredConversation(
+  chatbotId: string,
+  customerAgoMs: number,
+  replyAgoMs: number,
+  name = 'Chị Ngọc',
+): Promise<string> {
+  const id = await missedConversation(chatbotId, customerAgoMs, name);
+  const at = new Date(Date.now() - replyAgoMs);
+  await db.insert(messages).values({
+    conversationId: id,
+    channelAccountId: seed.channelId,
+    senderType: 'bot',
+    text: 'Dạ sofa góc còn màu xám ạ',
+    status: 'sent',
+    sentAt: at,
+  });
+  await db.update(conversations).set({ lastMessageAt: at }).where(eq(conversations.id, id));
+  return id;
+}
+
 const previewUrl = (id: string) => `/chatbots/${id}/reengage/preview`;
 const startUrl = (id: string) => `/chatbots/${id}/reengage/start`;
 
@@ -153,7 +174,13 @@ describe('phân quyền và kiểm tra đầu vào', () => {
     expect((await asAdmin(previewUrl('abc'), { days: 15 })).statusCode).toBe(400);
 
     const bot = await createBot();
-    for (const body of [{}, { days: 0 }, { days: REENGAGE_LIMITS.daysMax + 1 }, { days: 1.5 }]) {
+    for (const body of [
+      {},
+      { days: 0 },
+      { days: REENGAGE_LIMITS.daysMax + 1 },
+      { days: 1.5 },
+      { days: 15, mode: 'spam' },
+    ]) {
       expect((await asAdmin(previewUrl(bot.id), body)).statusCode).toBe(400);
     }
     const tooMany = Array.from(
@@ -165,6 +192,7 @@ describe('phân quyền và kiểm tra đầu vào', () => {
       { days: 15, conversationIds: [] },
       { days: 15, conversationIds: ['abc'] },
       { days: 15, conversationIds: tooMany },
+      { days: 15, mode: 'all', conversationIds: [RANDOM_ID] },
     ]) {
       expect((await asAdmin(startUrl(bot.id), body)).statusCode).toBe(400);
     }
@@ -250,8 +278,26 @@ describe('tái chăm sóc', () => {
       .where(and(eq(auditLogs.action, 'chatbot.reengage'), eq(auditLogs.entityId, bot.id)));
     expect(audits.map((a) => a.data)).toEqual(
       expect.arrayContaining([
-        { days: 15, requested: 4, queued: 2, alreadyQueued: 0, skipped: 2, rulesChars: 0, contentChars: 0 },
-        { days: 15, requested: 1, queued: 0, alreadyQueued: 1, skipped: 0, rulesChars: 0, contentChars: 0 },
+        {
+          days: 15,
+          mode: 'missed',
+          requested: 4,
+          queued: 2,
+          alreadyQueued: 0,
+          skipped: 2,
+          rulesChars: 0,
+          contentChars: 0,
+        },
+        {
+          days: 15,
+          mode: 'missed',
+          requested: 1,
+          queued: 0,
+          alreadyQueued: 1,
+          skipped: 0,
+          rulesChars: 0,
+          contentChars: 0,
+        },
       ]),
     );
     expect(llmCalls).toHaveLength(0);
@@ -285,5 +331,54 @@ describe('tái chăm sóc', () => {
     expect(delays[0]! + delays[1]!).toBe(spacingMs);
     expect(delays[2]).toBeGreaterThan(2 * spacingMs - 10_000);
     expect(delays[2]).toBeLessThanOrEqual(2 * spacingMs);
+  });
+
+  it('mode "Khách không bị bỏ sót": preview/start theo mode, job mang mode followup, audit ghi mode', async () => {
+    const bot = await createBot();
+    const answered = await answeredConversation(bot.id, 3 * HOUR, 2 * HOUR, 'Chị Ngọc');
+    const missed = await missedConversation(bot.id, 2 * HOUR, 'Anh Phúc');
+
+    const follow = (
+      await asAdmin(previewUrl(bot.id), { days: 15, mode: 'followup' })
+    ).json<ReengagePreview>();
+    expect(follow.eligible.map((i) => i.conversationId)).toEqual([answered]);
+    expect(follow.eligible[0]).toMatchObject({ waitingMessages: 0, contactName: 'Chị Ngọc' });
+    // Thiếu mode ⇒ 'missed' như trước.
+    const miss = (await asAdmin(previewUrl(bot.id), { days: 15 })).json<ReengagePreview>();
+    expect(miss.eligible.map((i) => i.conversationId)).toEqual([missed]);
+
+    const res = await asAdmin(startUrl(bot.id), {
+      days: 15,
+      mode: 'followup',
+      conversationIds: [answered, missed],
+      rules: 'Nhẹ nhàng',
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json<ReengageStartResult>()).toMatchObject({ queued: 1, alreadyQueued: 0, skipped: 1 });
+    const job = await aiReply.getJob(aiReengageJobId(answered));
+    expect(job?.data).toMatchObject({
+      conversationId: answered,
+      reengage: { pendingMaxAgeHours: 15 * 24, chatbotId: bot.id, rules: 'Nhẹ nhàng', mode: 'followup' },
+    });
+    expect(await aiReply.getJob(aiReengageJobId(missed))).toBeUndefined();
+
+    // Hội thoại đã có job (dù mode nào) ⇒ alreadyQueued ở lần kiểm tra sau.
+    const recheck = (
+      await asAdmin(previewUrl(bot.id), { days: 15, mode: 'followup' })
+    ).json<ReengagePreview>();
+    expect(recheck).toMatchObject({ eligible: [], alreadyQueued: 1 });
+
+    const [audit] = await db
+      .select()
+      .from(auditLogs)
+      .where(and(eq(auditLogs.action, 'chatbot.reengage'), eq(auditLogs.entityId, bot.id)));
+    expect(audit!.data).toMatchObject({
+      mode: 'followup',
+      requested: 2,
+      queued: 1,
+      skipped: 1,
+      rulesChars: 9,
+    });
+    expect(llmCalls).toHaveLength(0);
   });
 });

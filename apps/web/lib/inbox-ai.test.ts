@@ -13,11 +13,14 @@ import {
   chatbotSelectOptions,
   conversationAiState,
   extractConversation,
+  HANDOFF_AI_OUTAGE_NOTE,
   handoffAckedText,
+  handoffAiOutageNote,
   handoffBotNote,
   handoffButtonLabels,
   chatbotLockedHint,
   handoffReasonLabel,
+  handoffRowTitle,
   isAiPaused,
   matchesAiState,
   withAiResumed,
@@ -297,5 +300,40 @@ describe('Cần người mà bot vẫn trả lời (aiHandoffMode continue)', ()
     expect(chatbotChipState(conv({ chatbot: null, aiMode: 'auto' }), NOW)).toBe('off');
     // Biểu tượng "Cần người" vẫn hiện.
     expect(conversationAiState(conv({ ...pending, chatbot: CONT, aiMode: 'auto' }), NOW)).toBe('handoff');
+  });
+});
+
+describe('Cần người vì lỗi phía AI (handoff.autoResume)', () => {
+  const OUTAGE = {
+    ...HANDOFF,
+    reasonCode: 'other' as const,
+    summary: 'Lỗi gọi AI: Gemini HTTP 402',
+    autoResume: true,
+  };
+  const LAN = { id: 'u-2', name: 'Lan' };
+
+  it('handoffAiOutageNote: chỉ khi autoResume, đang chờ người, còn gắn bot và chưa ai nhận', () => {
+    expect(HANDOFF_AI_OUTAGE_NOTE).toBe(
+      'AI tạm lỗi (hết tiền / quá tải) — bot sẽ tự trả lời lại khi AI hoạt động. Bấm nút bên cạnh nếu muốn tự xử lý.',
+    );
+    const waiting = { status: 'pending_human' as const, chatbot: BOT };
+    expect(handoffAiOutageNote(conv({ ...waiting, handoff: OUTAGE }))).toBe(HANDOFF_AI_OUTAGE_NOTE);
+    // Nhân viên đã nhận ⇒ hệ thống không tự trả lại nữa ⇒ không hứa.
+    expect(handoffAiOutageNote(conv({ ...waiting, handoff: { ...OUTAGE, acknowledgedBy: LAN } }))).toBeNull();
+    // Đã gỡ bot (cập nhật lạc quan) ⇒ worker không trả lại ⇒ không hứa.
+    expect(handoffAiOutageNote(conv({ ...waiting, chatbot: null, handoff: OUTAGE }))).toBeNull();
+    expect(handoffAiOutageNote(conv({ ...waiting, handoff: HANDOFF }))).toBeNull();
+    expect(handoffAiOutageNote(conv({ ...waiting, handoff: { ...OUTAGE, autoResume: false } }))).toBeNull();
+    expect(handoffAiOutageNote(conv({ status: 'open', chatbot: BOT, handoff: OUTAGE }))).toBeNull();
+    expect(handoffAiOutageNote(conv({ ...waiting, handoff: null }))).toBeNull();
+  });
+
+  it('handoffRowTitle: thêm "· lỗi AI" khi autoResume; giữ "· đã nhận bởi …"', () => {
+    expect(handoffRowTitle(null)).toBe('Cần người xử lý');
+    expect(handoffRowTitle(HANDOFF)).toBe(`Cần người: ${handoffReasonLabel('discount')}`);
+    expect(handoffRowTitle(OUTAGE)).toBe(`Cần người: ${handoffReasonLabel('other')} · lỗi AI`);
+    expect(handoffRowTitle({ ...OUTAGE, acknowledgedBy: LAN })).toBe(
+      `Cần người: ${handoffReasonLabel('other')} · lỗi AI · đã nhận bởi Lan`,
+    );
   });
 });

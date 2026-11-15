@@ -624,12 +624,31 @@ const reengageGuidanceSchema = z
 const reengageDaysSchema = z.number().int().min(REENGAGE_LIMITS.daysMin).max(REENGAGE_LIMITS.daysMax);
 
 /** POST /chatbots/:id/reengage/preview (admin). */
-export const reengagePreviewSchema = z.object({ days: reengageDaysSchema });
-export type ReengagePreviewRequest = z.infer<typeof reengagePreviewSchema>;
+/**
+ * Đối tượng tái chăm sóc:
+ * - 'missed' ("Khách bị bỏ sót"): tin cuối là của khách và chưa ai trả lời ⇒ bot trả lời các tin đang chờ.
+ * - 'followup' ("Khách không bị bỏ sót"): bên mình (bot/nhân viên) đã trả lời sau tin cuối của khách ⇒ bot CHỦ ĐỘNG
+ *   nhắn thêm để khơi gợi lại cuộc trò chuyện (theo Quy tắc / Nội dung chăm sóc lại). Vẫn chỉ trong khung gửi của kênh
+ *   (Messenger: 24 giờ kể từ tin cuối của khách).
+ */
+export const REENGAGE_MODES = ['missed', 'followup'] as const;
+export type ReengageMode = (typeof REENGAGE_MODES)[number];
+export const REENGAGE_MODE_LABELS: Record<ReengageMode, string> = {
+  missed: 'Khách bị bỏ sót',
+  followup: 'Khách không bị bỏ sót',
+};
+/** 'followup': bỏ qua hội thoại có tin (bất kỳ bên nào) mới hơn chừng này phút — đang trò chuyện, không chen vào. */
+export const REENGAGE_FOLLOWUP_MIN_IDLE_MINUTES = 60;
+const reengageModeSchema = z.enum(REENGAGE_MODES).default('missed');
+
+export const reengagePreviewSchema = z.object({ days: reengageDaysSchema, mode: reengageModeSchema });
+export type ReengagePreviewRequest = z.input<typeof reengagePreviewSchema>;
 
 /** POST /chatbots/:id/reengage/start (admin): chỉ các hội thoại đã chọn từ danh sách "eligible" của preview. */
 export const reengageStartSchema = z.object({
   days: reengageDaysSchema,
+  /** Thiếu ⇒ 'missed' (như trước). Phải trùng mode của lần "Kiểm tra" (server kiểm lại theo mode này). */
+  mode: reengageModeSchema,
   conversationIds: z.array(z.uuid()).min(1).max(REENGAGE_LIMITS.maxPerRun),
   /**
    * "Quy tắc chăm sóc" (admin gõ tay cho lần bấm này): cách bot chăm sóc lại — giọng văn, điều nên/không nên nói…

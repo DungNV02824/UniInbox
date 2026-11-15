@@ -122,6 +122,7 @@ describe('migrations', () => {
   it('migration ngược xóa sạch, sau đó chạy xuôi lại được', async () => {
     const files = await rollbackMigrations(url);
     expect(files).toEqual([
+      '0014_handoff_auto_resume.sql',
       '0013_project_logs.sql',
       '0012_contact_capture.sql',
       '0011_ai_handoff_mode.sql',
@@ -147,6 +148,71 @@ describe('migrations', () => {
     await runMigrations(url);
     expect(await publicTables()).toEqual(EXPECTED_TABLES);
     expect(await vectorInstalled()).toBe(true);
+  });
+
+  it('0014: cột handoffs.auto_resume (NOT NULL, mặc định false) + backfill handoff mở do lỗi gọi AI; rollback gỡ cột, giữ handoff; chạy lại ⇒ backfill lại', async () => {
+    const col = `select data_type, is_nullable, column_default from information_schema.columns
+       where table_name = 'handoffs' and column_name = 'auto_resume'`;
+    expect(await query(col)).toEqual([{ data_type: 'boolean', is_nullable: 'NO', column_default: 'false' }]);
+
+    // Dữ liệu cũ (trước 0014): rollback rồi tạo handoff, chạy lại 0014 ⇒ chỉ handoff MỞ do AI tạo với tóm tắt
+    // "Lỗi gọi AI: …" được bật auto_resume.
+    expect(await rollbackMigrations(url, 1)).toEqual(['0014_handoff_auto_resume.sql']);
+    expect(await query(col)).toEqual([]);
+    const [ch] = await query<{ id: string }>(
+      `insert into channel_accounts (type, display_name, external_id, status, credentials)
+       values ('messenger', 'Trang 0014', 'page-0014', 'connected', '{}') returning id`,
+    );
+    const [ct] = await query<{ id: string }>(
+      `insert into contacts (display_name) values ('Khách 0014') returning id`,
+    );
+    const [ci] = await query<{ id: string }>(
+      `insert into contact_identities (contact_id, channel_account_id, external_user_id)
+       values ('${ct!.id}', '${ch!.id}', 'psid-0014') returning id`,
+    );
+    const [conv] = await query<{ id: string }>(
+      `insert into conversations (contact_id, channel_account_id, contact_identity_id)
+       values ('${ct!.id}', '${ch!.id}', '${ci!.id}') returning id`,
+    );
+    await query(
+      `insert into handoffs (conversation_id, reason_code, summary, created_by, resolved_at) values
+       ('${conv!.id}', 'other', 'Lỗi gọi AI: Gemini HTTP 402: credits depleted', 'ai', null),
+       ('${conv!.id}', 'other', 'Lỗi gọi AI: Hết thời gian chờ AI (30s)', 'ai', now()),
+       ('${conv!.id}', 'other', 'Lỗi gọi AI: Gemini HTTP 429', 'user', null),
+       ('${conv!.id}', 'other', 'Lỗi gọi AI: Gemini HTTP 400: Invalid JSON payload', 'ai', null),
+       ('${conv!.id}', 'other', 'Lỗi gọi AI: Gemini HTTP 403: Permission denied on API key', 'ai', null),
+       ('${conv!.id}', 'other', 'Lỗi gọi AI: Gemini HTTP 503: overloaded' || E'\\n+ Khách muốn gặp quản lý', 'ai', null),
+       ('${conv!.id}', 'other', 'Lỗi gọi AI: Gemini chặn nội dung (SAFETY)', 'ai', null),
+       ('${conv!.id}', 'other', 'Lỗi gọi AI: Lỗi gọi Gemini: fetch failed', 'ai', null),
+       ('${conv!.id}', 'other', 'Lỗi gọi AI: Hết thời gian chờ AI (30s) ', 'ai', null),
+       ('${conv!.id}', 'discount', 'Khách xin giảm giá', 'ai', null)`,
+    );
+    await runMigrations(url);
+    expect(
+      await query(
+        `select summary, auto_resume from handoffs where conversation_id = '${conv!.id}' order by summary collate "C"`,
+      ),
+    ).toEqual([
+      { summary: 'Khách xin giảm giá', auto_resume: false },
+      // 400 request sai / nội dung bị chặn: không phải "AI ngừng hoạt động" ⇒ nhân viên xử lý.
+      { summary: 'Lỗi gọi AI: Gemini HTTP 400: Invalid JSON payload', auto_resume: false },
+      { summary: 'Lỗi gọi AI: Gemini HTTP 402: credits depleted', auto_resume: true },
+      { summary: 'Lỗi gọi AI: Gemini HTTP 403: Permission denied on API key', auto_resume: true },
+      { summary: 'Lỗi gọi AI: Gemini HTTP 429', auto_resume: false },
+      // Bot 'continue' đã nối thêm yêu cầu thật ⇒ cần người.
+      { summary: 'Lỗi gọi AI: Gemini HTTP 503: overloaded\n+ Khách muốn gặp quản lý', auto_resume: false },
+      { summary: 'Lỗi gọi AI: Gemini chặn nội dung (SAFETY)', auto_resume: false },
+      { summary: 'Lỗi gọi AI: Hết thời gian chờ AI (30s)', auto_resume: false },
+      { summary: 'Lỗi gọi AI: Hết thời gian chờ AI (30s) ', auto_resume: true },
+      { summary: 'Lỗi gọi AI: Lỗi gọi Gemini: fetch failed', auto_resume: true },
+    ]);
+    expect(await rollbackMigrations(url, 1)).toEqual(['0014_handoff_auto_resume.sql']);
+    expect(await query(`select id from handoffs where conversation_id = '${conv!.id}'`)).toHaveLength(10);
+    await runMigrations(url);
+    expect(await query(col)).toHaveLength(1);
+    await query(`delete from conversations where id = '${conv!.id}'`);
+    await query(`delete from contacts where id = '${ct!.id}'`);
+    await query(`delete from channel_accounts where id = '${ch!.id}'`);
   });
 
   it('0013: bảng project_logs (cột, FK cascade/set null, index); rollback xóa bảng; chạy lại tạo lại', async () => {
@@ -185,7 +251,10 @@ describe('migrations', () => {
     const [index] = await query<{ indexdef: string }>(idx);
     expect(index?.indexdef).toMatch(/\(conversation_id, created_at\)/);
 
-    expect(await rollbackMigrations(url, 1)).toEqual(['0013_project_logs.sql']);
+    expect(await rollbackMigrations(url, 2)).toEqual([
+      '0014_handoff_auto_resume.sql',
+      '0013_project_logs.sql',
+    ]);
     expect(await publicTables()).toEqual(EXPECTED_TABLES.filter((t) => t !== 'project_logs'));
     await runMigrations(url);
     expect(await publicTables()).toEqual(EXPECTED_TABLES);
@@ -209,7 +278,11 @@ describe('migrations', () => {
       `insert into contacts (display_name, phone, phone_source, profile_fields) values ('Khách 0012', '0912345678', 'ai', '{"need":{"label":"Nhu cầu","value":"Xây nhà","source":"ai","updatedAt":"2026-11-14T00:00:00.000Z"}}')`,
     );
 
-    expect(await rollbackMigrations(url, 2)).toEqual(['0013_project_logs.sql', '0012_contact_capture.sql']);
+    expect(await rollbackMigrations(url, 3)).toEqual([
+      '0014_handoff_auto_resume.sql',
+      '0013_project_logs.sql',
+      '0012_contact_capture.sql',
+    ]);
     expect(await query(cols)).toEqual([]);
     expect(await query("select name from chatbots where name = 'Bot 0012'")).toHaveLength(1);
     expect(await query("select phone from contacts where display_name = 'Khách 0012'")).toEqual([
@@ -237,7 +310,8 @@ describe('migrations', () => {
     ).rejects.toThrow(/chatbots_ai_handoff_mode_check/);
     await query("insert into chatbots (name, ai_handoff_mode) values ('Bot 0011', 'continue')");
 
-    expect(await rollbackMigrations(url, 3)).toEqual([
+    expect(await rollbackMigrations(url, 4)).toEqual([
+      '0014_handoff_auto_resume.sql',
       '0013_project_logs.sql',
       '0012_contact_capture.sql',
       '0011_ai_handoff_mode.sql',
@@ -263,7 +337,8 @@ describe('migrations', () => {
     await query(
       "insert into chatbots (name, handoff_ack_message) values ('Bot tin nút', 'Dạ {ten_khach} chờ em chút ạ')",
     );
-    expect(await rollbackMigrations(url, 4)).toEqual([
+    expect(await rollbackMigrations(url, 5)).toEqual([
+      '0014_handoff_auto_resume.sql',
       '0013_project_logs.sql',
       '0012_contact_capture.sql',
       '0011_ai_handoff_mode.sql',
@@ -325,7 +400,8 @@ describe('migrations', () => {
       `insert into chatbots (name, notify_keywords, agent_reply_mode, agent_pause_minutes, handoff_reminder_min)
        values ('Bot 0009', '{bảo hành}', 'stop', 15, 30)`,
     );
-    expect(await rollbackMigrations(url, 5)).toEqual([
+    expect(await rollbackMigrations(url, 6)).toEqual([
+      '0014_handoff_auto_resume.sql',
       '0013_project_logs.sql',
       '0012_contact_capture.sql',
       '0011_ai_handoff_mode.sql',
@@ -352,7 +428,8 @@ describe('migrations', () => {
        and column_name in ('handoff_ack_label', 'handoff_resolve_label', 'handoff_action_lark') order by column_name`;
     await query("insert into chatbots (name, handoff_ack_label) values ('Bot nút', 'Nghiệm thu')");
     expect(await query(cols)).toHaveLength(3);
-    expect(await rollbackMigrations(url, 6)).toEqual([
+    expect(await rollbackMigrations(url, 7)).toEqual([
+      '0014_handoff_auto_resume.sql',
       '0013_project_logs.sql',
       '0012_contact_capture.sql',
       '0011_ai_handoff_mode.sql',
@@ -372,7 +449,8 @@ describe('migrations', () => {
   });
 
   it('0007: rollback gỡ contact_tags, giữ contacts.tags; chạy lại seed nhãn sẵn có (bỏ trùng hoa thường)', async () => {
-    expect(await rollbackMigrations(url, 7)).toEqual([
+    expect(await rollbackMigrations(url, 8)).toEqual([
+      '0014_handoff_auto_resume.sql',
       '0013_project_logs.sql',
       '0012_contact_capture.sql',
       '0011_ai_handoff_mode.sql',
@@ -418,7 +496,8 @@ describe('migrations', () => {
     await query("insert into chatbots (name) values ('Bot tốc độ')");
     expect((await query<{ n: number }>(col))[0]?.n).toBe(1);
     expect((await query<{ n: number }>(chk))[0]?.n).toBe(1);
-    expect(await rollbackMigrations(url, 8)).toEqual([
+    expect(await rollbackMigrations(url, 9)).toEqual([
+      '0014_handoff_auto_resume.sql',
       '0013_project_logs.sql',
       '0012_contact_capture.sql',
       '0011_ai_handoff_mode.sql',
@@ -444,7 +523,8 @@ describe('migrations', () => {
       "select count(*)::int as n from information_schema.columns where table_name = 'chatbots' and column_name = 'escalate_when_unsure'";
     await query("insert into chatbots (name) values ('Bot giữ lại')");
     expect((await query<{ n: number }>(col))[0]?.n).toBe(1);
-    expect(await rollbackMigrations(url, 9)).toEqual([
+    expect(await rollbackMigrations(url, 10)).toEqual([
+      '0014_handoff_auto_resume.sql',
       '0013_project_logs.sql',
       '0012_contact_capture.sql',
       '0011_ai_handoff_mode.sql',
@@ -489,7 +569,8 @@ describe('migrations', () => {
       { conname: 'conversations_chatbot_id_chatbots_id_fk', confdeltype: 'n' },
     ]);
 
-    expect(await rollbackMigrations(url, 10)).toEqual([
+    expect(await rollbackMigrations(url, 11)).toEqual([
+      '0014_handoff_auto_resume.sql',
       '0013_project_logs.sql',
       '0012_contact_capture.sql',
       '0011_ai_handoff_mode.sql',
@@ -564,7 +645,8 @@ describe('migrations', () => {
     const col =
       "select count(*)::int as n from information_schema.columns where table_name = 'messages' and column_name = 'client_id'";
     expect((await query<{ n: number }>(col))[0]?.n).toBe(1);
-    expect(await rollbackMigrations(url, 11)).toEqual([
+    expect(await rollbackMigrations(url, 12)).toEqual([
+      '0014_handoff_auto_resume.sql',
       '0013_project_logs.sql',
       '0012_contact_capture.sql',
       '0011_ai_handoff_mode.sql',
@@ -587,7 +669,8 @@ describe('migrations', () => {
     const fk =
       "select count(*)::int as n from pg_constraint where conname = 'messages_conversation_channel_account_fk'";
     expect((await query<{ n: number }>(fk))[0]?.n).toBe(1);
-    expect(await rollbackMigrations(url, 12)).toEqual([
+    expect(await rollbackMigrations(url, 13)).toEqual([
+      '0014_handoff_auto_resume.sql',
       '0013_project_logs.sql',
       '0012_contact_capture.sql',
       '0011_ai_handoff_mode.sql',
@@ -607,8 +690,8 @@ describe('migrations', () => {
     expect(await publicTables()).toEqual(EXPECTED_TABLES);
   });
 
-  it('rollback mười một bước giữ extension và cho phép chạy lại 0001', async () => {
-    await rollbackMigrations(url, 13);
+  it('rollback mười bốn bước giữ extension và cho phép chạy lại 0001', async () => {
+    await rollbackMigrations(url, 14);
     expect(await publicTables()).toEqual([]);
     expect(await vectorInstalled()).toBe(true);
     await runMigrations(url);

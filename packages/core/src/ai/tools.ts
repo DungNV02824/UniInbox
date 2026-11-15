@@ -183,6 +183,15 @@ export const CHATBOT_TOOLS: LlmFunctionDeclaration[] = [
  */
 export const STAFF_REJECT_TOOLS: LlmFunctionDeclaration[] = CHATBOT_TOOLS.filter((t) => t.name === 'reply');
 
+/**
+ * Tool của lượt "Tái chăm sóc — Khách không bị bỏ sót" (bot chủ động nhắn khơi gợi): `reply` + `no_reply` (không
+ * escalate, không `captured` / `project_logs`) ⇒ model được phép KHÔNG nhắn khi khách đã từ chối, bảo đừng nhắn nữa,
+ * đã xong nhu cầu hoặc cuộc trò chuyện rõ ràng đã kết thúc.
+ */
+export const FOLLOWUP_TOOLS: LlmFunctionDeclaration[] = CHATBOT_TOOLS.filter(
+  (t) => t.name === 'reply' || t.name === 'no_reply',
+);
+
 /** Lý do escalate chỉ dành cho bot "không chắc ⇒ chuyển người" (escalateWhenUnsure = true). */
 export const UNSURE_REASON_CODES: readonly HandoffReasonCode[] = ['out_of_scope', 'low_confidence'];
 

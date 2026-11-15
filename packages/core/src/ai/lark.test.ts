@@ -6,6 +6,7 @@ import {
   buildHandoffActionLarkCard,
   buildHandoffLarkCard,
   escapeLarkMd,
+  LARK_AI_OUTAGE_NOTE,
   notifyLark,
   signLarkWebhook,
   type HandoffActionCardInput,
@@ -64,6 +65,15 @@ describe('buildHandoffLarkCard', () => {
       template: string;
     };
     expect(reminder.template).toBe('orange');
+  });
+
+  it('handoff vì lỗi AI (aiOutage) ⇒ ghi chú "sẽ tự trả lại cho bot", cả thẻ đầu lẫn thẻ nhắc lại', () => {
+    expect(LARK_AI_OUTAGE_NOTE).toContain('tự trả lại cho bot');
+    for (const extra of [{}, { reminder: true }]) {
+      const json = JSON.stringify(buildHandoffLarkCard({ ...input, ...extra, aiOutage: true }));
+      expect(json).toContain(LARK_AI_OUTAGE_NOTE);
+    }
+    expect(JSON.stringify(buildHandoffLarkCard(input))).not.toContain(LARK_AI_OUTAGE_NOTE);
   });
 
   it('escapeLarkMd', () => {

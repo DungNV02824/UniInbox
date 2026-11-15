@@ -53,7 +53,7 @@ export const chatbotsApi = {
   testDraft(body: { draft: ChatbotDraft; messages: ChatbotTestRequest['messages'] }) {
     return api.request<ChatbotTestResult>('/chatbots/test-draft', { method: 'POST', body });
   },
-  /** Tái chăm sóc: liệt kê khách bị bỏ sót trong N ngày (không gọi AI, không gửi tin). */
+  /** Tái chăm sóc: liệt kê khách (bị bỏ sót / không bị bỏ sót theo mode) trong N ngày (không gọi AI, không gửi tin). */
   reengagePreview(id: string, body: ReengagePreviewRequest) {
     return api.request<ReengagePreview>(`/chatbots/${enc(id)}/reengage/preview`, { method: 'POST', body });
   },

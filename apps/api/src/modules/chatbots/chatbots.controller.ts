@@ -123,7 +123,9 @@ export class ChatbotsController {
 
   /**
    * "Tái chăm sóc khách bị bỏ sót" — bước 1: danh sách hội thoại đang gắn bot có khách chờ trong `days` ngày (bot sẽ
-   * trả lời / kênh không cho bot gửi). Không ghi DB, không gọi AI. Bot không có ⇒ 404; bot tắt / AI tổng tắt ⇒ 400.
+   * trả lời / kênh không cho bot gửi). `mode` 'followup' ("Khách không bị bỏ sót") ⇒ hội thoại bên mình đã trả lời sau
+   * cùng và đã lặng (bot sẽ chủ động nhắn khơi gợi lại); thiếu ⇒ 'missed'. Không ghi DB, không gọi AI. Bot không có ⇒
+   * 404; bot tắt / AI tổng tắt ⇒ 400.
    */
   @Roles('admin')
   @Post(':id/reengage/preview')
@@ -132,12 +134,12 @@ export class ChatbotsController {
     @UuidParam() id: string,
     @Body(new ZodValidationPipe(reengagePreviewSchema)) body: ReengagePreviewRequest,
   ): Promise<ReengagePreview> {
-    return this.reengage.preview(id, body.days);
+    return this.reengage.preview(id, body.days, body.mode);
   }
 
   /**
    * Bước 2: bot trả lời LẦN LƯỢT các hội thoại đã chọn (kiểm lại từng id, tối đa REENGAGE_LIMITS.maxPerRun, giãn
-   * REENGAGE_LIMITS.spacingSec giây). Audit 'chatbot.reengage'.
+   * REENGAGE_LIMITS.spacingSec giây; kiểm lại theo `mode` của lần "Kiểm tra"). Audit 'chatbot.reengage'.
    */
   @Roles('admin')
   @Post(':id/reengage/start')

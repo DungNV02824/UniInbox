@@ -16,5 +16,6 @@ export * from './handoff-action';
 export * from './handoff-reject';
 export * from './runtime';
 export * from './reengage';
+export * from './auto-resume';
 // Dòng [Hệ thống] mốc chuyển người (Chat thử dựng lại lịch sử có handoff mở).
 export { handoffCreatedMarker } from './turn-input';

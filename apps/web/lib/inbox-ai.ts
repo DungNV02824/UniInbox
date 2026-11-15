@@ -238,6 +238,32 @@ export function handoffAckedText(
   return labels.customAck ? `Đã bấm "${labels.ack}" — ${who}` : `Đã nhận bởi ${who}`;
 }
 
+export const HANDOFF_AI_OUTAGE_NOTE =
+  'AI tạm lỗi (hết tiền / quá tải) — bot sẽ tự trả lời lại khi AI hoạt động. Bấm nút bên cạnh nếu muốn tự xử lý.';
+
+/**
+ * Dòng tông vàng trên banner "Cần người" khi chuyển người vì LỖI PHÍA AI (handoff.autoResume): hệ thống sẽ tự trả lại
+ * cho bot khi AI hoạt động. Server chỉ đặt autoResume khi worker VẪN SẼ trả lại (chưa ai nhận, chưa ai nhắn khách,
+ * bot còn gắn và bật…). Nhân viên đã nhận xử lý / đã gỡ bot (cập nhật lạc quan trước khi server trả về) ⇒ hệ thống
+ * không tự trả lại nữa ⇒ null (không hứa sai).
+ */
+export function handoffAiOutageNote(
+  c: Pick<ConversationSummary, 'status' | 'handoff' | 'chatbot'>,
+): string | null {
+  const h = c.handoff;
+  return c.status === 'pending_human' && c.chatbot && h?.autoResume && !h.acknowledgedBy
+    ? HANDOFF_AI_OUTAGE_NOTE
+    : null;
+}
+
+/** Chú thích biểu tượng "Cần người" ở dòng hội thoại: lý do (+ "· lỗi AI") (+ "· đã nhận bởi …"). */
+export function handoffRowTitle(handoff: ConversationSummary['handoff']): string {
+  if (!handoff) return 'Cần người xử lý';
+  const outage = handoff.autoResume ? ' · lỗi AI' : '';
+  const acked = handoff.acknowledgedBy ? ` · đã nhận bởi ${handoff.acknowledgedBy.name}` : '';
+  return `Cần người: ${handoffReasonLabel(handoff.reasonCode)}${outage}${acked}`;
+}
+
 export interface ChatbotOption {
   id: string;
   label: string;

@@ -132,6 +132,13 @@ export interface ChatbotTurnResult {
   summary?: string;
   /** decision 'no_reply': lý do của model; decision 'error': thông điệp lỗi (không chứa key). */
   reason?: string;
+  /**
+   * decision 'error' vì CHÍNH lời gọi LLM hỏng sau khi hết lượt thử và lỗi là "AI ngừng hoạt động" (isLlmOutageError:
+   * hết tiền 402, quá tải 429, hết thời gian chờ, 5xx, mạng, lỗi khóa API/quyền…) ⇒ true. Runtime tạo handoff
+   * auto_resume = true: worker tự trả lại hội thoại cho bot khi AI hoạt động lại. Thiếu ⇒ lỗi khác (model trả kết
+   * quả không dùng được, 400, 404 sai model…) — nhân viên tự xử lý như trước.
+   */
+  llmOutage?: true;
   /** Từ khóa chuyển người đã khớp (pre-filter, không gọi LLM). */
   matchedKeyword?: string;
   /**

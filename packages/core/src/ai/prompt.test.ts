@@ -23,6 +23,7 @@ import {
   CHATBOT_PROJECT_LOG_HEADING,
   CHATBOT_SAFETY_FRAME,
   isPromptImageMime,
+  followUpTurnNote,
   formatWaitDuration,
   handoffContinueTurnNote,
   lateReplyTurnNote,
@@ -964,6 +965,67 @@ describe('buildChatbotPrompt — lượt "Không đạt" (nhân viên bấm nút
   it('lý do rỗng/khoảng trắng ⇒ như lượt thường', () => {
     const plain = buildChatbotPrompt(input());
     expect(lastPartText(buildChatbotPrompt(input({ staffRejectReason: '   ' })))).toBe(lastPartText(plain));
+  });
+});
+
+describe('buildChatbotPrompt — lượt "Khách không bị bỏ sót" (bot chủ động nhắn khơi gợi lại)', () => {
+  const lastPartText = (p: ReturnType<typeof buildChatbotPrompt>) => {
+    const last = p.contents[p.contents.length - 1]!;
+    return textOf(last.parts[last.parts.length - 1]);
+  };
+  const history: BuildChatbotPromptInput['history'] = [
+    { role: 'customer', text: 'Tủ bếp chữ L 3 mét giá sao em?' },
+    { role: 'bot', text: 'Dạ khoảng 45 triệu ạ, anh/chị muốn em gửi mẫu không ạ?' },
+  ];
+
+  it('followUp ⇒ followUpTurnNote ngay sau dòng bối cảnh, trước chỉ dẫn quản trị; systemInstruction không đổi; dòng đệm không nhắc no_reply', () => {
+    const plain = buildChatbotPrompt(input({ history, newMessages: [] }));
+    const follow = buildChatbotPrompt(input({ history, newMessages: [], followUp: true }));
+    expect(follow.systemInstruction).toBe(plain.systemInstruction);
+    expect(lastPartText(follow)).toBe(`${lastPartText(plain)}${followUpTurnNote()}`);
+    expect(JSON.stringify(plain.contents)).toContain('hãy gọi no_reply');
+    expect(JSON.stringify(follow.contents)).not.toContain('hãy gọi no_reply');
+    expect(JSON.stringify(follow.contents)).toContain('(Khách chưa nhắn thêm.)');
+
+    const guided = buildChatbotPrompt(
+      input({
+        history,
+        newMessages: [],
+        followUp: true,
+        reengageGuidance: { rules: 'Xưng em', content: 'Mời xem showroom' },
+      }),
+    );
+    const text = lastPartText(guided);
+    expect(text.startsWith(`${lastPartText(plain)}${followUpTurnNote()}\n`)).toBe(true);
+    expect(text).toContain('Quy tắc chăm sóc:\nXưng em');
+    expect(text).toContain('để khơi gợi lại cuộc trò chuyện');
+    expect(text).not.toContain('vẫn trả lời các tin đang chờ');
+    expect(text.endsWith('(Hết chỉ dẫn của người quản trị.)')).toBe(true);
+    // Không có ghi chú xin lỗi trả lời muộn.
+    expect(text).not.toContain('CHƯA được ai trả lời');
+  });
+
+  it('followUpTurnNote: chủ động 1–2 tin ngắn theo lịch sử; khách từ chối/đã xong ⇒ no_reply; không lặp nguyên văn, không áp lực, không xin lỗi muộn, không bịa', () => {
+    const note = followUpTurnNote();
+    expect(note.startsWith('\n(Chỉ dẫn cho lượt này — KHÔNG phải tin của người nhắn.')).toBe(true);
+    expect(note).toContain('CHƯA nhắn gì thêm');
+    expect(note).toContain('`reply` với 1–2 bong bóng ngắn');
+    expect(note).toContain('lịch sử hội thoại');
+    expect(note).toContain('KHÔNG lặp lại nguyên văn');
+    expect(note).toContain('KHÔNG gây áp lực');
+    expect(note).toContain('KHÔNG xin lỗi vì trả lời muộn');
+    expect(note).toContain('KHÔNG bịa ưu đãi, giá, chính sách');
+    expect(note).toContain('Hướng dẫn, Kiến thức');
+    // Khách đã từ chối / bảo đừng nhắn / đã xong ⇒ không nhắn, gọi no_reply.
+    expect(note).toContain('bảo đừng nhắn/liên hệ nữa');
+    expect(note).toContain('đã mua/đã chốt xong');
+    expect(note).toContain('hãy gọi `no_reply` kèm lý do ngắn');
+    expect(note.endsWith('(Hết chỉ dẫn cho lượt này.)')).toBe(true);
+  });
+
+  it('reengageGuidanceNote lượt thường (missed) giữ câu "vẫn trả lời các tin đang chờ"', () => {
+    expect(reengageGuidanceNote({ content: 'Ưu đãi' })).toContain('vẫn trả lời các tin đang chờ');
+    expect(reengageGuidanceNote({ content: 'Ưu đãi' }, true)).not.toContain('tin đang chờ');
   });
 });
 

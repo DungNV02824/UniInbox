@@ -14,6 +14,12 @@
 //   Tin khách trước tin nhân viên cuối vẫn coi như nhân viên đã lo.
 // Kênh không cho bot gửi (botCanSendWith: Messenger quá 24 giờ / quảng cáo quá 7 ngày, Zalo OA quá hạn, kênh mất kết
 // nối) ⇒ outsideWindow (kèm lý do) để nhân viên tự xử lý; bot KHÔNG BAO GIỜ gửi.
+// Chế độ 'followup' ("Khách không bị bỏ sót", REENGAGE_MODE_LABELS): cùng phạm vi bot/trạng thái/tạm dừng/N ngày nhưng
+// tin cuối không tính system (và echo tự động) KHÔNG phải của khách (bot/nhân viên đã trả lời sau cùng), hội thoại đã
+// lặng ≥ REENGAGE_FOLLOWUP_MIN_IDLE_MINUTES (tin mới nhất — bất kỳ loại nào — cũ hơn chừng đó), có ít nhất một tin
+// khách, CHƯA có tin nhắn khơi gợi nào sau tin khách cuối (followUpAlreadySentSql — khách lờ tin khơi gợi thì không
+// nhắn tiếp) và tin cuối của bên mình không gửi thất bại (lastOwnMessageFailedSql); waitingMessages = 0. Phân loại khung gửi, giữ khe, alreadyQueued y như 'missed'. Job mang reengage.mode
+// 'followup' ⇒ runtime chạy lượt CHỦ ĐỘNG nhắn khơi gợi lại (runFollowUpJob trong runtime.ts), không trả lời tin chờ.
 // Chi phí token: mỗi hội thoại eligible ≈ 1 lần gọi AI; "Bắt đầu" tối đa REENGAGE_LIMITS.maxPerRun, giãn
 // REENGAGE_LIMITS.spacingSec giây theo hàng CHUNG (ReengageQueue.reserveSlot — mọi lần bấm, mọi bot, mọi admin nối
 // tiếp nhau, không chạy song song); audit 'chatbot.reengage' chỉ ghi số đếm (không nội dung tin).
@@ -28,8 +34,11 @@ import {
   type Db,
 } from '@dezon/db';
 import {
+  REENGAGE_FOLLOWUP_MIN_IDLE_MINUTES,
   REENGAGE_LIMITS,
+  REENGAGE_MODES,
   type ReengageConversationItem,
+  type ReengageMode,
   type ReengagePreview,
   type ReengageStartResult,
 } from '@dezon/shared';
@@ -86,6 +95,13 @@ async function assertBotCanRun(db: Db, bot: ReengageBot): Promise<void> {
   }
 }
 
+/** Mode lạ (gọi trực tiếp không qua Zod) ⇒ 400 thay vì quét sai phạm vi. Thiếu ⇒ 'missed'. */
+function assertMode(mode: ReengageMode | undefined): ReengageMode {
+  if (mode === undefined) return 'missed';
+  if (!REENGAGE_MODES.includes(mode)) throw new InboxValidationError('Đối tượng tái chăm sóc không hợp lệ');
+  return mode;
+}
+
 function assertDays(days: number): void {
   if (!Number.isInteger(days) || days < REENGAGE_LIMITS.daysMin || days > REENGAGE_LIMITS.daysMax) {
     throw new InboxValidationError(
@@ -111,10 +127,51 @@ function waitingMessagesSql(days: number): SQL<number> {
  * vắng mặt — raw.automatedEcho): như loadPendingMessages, chúng không phải "nhân viên đã trả lời" nên khách chỉ nhận
  * tin vắng mặt vẫn là khách bị bỏ sót. Tin khách/bot không bao giờ mang cờ này.
  */
-const lastSenderSql = sql<string | null>`(select m.sender_type from ${messages} m
-  where m.conversation_id = ${conversations.id} and m.sender_type <> 'system'
-    and ${notAutomatedEcho(sql`m.raw`)}
-  order by m.sent_at desc, m.id desc limit 1)`;
+export function lastNonSystemSenderSql(conv: SQL): SQL<string | null> {
+  return sql<string | null>`(select m.sender_type from ${messages} m
+    where m.conversation_id = ${conv} and m.sender_type <> 'system'
+      and ${notAutomatedEcho(sql`m.raw`)}
+    order by m.sent_at desc, m.id desc limit 1)`;
+}
+const lastSenderSql = lastNonSystemSenderSql(sql`${conversations.id}`);
+
+/**
+ * 'followup': hội thoại `conv` có tin (BẤT KỲ loại nào — khách, bot kể cả còn 'queued', nhân viên, system) gửi trong
+ * REENGAGE_FOLLOWUP_MIN_IDLE_MINUTES phút gần đây ⇒ đang trò chuyện, không chen vào. Dùng cả lúc quét lẫn runtime
+ * (kiểm lại dưới khóa trước khi gửi).
+ */
+export function hasRecentActivitySql(conv: SQL): SQL<boolean> {
+  return sql<boolean>`exists (select 1 from ${messages} ra where ra.conversation_id = ${conv}
+    and ra.sent_at > now() - make_interval(mins => ${REENGAGE_FOLLOWUP_MIN_IDLE_MINUTES}))`;
+}
+
+/** Tên mục đầu tiên của ai_runs.tool_calls cho lượt "Khách không bị bỏ sót" (args: mode, độ dài chỉ dẫn — KHÔNG nội dung). */
+export const REENGAGE_FOLLOWUP_TOOL_LOG = 'reengage_followup';
+
+/**
+ * 'followup': hội thoại `conv` đã có tin bot của một lượt "Khách không bị bỏ sót" (ai_runs.tool_calls mở đầu
+ * REENGAGE_FOLLOWUP_TOOL_LOG; mọi trạng thái gửi) SAU tin khách cuối ⇒ khách đã được nhắn khơi gợi mà chưa đáp, không
+ * nhắn thêm lần nữa (tránh nhắn dồn dập). Khách nhắn lại ⇒ mở lại. Dùng cả lúc quét lẫn runtime (kiểm lại dưới khóa).
+ */
+export function followUpAlreadySentSql(conv: SQL): SQL<boolean> {
+  return sql<boolean>`exists (select 1 from ${messages} fb join ${aiRuns} fr on fr.id = fb.ai_run_id
+    where fb.conversation_id = ${conv} and fb.sender_type = 'bot'
+      and fr.tool_calls -> 0 ->> 'name' = ${REENGAGE_FOLLOWUP_TOOL_LOG}
+      and fb.sent_at > coalesce((select max(fc.sent_at) from ${messages} fc
+        where fc.conversation_id = ${conv} and fc.sender_type = 'customer'), '-infinity'::timestamptz))`;
+}
+
+/**
+ * 'followup': tin cuối của bên mình (bot / nhân viên, không tính echo tự động) gửi THẤT BẠI (status 'failed') ⇒ khách
+ * có thể chưa nhận được câu trả lời đó, nhắn khơi gợi sẽ nhắc tới điều khách chưa thấy ⇒ không nhắn. Dùng cả lúc quét
+ * lẫn runtime.
+ */
+export function lastOwnMessageFailedSql(conv: SQL): SQL<boolean> {
+  return sql<boolean>`coalesce((select m.status = 'failed' from ${messages} m
+    where m.conversation_id = ${conv} and m.sender_type in ('bot', 'agent')
+      and ${notAutomatedEcho(sql`m.raw`)}
+    order by m.sent_at desc, m.id desc limit 1), false)`;
+}
 
 /** Đầu tin khách cuối (đã cắt trong SQL để không kéo cả tin dài). */
 const lastCustomerTextSql = sql<string | null>`(select left(m.text, ${REENGAGE_TEXT_EXCERPT_CHARS * 2})
@@ -172,15 +229,37 @@ export interface ReengageQueue {
   enqueue(job: ReengageJob): Promise<boolean>;
 }
 
-/** Quét phạm vi "khách bị bỏ sót" (đầu tệp) của bot, phân loại theo quyền gửi của bot. `onlyIds` ⇒ chỉ các id đó. */
-async function scanMissedConversations(
+/**
+ * Quét phạm vi tái chăm sóc (đầu tệp) của bot theo `mode`, phân loại theo quyền gửi của bot. `onlyIds` ⇒ chỉ các id
+ * đó.
+ */
+async function scanReengageConversations(
   db: Db,
   ctx: InboxContext,
   bot: ReengageBot,
   days: number,
+  mode: ReengageMode,
   onlyIds?: readonly string[],
 ): Promise<ScanResult> {
-  const waiting = waitingMessagesSql(days);
+  const followUp = mode === 'followup';
+  const conv = sql`${conversations.id}`;
+  // 'followup' không có tin chờ ⇒ không đếm (luôn 0).
+  const waiting = followUp ? sql<number>`0`.mapWith(Number) : waitingMessagesSql(days);
+  const modeFilters = followUp
+    ? [
+        // Bên mình (bot/nhân viên) nhắn sau cùng; hội thoại đã lặng; có ít nhất một tin khách; chưa nhắn khơi gợi
+        // lần nào kể từ tin khách cuối; tin cuối của bên mình không gửi thất bại.
+        sql`${lastSenderSql} in ('bot', 'agent')`,
+        sql`not ${hasRecentActivitySql(conv)}`,
+        sql`exists (select 1 from ${messages} cm where cm.conversation_id = ${conv} and cm.sender_type = 'customer')`,
+        sql`not ${followUpAlreadySentSql(conv)}`,
+        sql`not ${lastOwnMessageFailedSql(conv)}`,
+      ]
+    : [
+        sql`${conversations.lastCustomerMessageAt} <= now() - make_interval(mins => ${REENGAGE_MIN_WAIT_MINUTES})`,
+        sql`${lastSenderSql} = 'customer'`,
+        sql`${waiting} > 0`,
+      ];
   const rows = await db
     .select({
       id: conversations.id,
@@ -208,10 +287,8 @@ async function scanMissedConversations(
         ne(conversations.status, 'resolved'),
         sql`(${conversations.aiPausedUntil} is null or ${conversations.aiPausedUntil} <= now())`,
         sql`${conversations.lastCustomerMessageAt} > now() - make_interval(days => ${days})`,
-        sql`${conversations.lastCustomerMessageAt} <= now() - make_interval(mins => ${REENGAGE_MIN_WAIT_MINUTES})`,
         onlyIds ? inArray(conversations.id, [...onlyIds]) : undefined,
-        sql`${lastSenderSql} = 'customer'`,
-        sql`${waiting} > 0`,
+        ...modeFilters,
       ),
     )
     .orderBy(desc(conversations.lastCustomerMessageAt), desc(conversations.id))
@@ -243,7 +320,8 @@ async function scanMissedConversations(
 }
 
 /**
- * POST /chatbots/:id/reengage/preview (admin): danh sách khách bị bỏ sót trong `days` ngày — `eligible` (bot sẽ trả
+ * POST /chatbots/:id/reengage/preview (admin). `mode` 'followup' ⇒ phạm vi "Khách không bị bỏ sót" (đầu tệp), mọi
+ * quy tắc dưới đây giữ nguyên. Mặc định 'missed': danh sách khách bị bỏ sót trong `days` ngày — `eligible` (bot sẽ trả
  * lời; số dòng ≈ số lần gọi AI) và `outsideWindow` (kênh không cho bot gửi hoặc khung sắp đóng, kèm lý do). Khách đã có
  * job tái chăm sóc đang chờ (lần bấm trước) ⇒ không vào eligible mà đếm ở alreadyQueued, để "Kiểm tra lại" chuyển sang
  * khách tiếp theo. Mỗi danh sách tối đa REENGAGE_LIMITS.previewMaxItems dòng (mới nhất trước); cắt bớt ⇒ truncated.
@@ -256,11 +334,13 @@ export async function previewChatbotReengage(
   chatbotId: string,
   days: number,
   queue: Pick<ReengageQueue, 'pending'>,
+  mode?: ReengageMode,
 ): Promise<ReengagePreview> {
   assertDays(days);
+  const scanMode = assertMode(mode);
   const bot = await loadBot(db, chatbotId);
   await assertBotCanRun(db, bot);
-  const scan = await scanMissedConversations(db, ctx, bot, days);
+  const scan = await scanReengageConversations(db, ctx, bot, days, scanMode);
   const pending =
     scan.eligible.length > 0
       ? await queue.pending(scan.eligible.map((e) => e.item.conversationId))
@@ -290,6 +370,8 @@ export interface StartReengageInput {
   actorUserId: string;
   chatbotId: string;
   days: number;
+  /** Đối tượng (phải trùng lần "Kiểm tra"); thiếu ⇒ 'missed'. */
+  mode?: ReengageMode;
   conversationIds: readonly string[];
   /** "Quy tắc chăm sóc" gõ tay cho lần bấm này (reengageGuidanceText chuẩn hóa); trống ⇒ không có. */
   rules?: string;
@@ -326,7 +408,10 @@ export function reengageGuidanceText(value: unknown): string | undefined {
  *   chatbotId } }. queue.enqueue trả false (job cùng jobId vừa có) ⇒ alreadyQueued.
  * - estimatedMinutes = phút tới khi job cuối của lần này chạy xong khe (tính cả hàng còn chờ từ trước);
  *   startsInMinutes = phút tới job đầu tiên (> 0 khi lần này nối sau các lượt còn chờ).
- * Audit 'chatbot.reengage' { days, requested, queued, alreadyQueued, skipped } (không nội dung tin). Lỗi đẩy job ⇒ ném
+ * - `mode` 'followup': kiểm lại bằng câu quét "Khách không bị bỏ sót"; data.reengage thêm mode 'followup' (lượt 'missed'
+ *   không ghi mode ⇒ job giữ y như trước).
+ * Audit 'chatbot.reengage' { days, mode, requested, queued, alreadyQueued, skipped } (không nội dung tin). Lỗi đẩy job ⇒
+ * ném
  * (đã đẩy thì bấm lại cũng không trùng; lần bấm lại nối tiếp sau các job đã đẩy).
  */
 export async function startChatbotReengage(
@@ -336,10 +421,11 @@ export async function startChatbotReengage(
   queue: ReengageQueue,
 ): Promise<ReengageStartResult> {
   assertDays(input.days);
+  const mode = assertMode(input.mode);
   const bot = await loadBot(db, input.chatbotId);
   await assertBotCanRun(db, bot);
   const ids = [...new Set(input.conversationIds)].slice(0, REENGAGE_LIMITS.maxPerRun);
-  const scan = ids.length > 0 ? await scanMissedConversations(db, ctx, bot, input.days, ids) : null;
+  const scan = ids.length > 0 ? await scanReengageConversations(db, ctx, bot, input.days, mode, ids) : null;
   const order = new Map(ids.map((id, i) => [id, i]));
   const byRequestOrder = (a: string, b: string) => (order.get(a) ?? 0) - (order.get(b) ?? 0);
   const pending =
@@ -390,6 +476,7 @@ export async function startChatbotReengage(
           chatbotId: bot.id,
           ...(rules ? { rules } : {}),
           ...(content ? { content } : {}),
+          ...(mode === 'followup' ? { mode } : {}),
         },
       },
     });
@@ -420,6 +507,7 @@ export async function startChatbotReengage(
     // Chỉ ghi có/không và độ dài chỉ dẫn gõ tay — không ghi nội dung.
     data: {
       days: input.days,
+      mode,
       requested: ids.length,
       queued,
       alreadyQueued,

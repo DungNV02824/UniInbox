@@ -7,6 +7,7 @@ import { InboxNotFoundError } from '../inbox/errors';
 import type { DbLike } from '../inbox/read-model';
 import type { HandoffReminderJobData } from '../jobs';
 import { roomsForConversation } from '../realtime';
+import { aiOutageResumableSql } from './auto-resume-sql';
 import {
   botCanSend,
   bubbleDelays,
@@ -43,6 +44,13 @@ export interface EscalateInput {
    * đặt aiHandoffMode 'continue' thì giữ ai_mode 'auto' (xem escalateConversation).
    */
   matchedKeyword?: string | null;
+  /**
+   * Chuyển người vì LỖI PHÍA AI (ChatbotTurnResult.llmOutage — hết tiền, quá tải, hết thời gian chờ…) ⇒ handoff tạo
+   * mới có auto_resume = true: worker tự trả lại cho bot khi AI hoạt động lại (resumeAiOutageHandoffs). Chỉ có hiệu
+   * lực với createdBy 'ai'. Thiếu/false với handoff ĐANG MỞ auto_resume (bot 'continue' báo thêm yêu cầu thật) ⇒ tắt
+   * auto_resume (yêu cầu đó cần người).
+   */
+  autoResume?: boolean;
 }
 
 export interface EscalateResult {
@@ -192,6 +200,8 @@ export async function notifyLarkSafe(
     reminder?: boolean;
     /** Thẻ "chỉ báo nhân viên — bot vẫn trả lời" (notifyKeywords). */
     botContinues?: boolean;
+    /** Handoff vì lỗi phía AI (auto_resume) ⇒ thẻ ghi "sẽ tự trả lại cho bot khi AI hoạt động lại". */
+    aiOutage?: boolean;
   },
 ): Promise<void> {
   try {
@@ -205,6 +215,7 @@ export async function notifyLarkSafe(
       conversationUrl: conversationUrl(deps.config.appUrl, input.conversationId),
       ...(input.reminder ? { reminder: true } : {}),
       ...(input.botContinues ? { botContinues: true } : {}),
+      ...(input.aiOutage ? { aiOutage: true } : {}),
     });
     await notifyLark(config, card, { ...(deps.fetch ? { fetch: deps.fetch } : {}), now: deps.ctx.now });
   } catch (error) {
@@ -283,6 +294,7 @@ export async function escalateConversation(
       },
     ));
 
+  const autoResume = input.createdBy === 'ai' && input.autoResume === true;
   const tx = await db.transaction(async (tx) => {
     const [conv] = await tx
       .select({
@@ -334,7 +346,7 @@ export async function escalateConversation(
       }
     }
     const [open] = await tx
-      .select({ id: handoffs.id, summary: handoffs.summary })
+      .select({ id: handoffs.id, summary: handoffs.summary, autoResume: handoffs.autoResume })
       .from(handoffs)
       .where(and(eq(handoffs.conversationId, conversationId), isNull(handoffs.resolvedAt)))
       .orderBy(desc(handoffs.createdAt))
@@ -355,8 +367,13 @@ export async function escalateConversation(
             ? await insertBotMessages(tx, info, bubbles, input.aiRunId ?? null, now)
             : [];
         const summary = appendHandoffSummary(open.summary, input.summary);
-        if (summary !== open.summary) {
-          await tx.update(handoffs).set({ summary, updatedAt: now }).where(eq(handoffs.id, open.id));
+        // Handoff đang chờ tự trả lại (lỗi AI) mà lượt này là yêu cầu THẬT ⇒ cần người, thôi tự trả lại.
+        const keepAutoResume = open.autoResume && autoResume;
+        if (summary !== open.summary || keepAutoResume !== open.autoResume) {
+          await tx
+            .update(handoffs)
+            .set({ summary, autoResume: keepAutoResume, updatedAt: now })
+            .where(eq(handoffs.id, open.id));
         }
         if (!keepBot) {
           await tx
@@ -401,6 +418,7 @@ export async function escalateConversation(
           keepBot,
           capped,
           quiet,
+          autoResume: keepAutoResume,
         };
       }
       // Handoff mở sót lại trong khi hội thoại đã rời pending_human (dữ liệu cũ) ⇒ đóng nó trước khi tạo
@@ -433,6 +451,7 @@ export async function escalateConversation(
         summary: input.summary,
         createdBy: input.createdBy,
         createdByUserId: input.createdBy === 'user' ? (input.createdByUserId ?? null) : null,
+        autoResume,
       })
       .returning({ id: handoffs.id });
     if (!handoff) throw new Error('Không tạo được handoff');
@@ -449,6 +468,7 @@ export async function escalateConversation(
       handoffMessageIds,
       systemMessageId,
       keepBot,
+      autoResume,
     };
   });
 
@@ -529,6 +549,7 @@ export async function escalateConversation(
     channelName: info.channelName,
     reasonCode: input.reasonCode,
     summary: input.summary,
+    ...(tx.autoResume ? { aiOutage: true } : {}),
   });
   // Handoff đã mở từ trước (nhắc lại đã lên lịch theo handoff đó) ⇒ không lên lịch nhắc mới.
   if (repeat) {
@@ -579,6 +600,11 @@ export async function processHandoffReminderJob(
     .select({
       reasonCode: handoffs.reasonCode,
       summary: handoffs.summary,
+      // Chỉ ghi "sẽ tự trả lại cho bot" khi worker VẪN SẼ trả lại (cùng điều kiện với job/banner).
+      autoResume: sql<boolean>`${aiOutageResumableSql(
+        '"handoffs"',
+        sql`${deps.ctx.now().toISOString()}::timestamptz`,
+      )}`,
       acknowledgedAt: handoffs.acknowledgedAt,
       resolvedAt: handoffs.resolvedAt,
       status: conversations.status,
@@ -608,6 +634,8 @@ export async function processHandoffReminderJob(
     reasonCode: row.reasonCode,
     summary: row.summary,
     reminder: true,
+    // Lỗi phía AI: vẫn nhắc (nhân viên cần biết AI đang hỏng) nhưng ghi rõ sẽ tự trả lại cho bot.
+    ...(row.autoResume === true ? { aiOutage: true } : {}),
   });
   deps.publisher.emit(roomsForConversation(row), 'handoff.created', {
     conversationId: data.conversationId,

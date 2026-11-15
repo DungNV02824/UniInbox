@@ -3,7 +3,7 @@ import { PauseCircle, TriangleAlert, UserRound } from 'lucide-react';
 import { isAiPausedIndefinitely, type ConversationSummary } from '@dezon/shared';
 import { Avatar } from '@/components/ui/avatar';
 import { contactTagsOf } from '@/lib/contact-tags';
-import { chatbotChipState, conversationAiState, handoffReasonLabel } from '@/lib/inbox-ai';
+import { chatbotChipState, conversationAiState, handoffRowTitle } from '@/lib/inbox-ai';
 import {
   CHANNEL_TYPE_LABELS,
   formatDateTime,
@@ -39,9 +39,7 @@ export function ConversationRow({
   const aiState = conversationAiState(c, now);
   // Chip bot tách khỏi "Cần người": bot đặt "vẫn trả lời khách" thì chờ người mà bot vẫn đang trả lời.
   const botState = chatbotChipState(c, now);
-  const handoffTitle = c.handoff
-    ? `Cần người: ${handoffReasonLabel(c.handoff.reasonCode)}${c.handoff.acknowledgedBy ? ` · đã nhận bởi ${c.handoff.acknowledgedBy.name}` : ''}`
-    : 'Cần người xử lý';
+  const handoffTitle = handoffRowTitle(c.handoff);
   return (
     <Link
       href={`/inbox/${c.id}`}

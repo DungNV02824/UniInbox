@@ -99,6 +99,13 @@
       "when": 1794675084786,
       "tag": "0013_project_logs",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1794725463386,
+      "tag": "0014_handoff_auto_resume",
+      "breakpoints": true
     }
   ]
 }
