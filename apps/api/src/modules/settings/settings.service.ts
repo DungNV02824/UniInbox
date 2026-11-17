@@ -1,18 +1,31 @@
 import {
   buildHandoffLarkCard,
+  createLarkGroup,
   type CredentialsCipher,
+  deleteLarkGroup,
   getAiSettings,
   getBusinessHours,
   getLarkConfig,
+  getLarkGroupConfig,
   getLarkSettings,
   type LarkConfig,
+  listLarkGroups,
   notifyLark,
   putAiSettings,
   putBusinessHours,
   putLarkSettings,
+  updateLarkGroup,
 } from '@dezon/core';
 import type { Db } from '@dezon/db';
-import type { AiSettings, BusinessHours, LarkSettingsDto, UpdateLarkSettingsRequest } from '@dezon/shared';
+import type {
+  AiSettings,
+  BusinessHours,
+  CreateLarkGroupRequest,
+  LarkGroupDto,
+  LarkSettingsDto,
+  UpdateLarkGroupRequest,
+  UpdateLarkSettingsRequest,
+} from '@dezon/shared';
 import { BadRequestException, Inject, Injectable } from '@nestjs/common';
 import { APP_CONFIG, type AppConfig } from '../../config';
 import { HTTP_FETCH } from '../../infra/ai/ai.constants';
@@ -59,7 +72,38 @@ export class SettingsService {
   async testLark(): Promise<{ ok: true }> {
     const settings = await this.larkConfig();
     if (!settings) throw new BadRequestException(LARK_NOT_CONFIGURED_MESSAGE);
-    const card = buildHandoffLarkCard({
+    await notifyLark(settings, this.testCard(), { fetch: this.fetchFn });
+    return { ok: true };
+  }
+
+  listLarkGroups(): Promise<LarkGroupDto[]> {
+    return listLarkGroups(this.db);
+  }
+
+  createLarkGroup(actorUserId: string, input: CreateLarkGroupRequest): Promise<LarkGroupDto> {
+    return createLarkGroup(this.db, actorUserId, input, this.cipher);
+  }
+
+  updateLarkGroup(actorUserId: string, id: string, input: UpdateLarkGroupRequest): Promise<LarkGroupDto> {
+    return updateLarkGroup(this.db, actorUserId, id, input, this.cipher);
+  }
+
+  deleteLarkGroup(actorUserId: string, id: string): Promise<void> {
+    return deleteLarkGroup(this.db, actorUserId, id);
+  }
+
+  /**
+   * Gửi thẻ thử tới webhook của MỘT nhóm Lark. Không có nhóm ⇒ 404; secret không đọc được ⇒ 400;
+   * Lark từ chối ⇒ LarkNotifyError (502) như nút thử của nhóm chung.
+   */
+  async testLarkGroup(id: string): Promise<{ ok: true }> {
+    const settings = await getLarkGroupConfig(this.db, this.cipher, id);
+    await notifyLark(settings, this.testCard(), { fetch: this.fetchFn });
+    return { ok: true };
+  }
+
+  private testCard() {
+    return buildHandoffLarkCard({
       test: true,
       contactName: 'Khách hàng thử',
       channelName: 'Dezon Inbox',
@@ -67,8 +111,6 @@ export class SettingsService {
       summary: 'Đây là thẻ thử. Khi AI chuyển hội thoại cho người thật, thông báo sẽ hiện như thế này.',
       conversationUrl: `${this.config.APP_URL.replace(/\/+$/, '')}/inbox`,
     });
-    await notifyLark(settings, card, { fetch: this.fetchFn });
-    return { ok: true };
   }
 
   /**

@@ -162,6 +162,7 @@ export async function notifyStaffKeyword(
   deps.logger.info({ conversationId, reasonCode }, 'Đã báo nhân viên (từ khóa báo, bot vẫn trả lời)');
   await notifyLarkSafe(db, deps, {
     conversationId,
+    chatbotId: info.chatbotId,
     contactName: info.contactName,
     channelName: info.channelName,
     reasonCode,
@@ -174,6 +175,7 @@ export async function notifyStaffKeyword(
 interface NotifyConversationInfo {
   channelAccountId: string;
   assignedUserId: string | null;
+  chatbotId: string | null;
   contactName: string;
   channelName: string;
 }
@@ -190,6 +192,7 @@ async function persistNotifyMessage(
     .select({
       channelAccountId: conversations.channelAccountId,
       assignedUserId: conversations.assignedUserId,
+      chatbotId: conversations.chatbotId,
       contactName: contacts.displayName,
       channelName: channelAccounts.displayName,
     })

@@ -11,6 +11,7 @@ export * from './ai';
 export * from './messages';
 export * from './handoffs';
 export * from './project-logs';
+export * from './lark-groups';
 export * from './customer-memories';
 export * from './knowledge';
 export * from './catalog';

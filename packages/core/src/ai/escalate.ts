@@ -17,9 +17,9 @@ import {
   errorText,
   insertBotMessages,
 } from './delivery';
-import { buildHandoffLarkCard, notifyLark } from './lark';
+import { buildHandoffLarkCard } from './lark';
+import { notifyConversationLark } from './lark-groups';
 import type { AiRuntimeDeps } from './runtime';
-import { getLarkConfig } from './settings';
 
 export interface EscalateInput {
   reasonCode: HandoffReasonCode;
@@ -187,12 +187,17 @@ export function handoffReminderMinutes(
   return Math.max(0, envMinutes);
 }
 
-/** Gửi thẻ Lark nếu đã cấu hình webhook. Lỗi (kể cả đọc cấu hình) chỉ log warn — không làm hỏng escalate. */
+/**
+ * Gửi thẻ Lark tới nơi getLarkTargets chọn theo chatbot của hội thoại: bot thuộc nhóm Lark riêng ⇒ chỉ các nhóm đó;
+ * không ⇒ nhóm chung (nếu đã cấu hình). Lỗi (kể cả đọc cấu hình, từng nhóm) chỉ log warn — không làm hỏng escalate.
+ */
 export async function notifyLarkSafe(
   db: Db,
   deps: AiRuntimeDeps,
   input: {
     conversationId: string;
+    /** Chatbot đang gắn hội thoại (null = không có bot). undefined ⇒ đọc từ hội thoại. */
+    chatbotId?: string | null;
     contactName: string;
     channelName: string;
     reasonCode: HandoffReasonCode;
@@ -205,8 +210,6 @@ export async function notifyLarkSafe(
   },
 ): Promise<void> {
   try {
-    const config = await getLarkConfig(db, deps.cipher, deps.larkFallback ?? undefined);
-    if (!config) return;
     const card = buildHandoffLarkCard({
       contactName: input.contactName,
       channelName: input.channelName,
@@ -217,7 +220,21 @@ export async function notifyLarkSafe(
       ...(input.botContinues ? { botContinues: true } : {}),
       ...(input.aiOutage ? { aiOutage: true } : {}),
     });
-    await notifyLark(config, card, { ...(deps.fetch ? { fetch: deps.fetch } : {}), now: deps.ctx.now });
+    await notifyConversationLark(
+      db,
+      deps.cipher,
+      {
+        conversationId: input.conversationId,
+        ...(input.chatbotId !== undefined ? { chatbotId: input.chatbotId } : {}),
+      },
+      card,
+      {
+        ...(deps.fetch ? { fetch: deps.fetch } : {}),
+        now: deps.ctx.now,
+        fallback: deps.larkFallback ?? null,
+        logger: deps.logger,
+      },
+    );
   } catch (error) {
     deps.logger.warn(
       { conversationId: input.conversationId, err: errorText(error) },
@@ -545,6 +562,7 @@ export async function escalateConversation(
 
   await notifyLarkSafe(db, deps, {
     conversationId,
+    chatbotId: info.botId,
     contactName: info.contactName,
     channelName: info.channelName,
     reasonCode: input.reasonCode,
@@ -629,6 +647,7 @@ export async function processHandoffReminderJob(
 
   await notifyLarkSafe(db, deps, {
     conversationId: data.conversationId,
+    chatbotId: row.botId,
     contactName: row.contactName,
     channelName: row.channelName,
     reasonCode: row.reasonCode,

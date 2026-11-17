@@ -553,6 +553,51 @@ export const updateLarkSettingsSchema = z.object({
 });
 export type UpdateLarkSettingsRequest = z.infer<typeof updateLarkSettingsSchema>;
 
+// ---------- Cài đặt: Nhóm Lark theo chatbot ----------
+
+/**
+ * Nhóm Lark riêng: thông báo của hội thoại gắn chatbot thuộc nhóm ⇒ gửi vào nhóm này (mọi nhóm có bot đó); bot không
+ * thuộc nhóm nào ⇒ gửi nhóm chung (LarkSettingsDto) như trước. Secret không bao giờ trả ra client (chỉ hasSecret).
+ */
+export interface LarkGroupDto {
+  id: string;
+  name: string;
+  webhookUrl: string;
+  hasSecret: boolean;
+  /** Chatbot gắn vào nhóm (thứ tự tên bot). */
+  chatbotIds: string[];
+  /** ISO. */
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const LARK_GROUP_LIMITS = { nameMax: 100, maxGroups: 50, maxChatbotsPerGroup: 100 } as const;
+
+const larkWebhookSchema = z
+  .url({ protocol: /^https$/, error: 'Webhook phải là URL https' })
+  .max(500);
+
+/** POST /settings/lark/groups (admin). `secret` rỗng/null/bỏ qua = không ký. */
+export const createLarkGroupSchema = z.object({
+  name: z.string().trim().min(1, { message: 'Nhập tên nhóm' }).max(LARK_GROUP_LIMITS.nameMax),
+  webhookUrl: larkWebhookSchema,
+  secret: z.string().max(200).nullable().optional(),
+  chatbotIds: z.array(z.uuid()).max(LARK_GROUP_LIMITS.maxChatbotsPerGroup).default([]),
+});
+export type CreateLarkGroupRequest = z.input<typeof createLarkGroupSchema>;
+
+/** PATCH /settings/lark/groups/:id (admin). `secret`: bỏ qua = giữ nguyên, null/'' = xóa, chuỗi = đặt mới. */
+export const updateLarkGroupSchema = z
+  .object({
+    name: z.string().trim().min(1, { message: 'Nhập tên nhóm' }).max(LARK_GROUP_LIMITS.nameMax).optional(),
+    webhookUrl: larkWebhookSchema.optional(),
+    secret: z.string().max(200).nullable().optional(),
+    /** Thay toàn bộ danh sách bot gắn vào nhóm. */
+    chatbotIds: z.array(z.uuid()).max(LARK_GROUP_LIMITS.maxChatbotsPerGroup).optional(),
+  })
+  .refine((v) => Object.values(v).some((x) => x !== undefined), { message: 'Không có gì để cập nhật' });
+export type UpdateLarkGroupRequest = z.input<typeof updateLarkGroupSchema>;
+
 // ---------- Cài đặt: AI tổng ----------
 
 export interface AiSettings {

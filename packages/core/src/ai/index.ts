@@ -12,6 +12,7 @@ export * from './errors';
 export * from './service';
 export * from './settings';
 export * from './lark';
+export * from './lark-groups';
 export * from './handoff-action';
 export * from './handoff-reject';
 export * from './runtime';

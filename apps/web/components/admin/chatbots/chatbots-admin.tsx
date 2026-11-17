@@ -16,6 +16,7 @@ import { formatCount } from '@/lib/channels-admin';
 import { chatbotKeys, chatbotsApi } from '@/lib/chatbots-api';
 import { channelsKey } from '@/lib/inbox-keys';
 import { errorText } from '@/lib/inbox-queries';
+import { settingsKeys } from '@/lib/settings-api';
 import { cn } from '@/lib/utils';
 import { ActionMenu } from '../action-menu';
 import { Switch } from '../switch';
@@ -173,6 +174,8 @@ function DeleteBotDialog({ bot, onClose }: { bot: ChatbotSummary; onClose: () =>
       // Kênh dùng bot làm mặc định và hội thoại đang gắn bot đều đổi.
       void qc.invalidateQueries({ queryKey: channelsKey });
       void qc.invalidateQueries({ queryKey: ['conversations'] });
+      // Bot tự gỡ khỏi các nhóm Lark (cascade) — tránh dialog nhóm nạp lại id bot đã xóa.
+      void qc.invalidateQueries({ queryKey: settingsKeys.larkGroups });
       toast({ title: `Đã xóa "${bot.name}"`, variant: 'success' });
       onClose();
     },

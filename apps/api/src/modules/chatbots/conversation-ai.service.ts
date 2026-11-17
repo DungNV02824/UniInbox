@@ -2,9 +2,8 @@ import {
   ackHandoff,
   buildHandoffActionLarkCard,
   type CredentialsCipher,
-  getLarkConfig,
   loadHandoffActionNotice,
-  notifyLark,
+  notifyConversationLark,
   AI_KICK_JOB_NAME,
   type AiKickJobData,
   aiKickJobId,
@@ -129,7 +128,8 @@ export class ConversationAiService {
   /**
    * Bot của hội thoại bật "Gửi Lark khi bấm nút" ⇒ gửi thẻ Lark (vd. "✅ Nghiệm thu" / "☑️ Đã chuyển tiền" / "❌ Không đạt" kèm lý do) kèm
    * tóm tắt yêu cầu chuyển người. Chỉ báo khi lần bấm này thật sự đổi trạng thái (bấm lại không gửi trùng).
-   * Lỗi Lark chỉ log: thao tác của nhân viên đã lưu. Env LARK_* chỉ dùng khi admin chưa từng lưu cấu hình Lark.
+   * Lỗi Lark chỉ log: thao tác của nhân viên đã lưu. Gửi theo nhóm Lark của bot (notifyConversationLark); env LARK_*
+   * chỉ dùng cho nhóm chung khi admin chưa từng lưu cấu hình Lark.
    */
   private async notifyHandoffAction(
     viewer: Viewer,
@@ -150,16 +150,23 @@ export class ConversationAiService {
         ...(rejectReason !== undefined ? { rejectReason } : {}),
       });
       if (!card) return;
-      const lark = await getLarkConfig(this.db, this.cipher, {
-        webhookUrl: this.config.LARK_WEBHOOK_URL ?? null,
-        secret: this.config.LARK_WEBHOOK_SECRET ?? null,
-      });
-      if (!lark) return;
-      await notifyLark(lark, buildHandoffActionLarkCard(card), {
-        fetch: this.fetchFn,
-        now: this.ctx.now,
-        timeoutMs: 5000,
-      });
+      // Bot thuộc nhóm Lark riêng ⇒ chỉ gửi các nhóm đó; không ⇒ nhóm chung. Lỗi từng nhóm chỉ log (core).
+      await notifyConversationLark(
+        this.db,
+        this.cipher,
+        { conversationId },
+        buildHandoffActionLarkCard(card),
+        {
+          fetch: this.fetchFn,
+          now: this.ctx.now,
+          timeoutMs: 5000,
+          fallback: {
+            webhookUrl: this.config.LARK_WEBHOOK_URL ?? null,
+            secret: this.config.LARK_WEBHOOK_SECRET ?? null,
+          },
+          logger: this.logger,
+        },
+      );
     } catch (error) {
       this.logger.warn({ err: error, conversationId, action }, 'Không gửi được thông báo Lark khi bấm nút');
     }

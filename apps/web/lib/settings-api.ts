@@ -1,10 +1,20 @@
-// Gọi API "Cài đặt" (admin): giờ làm việc, Lark, công tắc AI tổng.
-import type { AiSettings, BusinessHours, LarkSettingsDto, UpdateLarkSettingsRequest } from '@dezon/shared';
+// Gọi API "Cài đặt" (admin): giờ làm việc, Lark (nhóm chung + nhóm theo chatbot), công tắc AI tổng.
+import type {
+  AiSettings,
+  BusinessHours,
+  CreateLarkGroupRequest,
+  LarkGroupDto,
+  LarkSettingsDto,
+  UpdateLarkGroupRequest,
+  UpdateLarkSettingsRequest,
+} from '@dezon/shared';
 import { api } from '@/lib/api';
 
 export const settingsKeys = {
   businessHours: ['settings', 'business-hours'] as const,
   lark: ['settings', 'lark'] as const,
+  /** Không đặt dưới ['settings','lark'] để setQueryData/invalidate cấu hình chung không đụng danh sách nhóm. */
+  larkGroups: ['settings', 'lark-groups'] as const,
   ai: ['settings', 'ai'] as const,
 };
 
@@ -24,6 +34,25 @@ export const settingsApi = {
   /** Gửi thẻ thử tới webhook Lark ĐÃ LƯU. */
   testLark() {
     return api.request<unknown>('/settings/lark/test', { method: 'POST' });
+  },
+  listLarkGroups() {
+    return api.request<LarkGroupDto[]>('/settings/lark/groups');
+  },
+  createLarkGroup(body: CreateLarkGroupRequest) {
+    return api.request<LarkGroupDto>('/settings/lark/groups', { method: 'POST', body });
+  },
+  updateLarkGroup(id: string, body: UpdateLarkGroupRequest) {
+    return api.request<LarkGroupDto>(`/settings/lark/groups/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body,
+    });
+  },
+  removeLarkGroup(id: string) {
+    return api.request<unknown>(`/settings/lark/groups/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  },
+  /** Gửi thẻ thử vào webhook ĐÃ LƯU của nhóm (Lark từ chối ⇒ 502 kèm lý do). */
+  testLarkGroup(id: string) {
+    return api.request<unknown>(`/settings/lark/groups/${encodeURIComponent(id)}/test`, { method: 'POST' });
   },
   getAi() {
     return api.request<AiSettings>('/settings/ai');

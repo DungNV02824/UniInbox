@@ -29,6 +29,7 @@ import {
   type LarkFormValues,
 } from '@/lib/settings-api';
 import { Field } from '../chatbots/fields';
+import { LarkGroupsSection } from './lark-groups-section';
 import { SettingsSection } from './settings-section';
 
 function LarkForm({
@@ -223,6 +224,10 @@ function LarkForm({
 
 export function LarkCard({ onDirtyChange }: { onDirtyChange: (dirty: boolean) => void }) {
   const query = useQuery({ queryKey: settingsKeys.lark, queryFn: () => settingsApi.getLark() });
+  // Nhóm chung (LarkForm) + dialog thêm/sửa nhóm theo chatbot đều tính là "chưa lưu".
+  const [dirtyForm, setDirtyForm] = useState(false);
+  const [dirtyGroup, setDirtyGroup] = useState(false);
+  useEffect(() => onDirtyChange(dirtyForm || dirtyGroup), [dirtyForm, dirtyGroup, onDirtyChange]);
   return (
     <SettingsSection
       icon={Webhook}
@@ -245,8 +250,9 @@ export function LarkCard({ onDirtyChange }: { onDirtyChange: (dirty: boolean) =>
           </AlertDescription>
         </Alert>
       ) : (
-        <LarkForm key={JSON.stringify(query.data)} saved={query.data} onDirtyChange={onDirtyChange} />
+        <LarkForm key={JSON.stringify(query.data)} saved={query.data} onDirtyChange={setDirtyForm} />
       )}
+      <LarkGroupsSection onDirtyChange={setDirtyGroup} />
     </SettingsSection>
   );
 }

@@ -19,6 +19,8 @@ const EXPECTED_TABLES = [
   'handoffs',
   'knowledge_chunks',
   'knowledge_documents',
+  'lark_group_chatbots',
+  'lark_groups',
   'messages',
   'project_logs',
   'style_examples',
@@ -27,6 +29,10 @@ const EXPECTED_TABLES = [
 
 /** app_settings dùng `key` text làm khóa chính (không có cột id). */
 const TABLES_WITHOUT_ID = new Set(['app_settings']);
+/** Bảng nối nhiều–nhiều (khóa chính ghép, không có id/created_at/updated_at). */
+const LINK_TABLES = new Set(['lark_group_chatbots']);
+/** Bảng do 0015 tạo (rollback qua 0015 ⇒ mất). */
+const LARK_TABLES = ['lark_group_chatbots', 'lark_groups'];
 
 let container: StartedPostgreSqlContainer;
 let url: string;
@@ -75,7 +81,7 @@ describe('migrations', () => {
     expect(await vectorInstalled()).toBe(true);
   });
 
-  it('tạo đủ 15 bảng của mục 5 + chatbots, app_settings', async () => {
+  it('tạo đủ 15 bảng của mục 5 + chatbots, app_settings, project_logs, contact_tags, nhóm Lark', async () => {
     expect(await publicTables()).toEqual(EXPECTED_TABLES);
   });
 
@@ -100,6 +106,7 @@ describe('migrations', () => {
        where table_schema = 'public' and column_name in ('id', 'created_at', 'updated_at')`,
     );
     for (const table of EXPECTED_TABLES) {
+      if (LINK_TABLES.has(table)) continue;
       const cols = rows.filter((r) => r.table_name === table);
       if (!TABLES_WITHOUT_ID.has(table)) {
         expect(cols.find((c) => c.column_name === 'id')?.data_type, `${table}.id`).toBe('uuid');
@@ -122,6 +129,7 @@ describe('migrations', () => {
   it('migration ngược xóa sạch, sau đó chạy xuôi lại được', async () => {
     const files = await rollbackMigrations(url);
     expect(files).toEqual([
+      '0015_lark_groups.sql',
       '0014_handoff_auto_resume.sql',
       '0013_project_logs.sql',
       '0012_contact_capture.sql',
@@ -150,6 +158,49 @@ describe('migrations', () => {
     expect(await vectorInstalled()).toBe(true);
   });
 
+  it('0015: bảng lark_groups + lark_group_chatbots (PK ghép, FK cascade, index); xóa bot ⇒ gỡ khỏi nhóm; rollback xóa bảng, giữ bot; chạy lại tạo lại', async () => {
+    const fks = await query<{ conname: string; confdeltype: string }>(
+      `select conname, confdeltype from pg_constraint
+       where conrelid = 'lark_group_chatbots'::regclass and contype = 'f' order by conname`,
+    );
+    expect(fks).toEqual([
+      { conname: 'lark_group_chatbots_chatbot_id_chatbots_id_fk', confdeltype: 'c' },
+      { conname: 'lark_group_chatbots_lark_group_id_lark_groups_id_fk', confdeltype: 'c' },
+    ]);
+    const pk = await query<{ def: string }>(
+      `select pg_get_constraintdef(oid) as def from pg_constraint
+       where conrelid = 'lark_group_chatbots'::regclass and contype = 'p'`,
+    );
+    expect(pk).toEqual([{ def: 'PRIMARY KEY (lark_group_id, chatbot_id)' }]);
+    const idx = "select indexdef from pg_indexes where indexname = 'lark_group_chatbots_chatbot_idx'";
+    expect(await query(idx)).toHaveLength(1);
+
+    const [bot] = await query<{ id: string }>(`insert into chatbots (name) values ('Bot 0015') returning id`);
+    const [keep] = await query<{ id: string }>(
+      `insert into chatbots (name) values ('Bot 0015 giữ') returning id`,
+    );
+    const [group] = await query<{ id: string; secret_enc: string | null }>(
+      `insert into lark_groups (name, webhook_url) values ('Nhóm 0015', 'https://x.test/hook')
+       returning id, secret_enc`,
+    );
+    expect(group!.secret_enc).toBeNull();
+    await query(
+      `insert into lark_group_chatbots (lark_group_id, chatbot_id)
+       values ('${group!.id}', '${bot!.id}'), ('${group!.id}', '${keep!.id}')`,
+    );
+    await query(`delete from chatbots where id = '${bot!.id}'`);
+    expect(await query('select chatbot_id from lark_group_chatbots')).toEqual([{ chatbot_id: keep!.id }]);
+
+    expect(await rollbackMigrations(url, 1)).toEqual(['0015_lark_groups.sql']);
+    expect(await publicTables()).toEqual(EXPECTED_TABLES.filter((t) => !LARK_TABLES.includes(t)));
+    expect(await query("select name from chatbots where name = 'Bot 0015 giữ'")).toHaveLength(1);
+    await runMigrations(url);
+    expect(await publicTables()).toEqual(EXPECTED_TABLES);
+    expect(await query('select id from lark_groups')).toEqual([]);
+    expect(await query(idx)).toHaveLength(1);
+    await query(`delete from chatbots where id = '${keep!.id}'`);
+  });
+
   it('0014: cột handoffs.auto_resume (NOT NULL, mặc định false) + backfill handoff mở do lỗi gọi AI; rollback gỡ cột, giữ handoff; chạy lại ⇒ backfill lại', async () => {
     const col = `select data_type, is_nullable, column_default from information_schema.columns
        where table_name = 'handoffs' and column_name = 'auto_resume'`;
@@ -157,7 +208,10 @@ describe('migrations', () => {
 
     // Dữ liệu cũ (trước 0014): rollback rồi tạo handoff, chạy lại 0014 ⇒ chỉ handoff MỞ do AI tạo với tóm tắt
     // "Lỗi gọi AI: …" được bật auto_resume.
-    expect(await rollbackMigrations(url, 1)).toEqual(['0014_handoff_auto_resume.sql']);
+    expect(await rollbackMigrations(url, 2)).toEqual([
+      '0015_lark_groups.sql',
+      '0014_handoff_auto_resume.sql',
+    ]);
     expect(await query(col)).toEqual([]);
     const [ch] = await query<{ id: string }>(
       `insert into channel_accounts (type, display_name, external_id, status, credentials)
@@ -206,7 +260,10 @@ describe('migrations', () => {
       { summary: 'Lỗi gọi AI: Hết thời gian chờ AI (30s) ', auto_resume: true },
       { summary: 'Lỗi gọi AI: Lỗi gọi Gemini: fetch failed', auto_resume: true },
     ]);
-    expect(await rollbackMigrations(url, 1)).toEqual(['0014_handoff_auto_resume.sql']);
+    expect(await rollbackMigrations(url, 2)).toEqual([
+      '0015_lark_groups.sql',
+      '0014_handoff_auto_resume.sql',
+    ]);
     expect(await query(`select id from handoffs where conversation_id = '${conv!.id}'`)).toHaveLength(10);
     await runMigrations(url);
     expect(await query(col)).toHaveLength(1);
@@ -251,11 +308,14 @@ describe('migrations', () => {
     const [index] = await query<{ indexdef: string }>(idx);
     expect(index?.indexdef).toMatch(/\(conversation_id, created_at\)/);
 
-    expect(await rollbackMigrations(url, 2)).toEqual([
+    expect(await rollbackMigrations(url, 3)).toEqual([
+      '0015_lark_groups.sql',
       '0014_handoff_auto_resume.sql',
       '0013_project_logs.sql',
     ]);
-    expect(await publicTables()).toEqual(EXPECTED_TABLES.filter((t) => t !== 'project_logs'));
+    expect(await publicTables()).toEqual(
+      EXPECTED_TABLES.filter((t) => t !== 'project_logs' && !LARK_TABLES.includes(t)),
+    );
     await runMigrations(url);
     expect(await publicTables()).toEqual(EXPECTED_TABLES);
     expect(await query(idx)).toHaveLength(1);
@@ -278,7 +338,8 @@ describe('migrations', () => {
       `insert into contacts (display_name, phone, phone_source, profile_fields) values ('Khách 0012', '0912345678', 'ai', '{"need":{"label":"Nhu cầu","value":"Xây nhà","source":"ai","updatedAt":"2026-11-14T00:00:00.000Z"}}')`,
     );
 
-    expect(await rollbackMigrations(url, 3)).toEqual([
+    expect(await rollbackMigrations(url, 4)).toEqual([
+      '0015_lark_groups.sql',
       '0014_handoff_auto_resume.sql',
       '0013_project_logs.sql',
       '0012_contact_capture.sql',
@@ -310,7 +371,8 @@ describe('migrations', () => {
     ).rejects.toThrow(/chatbots_ai_handoff_mode_check/);
     await query("insert into chatbots (name, ai_handoff_mode) values ('Bot 0011', 'continue')");
 
-    expect(await rollbackMigrations(url, 4)).toEqual([
+    expect(await rollbackMigrations(url, 5)).toEqual([
+      '0015_lark_groups.sql',
       '0014_handoff_auto_resume.sql',
       '0013_project_logs.sql',
       '0012_contact_capture.sql',
@@ -337,7 +399,8 @@ describe('migrations', () => {
     await query(
       "insert into chatbots (name, handoff_ack_message) values ('Bot tin nút', 'Dạ {ten_khach} chờ em chút ạ')",
     );
-    expect(await rollbackMigrations(url, 5)).toEqual([
+    expect(await rollbackMigrations(url, 6)).toEqual([
+      '0015_lark_groups.sql',
       '0014_handoff_auto_resume.sql',
       '0013_project_logs.sql',
       '0012_contact_capture.sql',
@@ -400,7 +463,8 @@ describe('migrations', () => {
       `insert into chatbots (name, notify_keywords, agent_reply_mode, agent_pause_minutes, handoff_reminder_min)
        values ('Bot 0009', '{bảo hành}', 'stop', 15, 30)`,
     );
-    expect(await rollbackMigrations(url, 6)).toEqual([
+    expect(await rollbackMigrations(url, 7)).toEqual([
+      '0015_lark_groups.sql',
       '0014_handoff_auto_resume.sql',
       '0013_project_logs.sql',
       '0012_contact_capture.sql',
@@ -428,7 +492,8 @@ describe('migrations', () => {
        and column_name in ('handoff_ack_label', 'handoff_resolve_label', 'handoff_action_lark') order by column_name`;
     await query("insert into chatbots (name, handoff_ack_label) values ('Bot nút', 'Nghiệm thu')");
     expect(await query(cols)).toHaveLength(3);
-    expect(await rollbackMigrations(url, 7)).toEqual([
+    expect(await rollbackMigrations(url, 8)).toEqual([
+      '0015_lark_groups.sql',
       '0014_handoff_auto_resume.sql',
       '0013_project_logs.sql',
       '0012_contact_capture.sql',
@@ -449,7 +514,8 @@ describe('migrations', () => {
   });
 
   it('0007: rollback gỡ contact_tags, giữ contacts.tags; chạy lại seed nhãn sẵn có (bỏ trùng hoa thường)', async () => {
-    expect(await rollbackMigrations(url, 8)).toEqual([
+    expect(await rollbackMigrations(url, 9)).toEqual([
+      '0015_lark_groups.sql',
       '0014_handoff_auto_resume.sql',
       '0013_project_logs.sql',
       '0012_contact_capture.sql',
@@ -460,7 +526,7 @@ describe('migrations', () => {
       '0007_contact_tags.sql',
     ]);
     expect(await publicTables()).toEqual(
-      EXPECTED_TABLES.filter((t) => t !== 'contact_tags' && t !== 'project_logs'),
+      EXPECTED_TABLES.filter((t) => t !== 'contact_tags' && t !== 'project_logs' && !LARK_TABLES.includes(t)),
     );
     await query(
       `insert into contacts (display_name, tags, created_at) values
@@ -496,7 +562,8 @@ describe('migrations', () => {
     await query("insert into chatbots (name) values ('Bot tốc độ')");
     expect((await query<{ n: number }>(col))[0]?.n).toBe(1);
     expect((await query<{ n: number }>(chk))[0]?.n).toBe(1);
-    expect(await rollbackMigrations(url, 9)).toEqual([
+    expect(await rollbackMigrations(url, 10)).toEqual([
+      '0015_lark_groups.sql',
       '0014_handoff_auto_resume.sql',
       '0013_project_logs.sql',
       '0012_contact_capture.sql',
@@ -523,7 +590,8 @@ describe('migrations', () => {
       "select count(*)::int as n from information_schema.columns where table_name = 'chatbots' and column_name = 'escalate_when_unsure'";
     await query("insert into chatbots (name) values ('Bot giữ lại')");
     expect((await query<{ n: number }>(col))[0]?.n).toBe(1);
-    expect(await rollbackMigrations(url, 10)).toEqual([
+    expect(await rollbackMigrations(url, 11)).toEqual([
+      '0015_lark_groups.sql',
       '0014_handoff_auto_resume.sql',
       '0013_project_logs.sql',
       '0012_contact_capture.sql',
@@ -569,7 +637,8 @@ describe('migrations', () => {
       { conname: 'conversations_chatbot_id_chatbots_id_fk', confdeltype: 'n' },
     ]);
 
-    expect(await rollbackMigrations(url, 11)).toEqual([
+    expect(await rollbackMigrations(url, 12)).toEqual([
+      '0015_lark_groups.sql',
       '0014_handoff_auto_resume.sql',
       '0013_project_logs.sql',
       '0012_contact_capture.sql',
@@ -585,7 +654,12 @@ describe('migrations', () => {
     expect(await query(cols)).toEqual([]);
     expect(await publicTables()).toEqual(
       EXPECTED_TABLES.filter(
-        (t) => t !== 'chatbots' && t !== 'app_settings' && t !== 'contact_tags' && t !== 'project_logs',
+        (t) =>
+          t !== 'chatbots' &&
+          t !== 'app_settings' &&
+          t !== 'contact_tags' &&
+          t !== 'project_logs' &&
+          !LARK_TABLES.includes(t),
       ),
     );
     await runMigrations(url);
@@ -645,7 +719,8 @@ describe('migrations', () => {
     const col =
       "select count(*)::int as n from information_schema.columns where table_name = 'messages' and column_name = 'client_id'";
     expect((await query<{ n: number }>(col))[0]?.n).toBe(1);
-    expect(await rollbackMigrations(url, 12)).toEqual([
+    expect(await rollbackMigrations(url, 13)).toEqual([
+      '0015_lark_groups.sql',
       '0014_handoff_auto_resume.sql',
       '0013_project_logs.sql',
       '0012_contact_capture.sql',
@@ -669,7 +744,8 @@ describe('migrations', () => {
     const fk =
       "select count(*)::int as n from pg_constraint where conname = 'messages_conversation_channel_account_fk'";
     expect((await query<{ n: number }>(fk))[0]?.n).toBe(1);
-    expect(await rollbackMigrations(url, 13)).toEqual([
+    expect(await rollbackMigrations(url, 14)).toEqual([
+      '0015_lark_groups.sql',
       '0014_handoff_auto_resume.sql',
       '0013_project_logs.sql',
       '0012_contact_capture.sql',
@@ -690,8 +766,8 @@ describe('migrations', () => {
     expect(await publicTables()).toEqual(EXPECTED_TABLES);
   });
 
-  it('rollback mười bốn bước giữ extension và cho phép chạy lại 0001', async () => {
-    await rollbackMigrations(url, 14);
+  it('rollback mười lăm bước giữ extension và cho phép chạy lại 0001', async () => {
+    await rollbackMigrations(url, 15);
     expect(await publicTables()).toEqual([]);
     expect(await vectorInstalled()).toBe(true);
     await runMigrations(url);
