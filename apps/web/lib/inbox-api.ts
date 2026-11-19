@@ -1,5 +1,9 @@
 // Lời gọi REST của hộp thư và trang Kênh (hợp đồng: @dezon/shared/inbox).
 import type {
+  AiOutageResumeResponse,
+  AiOutageStatus,
+  ApplyDefaultChatbotPreview,
+  ApplyDefaultChatbotResult,
   ChannelAccountDto,
   ChannelType,
   ChatbotSummary,
@@ -151,6 +155,16 @@ export const channelsApi = {
   update(id: string, body: UpdateChannelRequest) {
     return api.request<ChannelAccountDto>(`/channels/${enc(id)}`, { method: 'PATCH', body });
   },
+  /** Xem trước "áp dụng chatbot mặc định cho hội thoại đang có" (admin). */
+  applyDefaultChatbotPreview(id: string) {
+    return api.request<ApplyDefaultChatbotPreview>(`/channels/${enc(id)}/default-chatbot/apply-preview`);
+  },
+  /** Đổi hội thoại đang dùng bot khác sang chatbot mặc định HIỆN TẠI của kênh (admin). 400 = kênh chưa có bot. */
+  applyDefaultChatbot(id: string) {
+    return api.request<ApplyDefaultChatbotResult>(`/channels/${enc(id)}/default-chatbot/apply`, {
+      method: 'POST',
+    });
+  },
   disconnect(id: string) {
     return api.request<unknown>(`/channels/${enc(id)}/disconnect`, { method: 'POST' });
   },
@@ -170,6 +184,19 @@ export const channelsApi = {
       `/channels/messenger/oauth/sessions/${enc(sessionId)}/connect`,
       { method: 'POST', body },
     );
+  },
+};
+
+/**
+ * "Bật lại AI" khi AI hết hạn mức / quá tải (mọi nhân viên). resume: máy chủ gọi thử AI trước — vẫn lỗi / AI đang
+ * tắt / không còn hội thoại chờ ⇒ 409, thiếu khóa AI ⇒ 503, kèm lời báo tiếng Việt (ApiError.message).
+ */
+export const aiOutageApi = {
+  status() {
+    return api.request<AiOutageStatus>('/ai/outage');
+  },
+  resume() {
+    return api.request<AiOutageResumeResponse>('/ai/outage/resume', { method: 'POST' });
   },
 };
 

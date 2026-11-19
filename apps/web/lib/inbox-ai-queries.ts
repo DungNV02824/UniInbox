@@ -13,10 +13,12 @@ import {
   withHandoffAcknowledged,
   withHandoffResolved,
 } from '@/lib/inbox-ai';
-import { inboxApi, looksLikeConversation } from '@/lib/inbox-api';
-import { chatbotOptionsKey, inboxKeys } from '@/lib/inbox-keys';
+import { AI_OUTAGE_REFETCH_MS, aiOutageResumedText } from '@/lib/ai-outage';
+import { aiOutageApi, inboxApi, looksLikeConversation } from '@/lib/inbox-api';
+import { aiOutageKey, chatbotOptionsKey, inboxKeys } from '@/lib/inbox-keys';
 import { errorText } from '@/lib/inbox-queries';
 import { applyConversationUpdate, patchConversationEverywhere } from '@/lib/realtime-cache';
+import { settingsKeys } from '@/lib/settings-api';
 
 /** Bot cho ô chọn ở khung chat (đã gồm bot tắt nếu là admin; component tự lọc bot đang bật). */
 export function useChatbotOptions(enabled = true) {
@@ -109,6 +111,43 @@ export function useRejectHandoff(conversationId: string) {
     onSettled: () => {
       void qc.invalidateQueries({ queryKey: inboxKeys.detail(conversationId) });
       void qc.invalidateQueries({ queryKey: inboxKeys.lists() });
+    },
+  });
+}
+
+/**
+ * Trạng thái "Bật lại AI": công tắc AI chung + số hội thoại chờ vì AI lỗi / khách chưa được trả lời. Tải lại mỗi
+ * phút; RealtimeProvider còn invalidate khi có `conversation.updated` liên quan (xem aiOutageMayChange).
+ */
+export function useAiOutageStatus(enabled = true) {
+  return useQuery({
+    queryKey: aiOutageKey,
+    queryFn: () => aiOutageApi.status(),
+    staleTime: 30_000,
+    refetchInterval: AI_OUTAGE_REFETCH_MS,
+    enabled,
+  });
+}
+
+/**
+ * "Bật lại AI" (toàn hệ thống): máy chủ gọi thử AI rồi bật công tắc chung (nếu tắt), trả các hội thoại chờ cho bot
+ * và đánh thức bot trả lời khách bị bỏ sót (worker xử lý). Thành công ⇒ toast + tải lại danh sách / chi tiết / công
+ * tắc AI ở Cài đặt; lỗi (AI vẫn lỗi, không phải admin…) KHÔNG bắn toast — hộp thoại hiện lời máy chủ.
+ */
+export function useResumeAiOutage() {
+  const qc = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: () => aiOutageApi.resume(),
+    onSuccess: (data) => {
+      toast({ title: aiOutageResumedText(data), variant: 'success', duration: 7000 });
+      void qc.invalidateQueries({ queryKey: settingsKeys.ai });
+    },
+    onSettled: () => {
+      // Lỗi cũng tải lại: vd. "không còn gì để làm" ⇒ dải vàng tự ẩn.
+      void qc.invalidateQueries({ queryKey: aiOutageKey });
+      void qc.invalidateQueries({ queryKey: inboxKeys.lists() });
+      void qc.invalidateQueries({ queryKey: inboxKeys.details() });
     },
   });
 }

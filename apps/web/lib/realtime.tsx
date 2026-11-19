@@ -12,7 +12,7 @@ import {
   type ReactNode,
 } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import type { HandoffCreatedPayload } from '@dezon/shared';
+import type { AiOutageStatus, HandoffCreatedPayload } from '@dezon/shared';
 import {
   createAiTypingStore,
   EMPTY_AI_TYPING,
@@ -20,10 +20,11 @@ import {
   type AiTypingState,
   type AiTypingStore,
 } from '@/lib/ai-typing';
+import { aiOutageMayChange } from '@/lib/ai-outage';
 import { api, API_URL } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { contactTagKeys } from '@/lib/contact-tags-api';
-import { inboxKeys } from '@/lib/inbox-keys';
+import { aiOutageKey, inboxKeys } from '@/lib/inbox-keys';
 import { createConversationBatcher, createKeyedDebouncer } from '@/lib/conversation-batch';
 import {
   applyConversationUpdates,
@@ -75,6 +76,11 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
     // Hồ sơ khách (SĐT, trường bot điền vào Ghi chú…) không có trong bản tóm tắt ⇒ tải lại chi tiết của
     // hội thoại đang mở (gom sự kiện dồn dập). Ô đang gõ giữ bản nháp (xem ContactFieldEditor).
     const detailRefresher = createKeyedDebouncer((id) => refreshConversationDetail(queryClient, id));
+    // Trạng thái dải "Bật lại AI" (AI tắt / hội thoại chờ vì AI lỗi): gom sự kiện dồn dập thành một lần tải lại.
+    const outageRefresher = createKeyedDebouncer(
+      () => void queryClient.invalidateQueries({ queryKey: aiOutageKey }),
+      2_000,
+    );
     const listeners = handoffListeners.current;
     const stop = startRealtime({
       url: API_URL,
@@ -95,6 +101,8 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
         'conversation.updated': ({ conversation }) => {
           batcher.push(conversation);
           detailRefresher.push(conversation.id);
+          const outage = queryClient.getQueryData<AiOutageStatus>(aiOutageKey);
+          if (aiOutageMayChange(conversation, outage)) outageRefresher.push('all');
         },
         'ai.typing': (payload) => aiTyping.handleTyping(payload),
         // Danh sách nhãn đổi (thêm/đổi tên/đổi màu/xóa): tải lại danh sách + hồ sơ khách đang mở
@@ -117,6 +125,7 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
         batcher.flush();
         void queryClient.invalidateQueries({ queryKey: inboxKeys.all });
         void queryClient.invalidateQueries({ queryKey: contactTagKeys.all });
+        void queryClient.invalidateQueries({ queryKey: aiOutageKey });
       },
       onStatusChange: (next) => {
         setConnected(next);
@@ -128,6 +137,7 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
       stop();
       batcher.dispose();
       detailRefresher.dispose();
+      outageRefresher.dispose();
       aiTyping.clearAll();
       setConnected(false);
     };

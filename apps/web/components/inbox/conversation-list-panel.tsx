@@ -15,6 +15,7 @@ import { errorText, useChannels, useConversation, useConversations } from '@/lib
 import { useRealtimeStatus } from '@/lib/realtime';
 import { useNow } from '@/lib/use-now';
 import { cn } from '@/lib/utils';
+import { AiOutageStrip } from './ai-outage';
 import { ChannelFilterMenu } from './channel-filter-menu';
 import { ConversationFilterPopover } from './conversation-filter-popover';
 import { ConversationRow } from './conversation-row';
@@ -233,6 +234,9 @@ export function ConversationListPanel({
         </div>
         <TagQuickTabs value={filters.tag} onChange={(tag) => setFilters((f) => toggleTagFilter(f, tag))} />
       </div>
+
+      {/* AI hết hạn mức / quá tải ⇒ "N hội thoại đang chờ vì AI lỗi" + "Bật lại AI" (ẩn khi không ai chờ). */}
+      <AiOutageStrip />
 
       {/* Chỉ vùng này cuộn; `relative` để phần tử absolute (sr-only...) trong dòng không làm cả trang cuộn. */}
       <div className="relative flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain">

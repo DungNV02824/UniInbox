@@ -905,3 +905,39 @@ export const DEFAULT_CAPTURE_CONFIG: CaptureConfig = {
   phoneTag: DEFAULT_CAPTURE_PHONE_TAG,
   projectLog: DEFAULT_PROJECT_LOG_CONFIG,
 };
+
+/**
+ * Nút "Bật lại AI" — bật lại AI cho TOÀN HỆ THỐNG (sau khi hết hạn mức / quá tải Gemini, hoặc admin đã tắt công tắc AI
+ * chung):
+ * 1. Công tắc AI chung (Cài đặt) đang tắt ⇒ bật lên (chỉ admin; nhân viên ⇒ 403).
+ * 2. Hội thoại "Cần người" vì LỖI PHÍA AI còn trả lại được (cùng điều kiện banner vàng — aiOutageResumableSql) ⇒ trả
+ *    lại cho bot NGAY, bỏ qua giới hạn chống lặp của job tự động (60 phút / 3 lần mỗi ngày).
+ * 3. Hội thoại "bị bỏ sót": bot đang gắn + bật, ai_mode auto, không "Cần người", không tạm dừng AI, tin cuối (bỏ system /
+ *    echo tự động) là của khách, gửi trong AI_MISSED_REPLY_MAX_AGE_HOURS giờ và cũ hơn AI_MISSED_REPLY_MIN_AGE_MIN phút
+ *    (tránh đếm lượt bot đang chờ debounce), còn tin khách chưa xử lý ⇒ đánh thức bot trả lời.
+ * Bot trả lời lại các tin khách bị bỏ lỡ (giãn cách, cửa sổ nhắn tin còn mở).
+ * GET  /ai/outage         ⇒ AiOutageStatus (mọi nhân viên).
+ * POST /ai/outage/resume  ⇒ AiOutageResumeResponse. Thứ tự: thiếu GEMINI_API_KEY ⇒ 503; không có gì để làm (công tắc
+ * đang bật, waiting = missed = 0) ⇒ 409; công tắc tắt mà không phải admin ⇒ 403; gọi thử AI hỏng ⇒ 409 kèm lỗi (KHÔNG
+ * bật công tắc); được ⇒ bật công tắc (nếu tắt, audit như PUT settings) rồi đẩy job cho worker.
+ */
+export const AI_MISSED_REPLY_MAX_AGE_HOURS = 24;
+export const AI_MISSED_REPLY_MIN_AGE_MIN = 5;
+
+export interface AiOutageStatus {
+  /** Công tắc AI chung (Cài đặt) đang bật. */
+  aiEnabled: boolean;
+  /** Số hội thoại đang "Cần người" vì AI lỗi, còn trả lại cho bot được. */
+  waiting: number;
+  /** Số hội thoại khách nhắn mà bot chưa trả lời (mục 3). */
+  missed: number;
+}
+
+export interface AiOutageResumeResponse {
+  /** true nếu lần bấm này đã bật công tắc AI chung. */
+  enabledNow: boolean;
+  /** Số hội thoại sẽ được trả lại cho bot / được bot trả lời bù (lúc bấm). */
+  waiting: number;
+  missed: number;
+  queued: true;
+}

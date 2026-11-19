@@ -314,7 +314,7 @@ describe('Cần người vì lỗi phía AI (handoff.autoResume)', () => {
 
   it('handoffAiOutageNote: chỉ khi autoResume, đang chờ người, còn gắn bot và chưa ai nhận', () => {
     expect(HANDOFF_AI_OUTAGE_NOTE).toBe(
-      'AI tạm lỗi (hết tiền / quá tải) — bot sẽ tự trả lời lại khi AI hoạt động. Bấm nút bên cạnh nếu muốn tự xử lý.',
+      'AI tạm lỗi (hết hạn mức / quá tải) — bot sẽ tự trả lời lại khi AI hoạt động, hoặc bấm "Bật lại AI ngay" sau khi nạp tiền.',
     );
     const waiting = { status: 'pending_human' as const, chatbot: BOT };
     expect(handoffAiOutageNote(conv({ ...waiting, handoff: OUTAGE }))).toBe(HANDOFF_AI_OUTAGE_NOTE);

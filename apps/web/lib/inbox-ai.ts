@@ -239,7 +239,7 @@ export function handoffAckedText(
 }
 
 export const HANDOFF_AI_OUTAGE_NOTE =
-  'AI tạm lỗi (hết tiền / quá tải) — bot sẽ tự trả lời lại khi AI hoạt động. Bấm nút bên cạnh nếu muốn tự xử lý.';
+  'AI tạm lỗi (hết hạn mức / quá tải) — bot sẽ tự trả lời lại khi AI hoạt động, hoặc bấm "Bật lại AI ngay" sau khi nạp tiền.';
 
 /**
  * Dòng tông vàng trên banner "Cần người" khi chuyển người vì LỖI PHÍA AI (handoff.autoResume): hệ thống sẽ tự trả lại

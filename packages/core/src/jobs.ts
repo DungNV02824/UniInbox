@@ -106,10 +106,19 @@ export const aiKickJobId = (conversationId: string): string => `ai-kick-${conver
 /**
  * Cùng hàng đợi `ai-reply`, job định kỳ "ai-auto-resume" (job scheduler AI_AUTO_RESUME_SCHEDULER_ID, mỗi
  * AI_AUTO_RESUME_EVERY_MS — ai/auto-resume.ts): hội thoại "Cần người" vì lỗi phía AI (handoffs.auto_resume) được tự
- * trả lại cho bot khi AI hoạt động lại. Worker gọi resumeAiOutageHandoffs(db, deps). Không có data.
+ * trả lại cho bot khi AI hoạt động lại. Worker gọi resumeAiOutageHandoffs(db, deps). Job định kỳ: data rỗng.
+ * Nút "Bật lại AI" (POST /ai/outage/resume): API đẩy CÙNG tên job với data { manual: true, actorUserId } và jobId cố
+ * định AI_MANUAL_RESUME_JOB_ID (bấm liên tiếp khi job còn chờ ⇒ BullMQ bỏ qua, không xếp hai lần).
  */
+export interface AiAutoResumeJobData {
+  manual?: true;
+  /** Nhân viên bấm nút (audit). */
+  actorUserId?: string;
+}
 export const AI_AUTO_RESUME_JOB_NAME = 'ai-auto-resume';
 export const AI_AUTO_RESUME_SCHEDULER_ID = 'ai-reply:auto-resume';
+/** jobId lượt bấm tay (BullMQ không cho ':' trong custom job id — khác id của job scheduler). */
+export const AI_MANUAL_RESUME_JOB_ID = 'ai-manual-resume';
 
 /** Giãn cách giữa các bong bóng bot (delay BullMQ của job outbound), ngẫu nhiên trong [min, max]. */
 export const BOT_BUBBLE_GAP_MIN_MS = 800;

@@ -12,9 +12,11 @@ import {
   messages,
   type Db,
 } from '@dezon/db';
-import { and, asc, eq, gte, inArray, isNull, sql } from 'drizzle-orm';
+import { AI_MISSED_REPLY_MAX_AGE_HOURS, AI_MISSED_REPLY_MIN_AGE_MIN } from '@dezon/shared';
+import { and, asc, eq, gte, inArray, isNull, ne, sql } from 'drizzle-orm';
 import { resolveOpenHandoffs } from '../inbox/commands';
 import type { DbLike } from '../inbox/read-model';
+import type { InboxContext } from '../inbox/types';
 import { notAutomatedEcho } from '../pipeline/automation-echo';
 import { aiOutageResumableSql } from './auto-resume-sql';
 import { botCanSend, emitConversationUpdated, emitMessagesCreated, errorText } from './delivery';
@@ -49,6 +51,21 @@ export const AI_AUTO_RESUME_LOCK_TTL_MS = 10 * 60_000;
 export const AI_AUTO_RESUME_COOLDOWN_MIN = 60;
 export const AI_AUTO_RESUME_MAX_PER_DAY = 3;
 /**
+ * Nút "Bật lại AI" (manual): tối đa số hội thoại trả lại trong MỘT lần bấm (một truy vấn — thực tế hiếm khi quá vài
+ * chục; trần chỉ để job không chạy vô hạn).
+ */
+export const AI_MANUAL_RESUME_MAX = 1000;
+/**
+ * Lần bấm tay gặp khóa Redis (lượt quét định kỳ / lần bấm khác đang chạy) ⇒ thử lấy lại khóa mỗi
+ * AI_MANUAL_RESUME_LOCK_POLL_MS, tối đa AI_MANUAL_RESUME_LOCK_WAIT_MS; vẫn không được ⇒ CHẠY LUÔN không giữ khóa (an
+ * toàn: resumeAiOutageHandoff khóa dòng hội thoại và kiểm lại điều kiện trong transaction ⇒ lượt chạy song song chỉ
+ * thấy "đã được trả lại" và bỏ qua). Không bao giờ âm thầm bỏ lần bấm của nhân viên.
+ */
+export const AI_MANUAL_RESUME_LOCK_WAIT_MS = 30_000;
+export const AI_MANUAL_RESUME_LOCK_POLL_MS = 1_000;
+/** Audit một lần bấm "Bật lại AI" (userId = người bấm). */
+export const AI_MANUAL_RESUME_AUDIT_ACTION = 'ai.manual_resume';
+/**
  * Lượt AI lỗi (ai_runs 'error' vì AI ngừng hoạt động) tạo trước handoff tối đa chừng này phút vẫn tính là lượt gây ra
  * handoff (lượt ghi ai_runs ngay sau lời gọi AI hỏng, rồi mới chuyển người).
  */
@@ -75,10 +92,12 @@ export interface AiOutageResumeCandidate {
  * bật, KHÔNG có tin nhân viên — trừ echo tự động của Page — từ lúc handoff tạo; cùng định nghĩa với banner/nhắc Lark);
  * hội thoại pending_human, không bị nhân viên tạm dừng AI; không có handoff mở KHÁC cần người (không auto_resume hoặc
  * đã có người nhận); chưa tự trả lại hội thoại trong AI_AUTO_RESUME_COOLDOWN_MIN phút và chưa quá
- * AI_AUTO_RESUME_MAX_PER_DAY lần trong 24 giờ.
+ * AI_AUTO_RESUME_MAX_PER_DAY lần trong 24 giờ. `manual` (nút "Bật lại AI") ⇒ BỎ hai giới hạn chống lặp sau cùng (nhân
+ * viên chủ động bấm), mọi điều kiện khác giữ nguyên.
  */
-function candidateWhere(now: Date, handoffId?: string) {
+function candidateWhere(now: Date, filter: CandidateFilter = {}) {
   const nowIso = now.toISOString();
+  const { handoffId, manual } = filter;
   return and(
     handoffId ? eq(handoffs.id, handoffId) : undefined,
     isNull(handoffs.resolvedAt),
@@ -91,16 +110,27 @@ function candidateWhere(now: Date, handoffId?: string) {
     sql`not exists (select 1 from ${handoffs} o
       where o.conversation_id = ${handoffs.conversationId} and o.resolved_at is null and o.id <> ${handoffs.id}
         and (not o.auto_resume or o.acknowledged_by is not null))`,
-    sql`not exists (select 1 from ${handoffs} p
+    manual
+      ? undefined
+      : sql`not exists (select 1 from ${handoffs} p
       where p.conversation_id = ${handoffs.conversationId} and ${autoResumedHandoffSql('p')}
         and p.resolved_at > ${nowIso}::timestamptz - make_interval(mins => ${AI_AUTO_RESUME_COOLDOWN_MIN}))`,
-    sql`(select count(*) from ${handoffs} p
+    manual
+      ? undefined
+      : sql`(select count(*) from ${handoffs} p
       where p.conversation_id = ${handoffs.conversationId} and ${autoResumedHandoffSql('p')}
         and p.resolved_at > ${nowIso}::timestamptz - interval '24 hours') < ${AI_AUTO_RESUME_MAX_PER_DAY}`,
   );
 }
 
-function selectCandidates(db: DbLike, now: Date, limit: number, handoffId?: string) {
+interface CandidateFilter {
+  /** Chỉ xét đúng handoff này (kiểm lại dưới khóa). */
+  handoffId?: string;
+  /** Nút "Bật lại AI": bỏ giới hạn chống lặp (cooldown / số lần mỗi ngày). */
+  manual?: boolean;
+}
+
+function selectCandidates(db: DbLike, now: Date, limit: number, filter: CandidateFilter = {}) {
   return db
     .select({
       handoffId: handoffs.id,
@@ -111,18 +141,57 @@ function selectCandidates(db: DbLike, now: Date, limit: number, handoffId?: stri
     .from(handoffs)
     .innerJoin(conversations, eq(conversations.id, handoffs.conversationId))
     .innerJoin(chatbots, eq(chatbots.id, conversations.chatbotId))
-    .where(candidateWhere(now, handoffId))
+    .where(candidateWhere(now, filter))
     .orderBy(asc(handoffs.createdAt), asc(handoffs.id))
     .limit(limit);
 }
 
-/** Handoff chờ tự trả lại cho bot (cũ trước). KHÔNG kiểm AI tổng (resumeAiOutageHandoffs kiểm trước). */
+/**
+ * Handoff chờ tự trả lại cho bot (cũ trước). KHÔNG kiểm AI tổng (resumeAiOutageHandoffs kiểm trước). `manual` ⇒ bỏ
+ * giới hạn chống lặp (nút "Bật lại AI").
+ */
 export function listAiOutageResumeCandidates(
   db: DbLike,
   now: Date,
   limit: number = AI_AUTO_RESUME_BATCH,
+  options: { manual?: boolean } = {},
 ): Promise<AiOutageResumeCandidate[]> {
-  return selectCandidates(db, now, limit);
+  return selectCandidates(db, now, limit, { manual: options.manual === true });
+}
+
+/**
+ * Điều kiện "hội thoại đang Cần người vì AI lỗi" của nút "Bật lại AI" — cùng nghĩa banner vàng: handoff thỏa
+ * aiOutageResumableSql + hội thoại pending_human. KHÔNG xét giới hạn chống lặp, tạm dừng AI hay handoff khác.
+ */
+function aiOutageWaitingWhere(now: Date) {
+  return and(
+    eq(conversations.status, 'pending_human'),
+    aiOutageResumableSql('"handoffs"', sql`${now.toISOString()}::timestamptz`),
+  );
+}
+
+/** Số hội thoại (mỗi hội thoại đếm một lần) đang "Cần người" vì AI lỗi mà còn trả lại cho bot được. */
+export async function countAiOutageWaiting(db: DbLike, now: Date): Promise<number> {
+  const [row] = await db
+    .select({ n: sql<number>`count(distinct ${handoffs.conversationId})::int` })
+    .from(handoffs)
+    .innerJoin(conversations, eq(conversations.id, handoffs.conversationId))
+    .where(aiOutageWaitingWhere(now));
+  return row?.n ?? 0;
+}
+
+/**
+ * Các model (không trùng) của bot đang gắn với những hội thoại countAiOutageWaiting đếm — để API gọi thử từng model
+ * trước khi đẩy job. null ⇒ bot để trống model (bên gọi dùng model mặc định).
+ */
+export async function listAiOutageWaitingModels(db: DbLike, now: Date): Promise<(string | null)[]> {
+  const rows = await db
+    .selectDistinct({ model: chatbots.model })
+    .from(handoffs)
+    .innerJoin(conversations, eq(conversations.id, handoffs.conversationId))
+    .innerJoin(chatbots, eq(chatbots.id, conversations.chatbotId))
+    .where(aiOutageWaitingWhere(now));
+  return [...new Set(rows.map((r) => r.model?.trim() || null))];
 }
 
 /**
@@ -238,6 +307,7 @@ export type AiOutageResumeOutcome =
  * nút "trả lại cho AI" (returnConversationToBot), bỏ trigger của lượt AI lỗi (releaseOutageRunTriggers), audit
  * 'handoff.auto_resume' { handoffId, handoffIds, aiMode, releasedRunIds } (user null), tin system
  * AI_AUTO_RESUME_SYSTEM_TEXT (raw.aiAutoResume). KHÔNG gửi tin "trả lại" của bot cho khách, KHÔNG báo Lark.
+ * `manual` (nút "Bật lại AI") ⇒ kiểm lại KHÔNG xét giới hạn chống lặp; audit ghi thêm manual: true.
  * Sau commit: message.created + conversation.updated; khách đang chờ (waitingReplyDelaySec) và bot gửi được (cửa sổ
  * còn mở — botCanSend) ⇒ lên lịch job ai-reply sau replyDelaySec + `kickDelayMs` (giãn cách do job quét truyền vào).
  * Lỗi lên lịch chỉ log.
@@ -247,7 +317,9 @@ export async function resumeAiOutageHandoff(
   deps: AiRuntimeDeps,
   candidate: Pick<AiOutageResumeCandidate, 'handoffId' | 'conversationId'>,
   kickDelayMs = 0,
+  options: { manual?: boolean } = {},
 ): Promise<AiOutageResumeOutcome> {
+  const manual = options.manual === true;
   const now = deps.ctx.now();
   const done = await db.transaction(async (tx) => {
     const [conv] = await tx
@@ -260,7 +332,7 @@ export async function resumeAiOutageHandoff(
       .where(eq(conversations.id, candidate.conversationId))
       .for('update');
     if (!conv) return null;
-    const [still] = await selectCandidates(tx, now, 1, candidate.handoffId);
+    const [still] = await selectCandidates(tx, now, 1, { handoffId: candidate.handoffId, manual });
     if (!still || still.conversationId !== conv.id) return null;
     const handoffIds = await resolveOpenHandoffs(tx, conv.id, null, now);
     const aiMode = await returnConversationToBot(tx, conv, now);
@@ -270,7 +342,13 @@ export async function resumeAiOutageHandoff(
       action: 'handoff.auto_resume',
       entity: 'conversation',
       entityId: conv.id,
-      data: { handoffId: candidate.handoffId, handoffIds, aiMode, releasedRunIds },
+      data: {
+        handoffId: candidate.handoffId,
+        handoffIds,
+        aiMode,
+        releasedRunIds,
+        ...(manual ? { manual: true } : {}),
+      },
     });
     const [system] = await tx
       .insert(messages)
@@ -331,14 +409,131 @@ export async function resumeAiOutageHandoff(
   return { resumed: true, handoffIds: done.handoffIds, systemMessageId: done.systemMessageId, kicked };
 }
 
+// ---------- Hội thoại "bị bỏ sót" (nút "Bật lại AI", mục 3 của hợp đồng AiOutageStatus) ----------
+
+/** Tối đa số hội thoại bị bỏ sót xét trong một lần bấm (còn lại ⇒ log số bị bỏ, lần bấm sau xét tiếp). */
+export const AI_MISSED_REPLY_MAX = 500;
+/** Số hội thoại kiểm song song khi lọc (loadPendingMessages / botCanSend mỗi hội thoại một truy vấn). */
+const MISSED_FILTER_CONCURRENCY = 10;
+
+export interface AiMissedReplyCandidate {
+  conversationId: string;
+  /** Model của bot đang gắn (null ⇒ model mặc định). */
+  model: string | null;
+  replyDelaySec: number;
+}
+
+/**
+ * Điều kiện SQL (lọc thô) của hội thoại "bị bỏ sót": bot đang gắn + bật, ai_mode 'auto', KHÔNG pending_human, không
+ * tạm dừng AI; tin cuối (bỏ system và echo tự động của Page) là của khách, gửi trong AI_MISSED_REPLY_MAX_AGE_HOURS
+ * giờ và cũ hơn AI_MISSED_REPLY_MIN_AGE_MIN phút (tránh lượt đang chờ debounce), chưa nằm trong trigger của lượt AI
+ * nào. listAiMissedReplies kiểm thêm loadPendingMessages + botCanSend.
+ */
+function missedWhere(now: Date) {
+  const nowIso = now.toISOString();
+  return and(
+    eq(conversations.aiMode, 'auto'),
+    eq(chatbots.isActive, true),
+    ne(conversations.status, 'pending_human'),
+    sql`(${conversations.aiPausedUntil} is null or ${conversations.aiPausedUntil} <= ${nowIso}::timestamptz)`,
+    sql`${conversations.lastCustomerMessageAt} > ${nowIso}::timestamptz - make_interval(hours => ${AI_MISSED_REPLY_MAX_AGE_HOURS})`,
+    sql`exists (select 1 from (
+        select m.id, m.sender_type, m.sent_at from ${messages} m
+        where m.conversation_id = ${conversations.id} and m.sender_type <> 'system' and ${notAutomatedEcho(sql`m.raw`)}
+        order by m.sent_at desc, m.id desc
+        limit 1
+      ) l
+      where l.sender_type = 'customer'
+        and l.sent_at > ${nowIso}::timestamptz - make_interval(hours => ${AI_MISSED_REPLY_MAX_AGE_HOURS})
+        and l.sent_at <= ${nowIso}::timestamptz - make_interval(mins => ${AI_MISSED_REPLY_MIN_AGE_MIN})
+        and not exists (select 1 from ${aiRuns} r
+          where r.conversation_id = ${conversations.id} and l.id = any(r.trigger_message_ids)))`,
+  );
+}
+
+/**
+ * Hội thoại khách nhắn mà bot chưa trả lời (bỏ lỡ lúc AI lỗi / công tắc AI chung tắt), cũ trước (khung nhắn tin đóng
+ * sớm hơn). Lọc thô bằng SQL (≤ limit dòng) rồi giữ hội thoại còn tin khách chưa xử lý (loadPendingMessages) và bot
+ * còn gửi được (botCanSend — cửa sổ nhắn tin, kênh đang kết nối). `total` = số dòng lọc thô (kể cả phần vượt limit).
+ */
+export async function listAiMissedReplies(
+  db: DbLike,
+  ctx: InboxContext,
+  now: Date,
+  limit: number = AI_MISSED_REPLY_MAX,
+): Promise<{ items: AiMissedReplyCandidate[]; total: number }> {
+  const rows = await db
+    .select({
+      id: conversations.id,
+      model: chatbots.model,
+      replyDelaySec: chatbots.replyDelaySec,
+      channelType: channelAccounts.type,
+      channelStatus: channelAccounts.status,
+      lastCustomerMessageAt: conversations.lastCustomerMessageAt,
+      windowSource: conversations.windowSource,
+    })
+    .from(conversations)
+    .innerJoin(chatbots, eq(chatbots.id, conversations.chatbotId))
+    .innerJoin(channelAccounts, eq(channelAccounts.id, conversations.channelAccountId))
+    .where(missedWhere(now))
+    .orderBy(asc(conversations.lastCustomerMessageAt), asc(conversations.id))
+    .limit(limit + 1);
+  let total = rows.length;
+  if (rows.length > limit) {
+    rows.length = limit;
+    const [row] = await db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(conversations)
+      .innerJoin(chatbots, eq(chatbots.id, conversations.chatbotId))
+      .where(missedWhere(now));
+    total = row?.n ?? total;
+  }
+  const items: AiMissedReplyCandidate[] = [];
+  for (let i = 0; i < rows.length; i += MISSED_FILTER_CONCURRENCY) {
+    const chunk = rows.slice(i, i + MISSED_FILTER_CONCURRENCY);
+    const keep = await Promise.all(
+      chunk.map(
+        async (r) =>
+          (await loadPendingMessages(db, r.id)).length > 0 && (await botCanSend(db, r, ctx)).allowed,
+      ),
+    );
+    chunk.forEach((r, k) => {
+      if (keep[k]) {
+        items.push({ conversationId: r.id, model: r.model?.trim() || null, replyDelaySec: r.replyDelaySec });
+      }
+    });
+  }
+  return { items, total };
+}
+
+/** Số hội thoại bị bỏ sót (cùng điều kiện listAiMissedReplies, tối đa AI_MISSED_REPLY_MAX). */
+export async function countAiMissedReplies(db: DbLike, ctx: InboxContext, now: Date): Promise<number> {
+  return (await listAiMissedReplies(db, ctx, now)).items.length;
+}
+
+// ---------- Job "ai-auto-resume" (định kỳ + nút "Bật lại AI") ----------
+
 export interface AiOutageResumeOptions {
   limit?: number;
   spacingMs?: number;
   probeTimeoutMs?: number;
+  /**
+   * Nút "Bật lại AI" (API đẩy job với data.manual): bỏ giới hạn chống lặp, xử lý MỌI ứng viên (≤ AI_MANUAL_RESUME_MAX,
+   * một truy vấn), rồi đánh thức bot cho hội thoại "bị bỏ sót" (listAiMissedReplies); chờ khóa thay vì bỏ lượt; ghi
+   * audit AI_MANUAL_RESUME_AUDIT_ACTION.
+   */
+  manual?: boolean;
+  /** Người bấm (audit.userId). */
+  actorUserId?: string | null;
+  /** Chỉ manual: thời gian chờ khóa tối đa / chu kỳ thử lại (mặc định AI_MANUAL_RESUME_LOCK_*). */
+  lockWaitMs?: number;
+  lockPollMs?: number;
+  /** Chỉ manual: tối đa hội thoại bị bỏ sót (mặc định AI_MISSED_REPLY_MAX). */
+  missedLimit?: number;
 }
 
 export interface AiOutageResumeResult {
-  /** true = lượt khác đang chạy (khóa Redis) ⇒ không làm gì. */
+  /** true = lượt khác đang chạy (khóa Redis) ⇒ không làm gì (chỉ lượt định kỳ — lượt bấm tay không bỏ). */
   locked?: true;
   candidates: number;
   /** Model đã gọi thử thành công / thất bại. */
@@ -348,21 +543,57 @@ export interface AiOutageResumeResult {
   /** Ứng viên bị loại khi kiểm lại dưới khóa (nhân viên vừa can thiệp). */
   skipped: number;
   kicked: number;
+  /** Chỉ manual: số hội thoại bị bỏ sót tìm thấy / đã đánh thức bot / bị bỏ vì vượt AI_MISSED_REPLY_MAX. */
+  missed?: number;
+  missedKicked?: number;
+  missedDropped?: number;
+}
+
+type ProbeResult = Awaited<ReturnType<typeof probeLlm>>;
+
+/** SET NX PX; waitMs > 0 ⇒ thử lại mỗi pollMs tới waitMs. true = đã giữ khóa. */
+async function acquireResumeLock(
+  deps: AiRuntimeDeps,
+  token: string,
+  waitMs: number,
+  pollMs: number,
+): Promise<boolean> {
+  const deadline = Date.now() + Math.max(0, waitMs);
+  for (;;) {
+    const acquired = await deps.redis.set(
+      AI_AUTO_RESUME_LOCK_KEY,
+      token,
+      'PX',
+      AI_AUTO_RESUME_LOCK_TTL_MS,
+      'NX',
+    );
+    if (acquired === 'OK') return true;
+    const left = deadline - Date.now();
+    if (left <= 0) return false;
+    await new Promise((resolve) => setTimeout(resolve, Math.min(Math.max(1, pollMs), left)));
+  }
 }
 
 /**
- * Job định kỳ "ai-auto-resume" (AI_AUTO_RESUME_EVERY_MS): khóa Redis (SET NX PX — một lượt trên mọi worker) ⇒ AI
+ * Job "ai-auto-resume".
+ * Định kỳ (AI_AUTO_RESUME_EVERY_MS): khóa Redis (SET NX PX — một lượt trên mọi worker; đang khóa ⇒ { locked }) ⇒ AI
  * tổng tắt ⇒ không làm gì; listAiOutageResumeCandidates (≤ limit) rỗng ⇒ không gọi AI. Có ⇒ gọi thử AI MỘT lần mỗi
  * model (bot.model ?? defaultModel): hỏng ⇒ bỏ các hội thoại của model đó (lượt sau thử lại; log một dòng mỗi lượt);
  * được ⇒ resumeAiOutageHandoff từng hội thoại liền nhau (KHÔNG ngủ trong job — không giữ khe hàng đợi ai-reply); bot
  * được đánh thức thứ i chạy trễ thêm i × spacingMs. Lỗi DB của một hội thoại chỉ log (hội thoại khác vẫn chạy).
  * Idempotent: chạy lại không còn ứng viên.
+ * Bấm tay (`manual` — nút "Bật lại AI"): như trên nhưng bỏ giới hạn chống lặp, lấy tối đa AI_MANUAL_RESUME_MAX ứng
+ * viên; sau đó hội thoại "bị bỏ sót" (listAiMissedReplies, ≤ missedLimit; phần vượt chỉ log) ⇒ lên lịch bot trả lời
+ * (replyDelaySec + tiếp tục giãn cách i × spacingMs), cũng chỉ khi model của bot gọi thử được (mỗi model gọi thử
+ * một lần cho cả lượt). Khóa đang bị giữ ⇒ chờ (AI_MANUAL_RESUME_LOCK_WAIT_MS) rồi chạy luôn không giữ khóa — xem
+ * AI_MANUAL_RESUME_LOCK_WAIT_MS. Xong ⇒ một dòng audit AI_MANUAL_RESUME_AUDIT_ACTION (userId = actorUserId).
  */
 export async function resumeAiOutageHandoffs(
   db: Db,
   deps: AiRuntimeDeps,
   options: AiOutageResumeOptions = {},
 ): Promise<AiOutageResumeResult> {
+  const manual = options.manual === true;
   const result: AiOutageResumeResult = {
     candidates: 0,
     probedOk: [],
@@ -370,41 +601,83 @@ export async function resumeAiOutageHandoffs(
     resumed: 0,
     skipped: 0,
     kicked: 0,
+    ...(manual ? { missed: 0, missedKicked: 0, missedDropped: 0 } : {}),
   };
   const token = `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
-  const acquired = await deps.redis.set(
-    AI_AUTO_RESUME_LOCK_KEY,
+  const holdsLock = await acquireResumeLock(
+    deps,
     token,
-    'PX',
-    AI_AUTO_RESUME_LOCK_TTL_MS,
-    'NX',
+    manual ? (options.lockWaitMs ?? AI_MANUAL_RESUME_LOCK_WAIT_MS) : 0,
+    options.lockPollMs ?? AI_MANUAL_RESUME_LOCK_POLL_MS,
   );
-  if (acquired !== 'OK') return { ...result, locked: true };
+  if (!holdsLock) {
+    if (!manual) return { ...result, locked: true };
+    deps.logger.warn(
+      { lockKey: AI_AUTO_RESUME_LOCK_KEY },
+      'Bật lại AI: lượt khác vẫn giữ khóa sau thời gian chờ — chạy luôn (mỗi hội thoại vẫn kiểm lại dưới khóa dòng)',
+    );
+  }
   try {
-    if (!(await getAiSettings(db)).enabled) return result;
-    const now = deps.ctx.now();
-    const candidates = await listAiOutageResumeCandidates(db, now, options.limit ?? AI_AUTO_RESUME_BATCH);
-    result.candidates = candidates.length;
-    if (candidates.length === 0) return result;
+    await runResume(db, deps, options, manual, result);
+    if (manual) await writeManualResumeAudit(db, deps, options.actorUserId ?? null, result, holdsLock);
+    return result;
+  } finally {
+    if (holdsLock) {
+      try {
+        if ((await deps.redis.get(AI_AUTO_RESUME_LOCK_KEY)) === token)
+          await deps.redis.del(AI_AUTO_RESUME_LOCK_KEY);
+      } catch (error) {
+        deps.logger.warn({ err: errorText(error) }, 'Không gỡ được khóa tự trả lại hội thoại');
+      }
+    }
+  }
+}
 
+async function runResume(
+  db: Db,
+  deps: AiRuntimeDeps,
+  options: AiOutageResumeOptions,
+  manual: boolean,
+  result: AiOutageResumeResult,
+): Promise<void> {
+  if (!(await getAiSettings(db)).enabled) return;
+  const now = deps.ctx.now();
+  const limit = options.limit ?? (manual ? AI_MANUAL_RESUME_MAX : AI_AUTO_RESUME_BATCH);
+  const candidates = await listAiOutageResumeCandidates(db, now, limit, { manual });
+  result.candidates = candidates.length;
+
+  // Gọi thử mỗi model MỘT lần cho cả lượt (dùng chung cho phần handoff và phần bị bỏ sót).
+  const probes = new Map<string, ProbeResult>();
+  const probeErrors: string[] = [];
+  const probe = async (model: string): Promise<boolean> => {
+    let out = probes.get(model);
+    if (!out) {
+      out = await probeLlm(deps.llm, model, options.probeTimeoutMs);
+      probes.set(model, out);
+      if (out.ok) result.probedOk.push(model);
+      else {
+        result.probeFailed.push(model);
+        probeErrors.push(out.error);
+      }
+    }
+    return out.ok;
+  };
+  const modelOf = (m: string | null) => m?.trim() || deps.config.defaultModel;
+  const spacingMs = Math.max(0, options.spacingMs ?? AI_AUTO_RESUME_SPACING_MS);
+  /** Số bot đã đánh thức trong lượt (cả hai phần) × giãn cách. */
+  const offsetMs = () => (result.kicked + (result.missedKicked ?? 0)) * spacingMs;
+
+  if (candidates.length > 0) {
     const byModel = new Map<string, AiOutageResumeCandidate[]>();
     for (const c of candidates) {
-      const model = c.model?.trim() || deps.config.defaultModel;
+      const model = modelOf(c.model);
       byModel.set(model, [...(byModel.get(model) ?? []), c]);
     }
-    const spacingMs = Math.max(0, options.spacingMs ?? AI_AUTO_RESUME_SPACING_MS);
-    const probeErrors: string[] = [];
     for (const [model, list] of byModel) {
-      const probe = await probeLlm(deps.llm, model, options.probeTimeoutMs);
-      if (!probe.ok) {
-        result.probeFailed.push(model);
-        probeErrors.push(probe.error);
-        continue;
-      }
-      result.probedOk.push(model);
+      if (!(await probe(model))) continue;
       for (const c of list) {
         try {
-          const out = await resumeAiOutageHandoff(db, deps, c, result.kicked * spacingMs);
+          const out = await resumeAiOutageHandoff(db, deps, c, offsetMs(), { manual });
           if (out.resumed) {
             result.resumed += 1;
             if (out.kicked) result.kicked += 1;
@@ -420,19 +693,88 @@ export async function resumeAiOutageHandoffs(
         }
       }
     }
-    if (result.probeFailed.length > 0) {
+  }
+
+  if (manual) await kickMissedReplies(db, deps, options, result, probe, modelOf, offsetMs);
+
+  if (result.probeFailed.length > 0) {
+    deps.logger.warn(
+      {
+        models: result.probeFailed,
+        waiting: result.candidates - result.resumed,
+        manual,
+        err: probeErrors[0],
+      },
+      'AI vẫn lỗi — chưa tự trả lại hội thoại cho bot (thử lại lượt sau)',
+    );
+  }
+}
+
+/**
+ * Phần "bị bỏ sót" của lượt bấm tay: lên lịch bot trả lời (độ trễ replyDelaySec + giãn cách tiếp nối phần handoff).
+ * Lỗi lên lịch của từng hội thoại chỉ log.
+ */
+async function kickMissedReplies(
+  db: Db,
+  deps: AiRuntimeDeps,
+  options: AiOutageResumeOptions,
+  result: AiOutageResumeResult,
+  probe: (model: string) => Promise<boolean>,
+  modelOf: (m: string | null) => string,
+  offsetMs: () => number,
+): Promise<void> {
+  const limit = options.missedLimit ?? AI_MISSED_REPLY_MAX;
+  const { items, total } = await listAiMissedReplies(db, deps.ctx, deps.ctx.now(), limit);
+  result.missed = items.length;
+  result.missedKicked = 0;
+  result.missedDropped = Math.max(0, total - limit);
+  if (result.missedDropped > 0) {
+    deps.logger.warn(
+      { limit, total, dropped: result.missedDropped },
+      'Bật lại AI: quá nhiều hội thoại bị bỏ sót — phần vượt giới hạn chưa được đánh thức (bấm lại để xử lý tiếp)',
+    );
+  }
+  for (const m of items) {
+    if (!(await probe(modelOf(m.model)))) continue;
+    try {
+      await deps.scheduler.scheduleReply(m.conversationId, m.replyDelaySec * 1000 + offsetMs());
+      result.missedKicked += 1;
+    } catch (error) {
       deps.logger.warn(
-        { models: result.probeFailed, waiting: result.candidates - result.resumed, err: probeErrors[0] },
-        'AI vẫn lỗi — chưa tự trả lại hội thoại cho bot (thử lại lượt sau)',
+        { conversationId: m.conversationId, err: errorText(error) },
+        'Bật lại AI: không đánh thức được bot cho hội thoại bị bỏ sót',
       );
     }
-    return result;
-  } finally {
-    try {
-      if ((await deps.redis.get(AI_AUTO_RESUME_LOCK_KEY)) === token)
-        await deps.redis.del(AI_AUTO_RESUME_LOCK_KEY);
-    } catch (error) {
-      deps.logger.warn({ err: errorText(error) }, 'Không gỡ được khóa tự trả lại hội thoại');
-    }
+  }
+}
+
+/** Một dòng audit cho lần bấm "Bật lại AI". Lỗi chỉ log (việc đã làm xong). */
+async function writeManualResumeAudit(
+  db: Db,
+  deps: AiRuntimeDeps,
+  actorUserId: string | null,
+  result: AiOutageResumeResult,
+  lockHeld: boolean,
+): Promise<void> {
+  try {
+    await db.insert(auditLogs).values({
+      userId: actorUserId,
+      action: AI_MANUAL_RESUME_AUDIT_ACTION,
+      entity: 'ai',
+      entityId: null,
+      data: {
+        resumed: result.resumed,
+        kicked: result.kicked,
+        probeFailed: result.probeFailed,
+        candidates: result.candidates,
+        skipped: result.skipped,
+        missed: result.missed ?? 0,
+        missedKicked: result.missedKicked ?? 0,
+        missedDropped: result.missedDropped ?? 0,
+        lockHeld,
+      },
+    });
+  } catch (error) {
+    deps.logger.warn({ err: errorText(error) }, 'Bật lại AI: không ghi được audit');
   }
 }

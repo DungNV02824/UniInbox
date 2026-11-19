@@ -13,5 +13,8 @@ export const inboxKeys = {
 /** Danh sách bot cho ô chọn ở khung chat (tiền tố 'chatbots' để trang quản trị invalidate chung). */
 export const chatbotOptionsKey = ['chatbots', 'inbox-options'] as const;
 
+/** Số hội thoại đang chờ vì AI lỗi (nút "Bật lại AI"). */
+export const aiOutageKey = ['ai-outage'] as const;
+
 export const channelsKey = ['channels'] as const;
 export const directoryKey = ['users', 'directory'] as const;

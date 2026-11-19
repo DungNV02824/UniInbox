@@ -7,6 +7,7 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useToast } from '@/components/ui/toast';
+import { aiOutageKey } from '@/lib/inbox-keys';
 import { errorText } from '@/lib/inbox-queries';
 import { settingsApi, settingsKeys } from '@/lib/settings-api';
 import { cn } from '@/lib/utils';
@@ -32,6 +33,8 @@ export function AiCard() {
     },
     onSuccess: (data) => {
       qc.setQueryData(settingsKeys.ai, data);
+      // Dải "AI đang tắt toàn hệ thống" ở hộp thư đổi theo.
+      void qc.invalidateQueries({ queryKey: aiOutageKey });
       toast({
         title: data.enabled ? 'Đã bật AI' : 'Đã tắt toàn bộ AI',
         description: data.enabled

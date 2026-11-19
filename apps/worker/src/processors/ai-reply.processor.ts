@@ -14,6 +14,8 @@ import {
   processHandoffReminderJob,
   reengageGuidanceText,
   resumeAiOutageHandoffs,
+  type AiAutoResumeJobData,
+  type AiOutageResumeOptions,
   type AiOutageResumeResult,
   type AiKickJobData,
   type AiReplyJobData,
@@ -39,8 +41,11 @@ export interface AiReplyHandlers {
   handoffReminder: (data: HandoffReminderJobData) => Promise<boolean>;
   /** Job "kick": lên lịch job "reply" (debounce) nếu bot còn bật; true nếu đã lên lịch. */
   kick: (conversationId: string) => Promise<boolean>;
-  /** Job định kỳ "ai-auto-resume": tự trả lại cho bot các hội thoại "Cần người" vì lỗi AI (resumeAiOutageHandoffs). */
-  autoResume: () => Promise<AiOutageResumeResult>;
+  /**
+   * Job "ai-auto-resume": tự trả lại cho bot các hội thoại "Cần người" vì lỗi AI (resumeAiOutageHandoffs). Định kỳ ⇒
+   * không options; nút "Bật lại AI" ⇒ { manual: true, actorUserId }.
+   */
+  autoResume: (options?: AiOutageResumeOptions) => Promise<AiOutageResumeResult>;
 }
 
 export function aiReplyHandlers(runtime: PipelineRuntime): AiReplyHandlers {
@@ -53,7 +58,7 @@ export function aiReplyHandlers(runtime: PipelineRuntime): AiReplyHandlers {
     // chỉ báo "đang soạn tin" sẽ bật khi job reply thật sự chạy và qua các điều kiện.
     kick: (conversationId) =>
       maybeScheduleChatbotReply(db, ai.deps.redis, ai.deps.scheduler, conversationId, ai.deps.ctx.now()),
-    autoResume: () => resumeAiOutageHandoffs(db, ai.deps),
+    autoResume: (options) => resumeAiOutageHandoffs(db, ai.deps, options),
   };
 }
 
@@ -84,7 +89,7 @@ export async function registerAiReplySchedulers(
 }
 
 type AiQueueJob = Pick<
-  Job<AiReplyJobData | HandoffReminderJobData | AiKickJobData>,
+  Job<AiReplyJobData | HandoffReminderJobData | AiKickJobData | AiAutoResumeJobData>,
   'id' | 'name' | 'data' | 'attemptsMade'
 >;
 
@@ -198,10 +203,26 @@ export function createAiReplyProcessor(handlers: AiReplyHandlers, logger: Logger
         return { scheduled };
       }
       case AI_AUTO_RESUME_JOB_NAME: {
-        if (!handlers.enabled) return null;
-        const result = await handlers.autoResume();
-        // Chỉ log khi có việc (mỗi 3 phút một lượt — không làm ồn log).
-        if (result.candidates > 0) {
+        const data = (job.data ?? {}) as AiAutoResumeJobData;
+        const manual = data.manual === true;
+        const actorUserId =
+          typeof data.actorUserId === 'string' && data.actorUserId ? data.actorUserId : null;
+        if (!handlers.enabled) {
+          if (manual) {
+            logger.warn(
+              { jobId: job.id, actorUserId },
+              'Bật lại AI: chatbot AI tắt (thiếu GEMINI_API_KEY) — bỏ qua',
+            );
+          }
+          return null;
+        }
+        const result = manual
+          ? await handlers.autoResume({ manual: true, actorUserId })
+          : await handlers.autoResume();
+        // Lượt định kỳ chỉ log khi có việc (mỗi 3 phút một lượt — không làm ồn log); lượt bấm tay luôn log.
+        if (manual) {
+          logger.info({ jobId: job.id, actorUserId, ...result }, 'Bật lại AI (nhân viên bấm): đã xử lý');
+        } else if (result.candidates > 0) {
           logger.info({ jobId: job.id, ...result }, 'Quét tự trả lại hội thoại cho bot (lỗi AI)');
         }
         return result;

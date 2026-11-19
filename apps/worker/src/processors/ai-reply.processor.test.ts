@@ -248,6 +248,41 @@ describe('ai-reply processor', () => {
       expect(fields).toMatchObject({ candidates: 2, resumed: 2 });
     });
 
+    it('định kỳ (data rỗng) ⇒ gọi autoResume KHÔNG options', async () => {
+      const h = handlers();
+      await createAiReplyProcessor(h, createSilentLogger())(job(AI_AUTO_RESUME_JOB_NAME, {}));
+      expect(h.autoResume).toHaveBeenCalledWith();
+    });
+
+    it('nút "Bật lại AI" (data.manual) ⇒ truyền manual + actorUserId; luôn log kể cả không có ứng viên', async () => {
+      const logger = createSilentLogger();
+      const info = vi.spyOn(logger, 'info');
+      const h = handlers();
+      await createAiReplyProcessor(
+        h,
+        logger,
+      )(job(AI_AUTO_RESUME_JOB_NAME, { manual: true, actorUserId: 'u1' }));
+      expect(h.autoResume).toHaveBeenCalledWith({ manual: true, actorUserId: 'u1' });
+      expect(info).toHaveBeenCalledOnce();
+      const [fields] = info.mock.calls[0] as unknown as [Record<string, unknown>];
+      expect(fields).toMatchObject({ actorUserId: 'u1', candidates: 0 });
+    });
+
+    it('manual thiếu actorUserId ⇒ actorUserId null; AI tắt ⇒ bỏ qua nhưng log warn', async () => {
+      const h = handlers();
+      await createAiReplyProcessor(h, createSilentLogger())(job(AI_AUTO_RESUME_JOB_NAME, { manual: true }));
+      expect(h.autoResume).toHaveBeenCalledWith({ manual: true, actorUserId: null });
+
+      const logger = createSilentLogger();
+      const warn = vi.spyOn(logger, 'warn');
+      const off = handlers({ enabled: false });
+      expect(
+        await createAiReplyProcessor(off, logger)(job(AI_AUTO_RESUME_JOB_NAME, { manual: true })),
+      ).toBeNull();
+      expect(off.autoResume).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledOnce();
+    });
+
     it('AI tắt (thiếu GEMINI_API_KEY) ⇒ bỏ qua', async () => {
       const h = handlers({ enabled: false });
       expect(

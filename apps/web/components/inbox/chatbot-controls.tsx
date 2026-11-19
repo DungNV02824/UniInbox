@@ -15,8 +15,10 @@ import {
   XCircle,
 } from 'lucide-react';
 import { HANDOFF_REJECT_LABEL, isAiPausedIndefinitely, type ConversationSummary } from '@dezon/shared';
+import { AiOutageResumeButton } from '@/components/inbox/ai-outage';
 import { HandoffRejectDialog } from '@/components/inbox/handoff-reject-dialog';
 import { Button } from '@/components/ui/button';
+import { AI_OUTAGE_RESUME_NOW_LABEL } from '@/lib/ai-outage';
 import { useAuth } from '@/lib/auth';
 import { useHandoffBannerCollapsed } from '@/lib/handoff-banner-pref';
 import { canRejectHandoff } from '@/lib/handoff-reject';
@@ -190,7 +192,7 @@ function AiPausedNotice({ conversation: c }: { conversation: ConversationSummary
  * trả lời khách" (nút nhận chỉ ghi nhận; nút xong đóng yêu cầu, bot vốn đã bật). Nút "Không đạt" (đứng trước, chỉ
  * khi có chatbot gắn — canRejectHandoff) mở hộp thoại gõ lý do ⇒ AI báo khách khéo léo, yêu cầu chuyển người giữ
  * nguyên. Chuyển người vì lỗi phía AI (handoff.autoResume, chưa ai nhận) ⇒ thêm dòng vàng "AI tạm lỗi — bot sẽ tự trả
- * lời lại…"; các nút vẫn dùng được như thường.
+ * lời lại…" + nút "Bật lại AI ngay" (trả mọi hội thoại chờ vì AI lỗi cho bot); các nút vẫn dùng được như thường.
  */
 function HandoffBanner({ conversation: c }: { conversation: ConversationSummary }) {
   const { user } = useAuth();
@@ -262,10 +264,13 @@ function HandoffBanner({ conversation: c }: { conversation: ConversationSummary 
             </p>
           )}
           {!collapsed && outageNote && (
-            <p className="flex items-start gap-1 text-xs text-amber-800">
-              <AlertTriangle className="mt-px size-3.5 shrink-0 text-amber-600" aria-hidden />
-              {outageNote}
-            </p>
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-amber-800">
+              <p className="flex min-w-0 items-start gap-1">
+                <AlertTriangle className="mt-px size-3.5 shrink-0 text-amber-600" aria-hidden />
+                {outageNote}
+              </p>
+              <AiOutageResumeButton label={AI_OUTAGE_RESUME_NOW_LABEL} className="h-6" />
+            </div>
           )}
           {!collapsed && botNote && (
             <p className="flex items-center gap-1 text-xs text-violet-800">
