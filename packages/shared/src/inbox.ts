@@ -123,6 +123,37 @@ export const updateChannelSchema = z
 export type UpdateChannelRequest = z.infer<typeof updateChannelSchema>;
 
 /**
+ * "Áp dụng chatbot mặc định cho hội thoại đang có" của một kênh (admin). Đối tượng: hội thoại của kênh ĐANG GẮN một
+ * chatbot KHÁC chatbot mặc định hiện tại của kênh. Bỏ qua: hội thoại chưa gắn bot (nhân viên có thể đã cố ý tắt),
+ * hội thoại đang "Cần người" (pending_human — đổi bot giữa chừng làm đổi nút banner / chế độ chuyển người).
+ * Chỉ đổi chatbot_id, GIỮ NGUYÊN ai_mode (bot đang tắt ở hội thoại nào thì vẫn tắt) và không gửi tin nào.
+ *
+ * GET /channels/:id/default-chatbot/apply-preview ⇒ ApplyDefaultChatbotPreview
+ * POST /channels/:id/default-chatbot/apply (không body) ⇒ ApplyDefaultChatbotResult — luôn dùng chatbot mặc định
+ * HIỆN TẠI của kênh (đọc lại phía server); kênh chưa có chatbot mặc định ⇒ 400.
+ */
+export interface ApplyDefaultChatbotPreview {
+  /** Chatbot mặc định hiện tại của kênh; null = kênh chưa đặt (khi đó eligible = 0). */
+  chatbotId: string | null;
+  /** Số hội thoại SẼ đổi sang chatbot mặc định. */
+  eligible: number;
+  /** Đã dùng đúng chatbot mặc định (không cần đổi). */
+  alreadyUsing: number;
+  /** Đang "Cần người" — bỏ qua. */
+  skippedPendingHuman: number;
+  /** Chưa gắn bot — bỏ qua. */
+  skippedNoBot: number;
+}
+
+export interface ApplyDefaultChatbotResult {
+  chatbotId: string;
+  /** Số hội thoại đã đổi sang chatbot mặc định. */
+  updated: number;
+  /** Đang "Cần người" — bỏ qua. */
+  skippedPendingHuman: number;
+}
+
+/**
  * DELETE /channels/:id (admin): xóa hẳn kênh đã ngắt kết nối cùng toàn bộ hội thoại, tin nhắn,
  * danh tính khách của kênh. `confirmName` phải trùng tên kênh (displayName) để tránh xóa nhầm.
  */

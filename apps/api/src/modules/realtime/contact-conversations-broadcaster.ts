@@ -16,6 +16,7 @@ export const CONTACT_EMIT_CONCURRENCY = 10;
  * Phát conversation.updated (summary mới, có contact.tags) cho hội thoại của các khách vừa đổi tag — để danh
  * sách hộp thư đang mở cập nhật ngay. Chỉ phát cho tối đa CONTACT_EMIT_LIMIT hội thoại mới nhất, song song tối
  * đa CONTACT_EMIT_CONCURRENCY; phần còn lại client thấy khi tải lại. Lỗi không làm hỏng request.
+ * emitConversations dùng chung cho thao tác hàng loạt khác (vd. áp dụng chatbot mặc định của kênh).
  */
 @Injectable()
 export class ContactConversationsBroadcaster {
@@ -36,6 +37,17 @@ export class ContactConversationsBroadcaster {
       this.logger.warn({ err: error }, 'Không đọc được hội thoại của khách để phát realtime');
       return;
     }
+    const failed = await this.emitConversations(ids);
+    if (failed > 0)
+      this.logger.warn({ failed }, 'Không phát được conversation.updated sau khi đổi tag khách');
+  }
+
+  /**
+   * Phát conversation.updated cho tối đa CONTACT_EMIT_LIMIT id ĐẦU danh sách (người gọi xếp mới nhất trước), song
+   * song tối đa CONTACT_EMIT_CONCURRENCY. Trả số hội thoại không phát được (lỗi đọc summary — không ném).
+   */
+  async emitConversations(conversationIds: readonly string[]): Promise<number> {
+    const ids = conversationIds.slice(0, CONTACT_EMIT_LIMIT);
     let failed = 0;
     let next = 0;
     const workers = Array.from({ length: Math.min(CONTACT_EMIT_CONCURRENCY, ids.length) }, async () => {
@@ -52,7 +64,6 @@ export class ContactConversationsBroadcaster {
       }
     });
     await Promise.all(workers);
-    if (failed > 0)
-      this.logger.warn({ failed }, 'Không phát được conversation.updated sau khi đổi tag khách');
+    return failed;
   }
 }

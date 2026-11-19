@@ -1,15 +1,26 @@
 'use client';
 
-import { useId } from 'react';
+import { useId, useState } from 'react';
 import Link from 'next/link';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Bot, Loader2 } from 'lucide-react';
-import type { ChannelAccountDto, ChatbotSummary } from '@dezon/shared';
+import type { ApplyDefaultChatbotPreview, ChannelAccountDto, ChatbotSummary } from '@dezon/shared';
+import { Button } from '@/components/ui/button';
+import { Dialog } from '@/components/ui/dialog';
 import { NativeSelect } from '@/components/ui/select';
 import { useToast } from '@/components/ui/toast';
+import {
+  APPLY_SAFETY_NOTE,
+  applyButtonLabel,
+  applyPromptText,
+  applyResultToast,
+  applySkippedText,
+  defaultBotChangedToast,
+  shouldOfferApply,
+} from '@/lib/channel-default-bot';
 import { chatbotKeys, chatbotsApi } from '@/lib/chatbots-api';
 import { channelsApi } from '@/lib/inbox-api';
-import { channelsKey } from '@/lib/inbox-keys';
+import { channelsKey, inboxKeys } from '@/lib/inbox-keys';
 import { errorText } from '@/lib/inbox-queries';
 import { InfoTip } from './info-tip';
 
@@ -27,9 +38,17 @@ export function ChannelChatbotSelect({ channel }: { channel: ChannelAccountDto }
   const current = channel.defaultChatbotId ?? null;
   const list: ChatbotSummary[] = bots.data ?? [];
   const known = current === null || list.some((b) => b.id === current);
+  const botName = (botId: string | null) => (botId ? list.find((b) => b.id === botId)?.name : undefined);
+  /** Hộp thoại "Áp dụng cho hội thoại đang có?" — mở sau khi đổi sang một bot mà còn hội thoại dùng bot khác. */
+  const [offer, setOffer] = useState<{ preview: ApplyDefaultChatbotPreview; botName?: string } | null>(null);
 
   const mutation = useMutation({
-    mutationFn: (defaultChatbotId: string | null) => channelsApi.update(channel.id, { defaultChatbotId }),
+    // Đổi xong mới xem trước số hội thoại cũ (lỗi xem trước => bỏ qua, chỉ báo như cũ).
+    mutationFn: async (defaultChatbotId: string | null) => {
+      await channelsApi.update(channel.id, { defaultChatbotId });
+      if (!defaultChatbotId) return null;
+      return channelsApi.applyDefaultChatbotPreview(channel.id).catch(() => null);
+    },
     onMutate: async (defaultChatbotId) => {
       await qc.cancelQueries({ queryKey: channelsKey });
       const prev = qc.getQueryData<ChannelAccountDto[]>(channelsKey);
@@ -46,18 +65,65 @@ export function ChannelChatbotSelect({ channel }: { channel: ChannelAccountDto }
         variant: 'destructive',
       });
     },
-    onSuccess: (_d, botId) => {
-      const name = list.find((b) => b.id === botId)?.name;
-      toast({
-        title: botId
-          ? `Hội thoại mới của "${channel.displayName}" sẽ dùng "${name ?? 'bot'}"`
-          : 'Đã bỏ chatbot mặc định',
-        description: 'Hội thoại cũ không đổi — bật/tắt bot từng hội thoại trong hộp thư.',
-        variant: 'success',
-      });
+    onSuccess: (preview, botId) => {
+      const name = botName(botId);
+      const willOffer = shouldOfferApply(preview);
+      toast({ ...defaultBotChangedToast(channel.displayName, name, botId, willOffer), variant: 'success' });
+      if (willOffer && preview) setOffer({ preview, botName: name });
     },
     onSettled: () => void qc.invalidateQueries({ queryKey: channelsKey }),
   });
+
+  const apply = useMutation({
+    mutationFn: () => channelsApi.applyDefaultChatbot(channel.id),
+    onSuccess: (result) => {
+      // Máy chủ dùng bot mặc định HIỆN TẠI của kênh — lấy tên theo kết quả trả về.
+      toast({ ...applyResultToast(result, botName(result.chatbotId) ?? offer?.botName), variant: 'success' });
+      setOffer(null);
+      void qc.invalidateQueries({ queryKey: inboxKeys.lists() });
+      void qc.invalidateQueries({ queryKey: inboxKeys.details() });
+    },
+    onError: (err) =>
+      toast({
+        title: 'Không áp dụng được cho hội thoại đang có',
+        description: errorText(err),
+        variant: 'destructive',
+      }),
+  });
+
+  function closeOffer(next: boolean) {
+    if (next || apply.isPending) return;
+    setOffer(null);
+    apply.reset();
+  }
+
+  const skipped = offer ? applySkippedText(offer.preview) : null;
+  const offerDialog = (
+    <Dialog
+      open={offer !== null}
+      onOpenChange={closeOffer}
+      title="Áp dụng cho hội thoại đang có?"
+      description={
+        offer ? applyPromptText(channel.displayName, offer.botName, offer.preview.eligible) : undefined
+      }
+      footer={
+        <>
+          <Button variant="outline" onClick={() => closeOffer(false)} disabled={apply.isPending}>
+            Chỉ hội thoại mới
+          </Button>
+          <Button onClick={() => apply.mutate()} disabled={apply.isPending}>
+            {apply.isPending && <Loader2 className="animate-spin" aria-hidden />}
+            {applyButtonLabel(offer?.preview.eligible ?? 0)}
+          </Button>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-1 text-xs text-muted-foreground">
+        {skipped && <p>{skipped}</p>}
+        <p>{APPLY_SAFETY_NOTE}</p>
+      </div>
+    </Dialog>
+  );
 
   if (bots.isSuccess && list.length === 0 && current === null) {
     return (
@@ -83,8 +149,8 @@ export function ChannelChatbotSelect({ channel }: { channel: ChannelAccountDto }
         Chatbot mặc định
       </label>
       <InfoTip label="Chatbot mặc định là gì?">
-        Hội thoại mới của Trang này sẽ tự bật bot đã chọn. Hội thoại đang có không bị ảnh hưởng; nhân viên vẫn
-        bật/tắt bot từng hội thoại trong hộp thư.
+        Hội thoại mới của Trang này sẽ tự bật bot đã chọn. Hội thoại đang có chỉ đổi bot khi bạn đồng ý ở hộp
+        thoại hỏi sau khi chọn; nhân viên vẫn bật/tắt bot từng hội thoại trong hộp thư.
       </InfoTip>
       <div className="flex min-w-0 flex-1 items-center gap-1.5">
         <NativeSelect
@@ -107,6 +173,7 @@ export function ChannelChatbotSelect({ channel }: { channel: ChannelAccountDto }
           <Loader2 className="size-3.5 shrink-0 animate-spin" aria-label="Đang tải" />
         )}
       </div>
+      {offerDialog}
     </div>
   );
 }

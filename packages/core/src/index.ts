@@ -16,6 +16,7 @@ export * from './contacts/capture';
 export * from './project-logs/service';
 export * from './channels/service';
 export * from './channels/delete';
+export * from './channels/default-chatbot';
 export * from './pipeline/types';
 export * from './pipeline/inbound';
 export * from './pipeline/outbound';

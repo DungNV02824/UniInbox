@@ -1,15 +1,20 @@
 import {
+  applyDefaultChatbot,
   connectMessengerPage,
   type CredentialsCipher,
   deleteChannel,
   disconnectChannel,
+  type InboxContext,
   listChannels,
   type MediaStorage,
   type MessengerGraphApi,
+  previewApplyDefaultChatbot,
   updateChannel,
 } from '@dezon/core';
 import type { Db } from '@dezon/db';
 import {
+  type ApplyDefaultChatbotPreview,
+  type ApplyDefaultChatbotResult,
   type AuthUser,
   type ChannelAccountDto,
   type ConnectMessengerPageRequest,
@@ -38,11 +43,12 @@ import { z } from 'zod';
 import { UuidParam } from '../../common/params';
 import { ZodValidationPipe } from '../../common/zod-validation.pipe';
 import { DB } from '../../infra/db/db.constants';
-import { CREDENTIALS_CIPHER } from '../../infra/inbox/inbox.constants';
+import { CREDENTIALS_CIPHER, INBOX_CONTEXT } from '../../infra/inbox/inbox.constants';
 import { MEDIA_STORAGE } from '../../infra/storage/storage.constants';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { MESSENGER_GRAPH_API } from '../connectors/messenger/messenger.constants';
+import { ContactConversationsBroadcaster } from '../realtime/contact-conversations-broadcaster';
 import { ChannelSyncService } from './channel-sync.service';
 
 /** Cho phép gọi không có body (= đồng bộ số ngày mặc định). */
@@ -59,6 +65,8 @@ export class ChannelsController {
     @Inject(MESSENGER_GRAPH_API) private readonly graph: MessengerGraphApi,
     @Inject(MEDIA_STORAGE) private readonly storage: MediaStorage | null,
     private readonly sync: ChannelSyncService,
+    @Inject(INBOX_CONTEXT) private readonly ctx: InboxContext,
+    private readonly conversationsBroadcaster: ContactConversationsBroadcaster,
   ) {}
 
   @Get()
@@ -101,6 +109,38 @@ export class ChannelsController {
     @Body(new ZodValidationPipe(updateChannelSchema)) body: UpdateChannelRequest,
   ): Promise<ChannelAccountDto> {
     return updateChannel(this.db, { actorUserId: user.id }, id, body);
+  }
+
+  /** Xem trước "áp dụng chatbot mặc định cho hội thoại đang có": số hội thoại sẽ đổi / đã dùng đúng bot / bỏ qua. */
+  @Roles('admin')
+  @Get(':id/default-chatbot/apply-preview')
+  applyDefaultChatbotPreview(@UuidParam() id: string): Promise<ApplyDefaultChatbotPreview> {
+    return previewApplyDefaultChatbot(this.db, id);
+  }
+
+  /**
+   * Đổi hội thoại đang gắn bot KHÁC sang chatbot mặc định hiện tại của kênh (bỏ qua "Cần người" và hội thoại chưa
+   * gắn bot; giữ ai_mode). 400 nếu kênh chưa có bot mặc định / bot đang tắt. Phát conversation.updated cho các hội
+   * thoại vừa đổi (tối đa CONTACT_EMIT_LIMIT mới nhất; phần còn lại client thấy khi tải lại danh sách).
+   */
+  @Roles('admin')
+  @Post(':id/default-chatbot/apply')
+  @HttpCode(HttpStatus.OK)
+  async applyDefaultChatbot(
+    @CurrentUser() user: AuthUser,
+    @UuidParam() id: string,
+  ): Promise<ApplyDefaultChatbotResult> {
+    const { updatedConversationIds, ...result } = await applyDefaultChatbot(
+      this.db,
+      { actorUserId: user.id },
+      id,
+      this.ctx,
+    );
+    const failed = await this.conversationsBroadcaster.emitConversations(updatedConversationIds);
+    if (failed > 0) {
+      this.logger.warn({ failed }, 'Không phát được conversation.updated sau khi áp dụng chatbot mặc định');
+    }
+    return result;
   }
 
   @Roles('admin')
