@@ -194,14 +194,59 @@ export async function listAiOutageWaitingModels(db: DbLike, now: Date): Promise<
   return [...new Set(rows.map((r) => r.model?.trim() || null))];
 }
 
+/** Như listAiOutageWaitingModels kèm số hội thoại (không trùng) của từng model (null ⇒ model mặc định). */
+export async function countAiOutageWaitingByModel(
+  db: DbLike,
+  now: Date,
+): Promise<{ model: string | null; conversations: number }[]> {
+  const rows = await db
+    .select({
+      model: chatbots.model,
+      n: sql<number>`count(distinct ${handoffs.conversationId})::int`,
+    })
+    .from(handoffs)
+    .innerJoin(conversations, eq(conversations.id, handoffs.conversationId))
+    .innerJoin(chatbots, eq(chatbots.id, conversations.chatbotId))
+    .where(aiOutageWaitingWhere(now))
+    .groupBy(chatbots.model);
+  const byModel = new Map<string | null, number>();
+  for (const r of rows) {
+    const m = r.model?.trim() || null;
+    byModel.set(m, (byModel.get(m) ?? 0) + Number(r.n));
+  }
+  return [...byModel].map(([model, conversations]) => ({ model, conversations }));
+}
+
+/** Nút "Bật lại AI": số lần gọi thử mỗi model (Gemini quá tải trả 503 lúc có lúc không) và khoảng nghỉ giữa hai lần. */
+export const AI_MANUAL_PROBE_ATTEMPTS = 3;
+export const AI_MANUAL_PROBE_GAP_MS = 1_500;
+
 /**
- * Gọi thử AI một lần (prompt tí hon, tool no_reply, timeout ngắn, không thử lại). Không ném lỗi: model trả gì cũng
- * coi là AI hoạt động (kể cả không gọi tool) — chỉ lỗi gọi (LlmError…) mới là hỏng.
+ * Gọi thử AI (prompt tí hon, tool no_reply, timeout ngắn). `attempts` > 1 ⇒ hỏng thì thử lại sau `gapMs` (nút bấm tay —
+ * lỗi 503 quá tải thường chập chờn); job định kỳ chỉ thử một lần. Không ném lỗi: model trả gì cũng coi là AI hoạt động
+ * (kể cả không gọi tool) — chỉ lỗi gọi (LlmError…) mới là hỏng; trả lỗi của lần cuối.
  */
 export async function probeLlm(
   llm: LlmClient,
   model: string,
   timeoutMs: number = AI_AUTO_RESUME_PROBE_TIMEOUT_MS,
+  attempts = 1,
+  gapMs = AI_MANUAL_PROBE_GAP_MS,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  let error = 'lỗi không rõ';
+  for (let i = 0; i < Math.max(1, attempts); i++) {
+    if (i > 0 && gapMs > 0) await new Promise((r) => setTimeout(r, gapMs));
+    const out = await probeLlmOnce(llm, model, timeoutMs);
+    if (out.ok) return out;
+    error = out.error;
+  }
+  return { ok: false, error };
+}
+
+async function probeLlmOnce(
+  llm: LlmClient,
+  model: string,
+  timeoutMs: number,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   try {
     await llm.generate({
@@ -525,6 +570,10 @@ export interface AiOutageResumeOptions {
   manual?: boolean;
   /** Người bấm (audit.userId). */
   actorUserId?: string | null;
+  /** Chỉ manual: model API vừa gọi thử thành công (không gọi thử lại). */
+  okModels?: string[];
+  /** Khoảng nghỉ giữa các lần gọi thử lại (mặc định AI_MANUAL_PROBE_GAP_MS; test đặt 0). */
+  probeGapMs?: number;
   /** Chỉ manual: thời gian chờ khóa tối đa / chu kỳ thử lại (mặc định AI_MANUAL_RESUME_LOCK_*). */
   lockWaitMs?: number;
   lockPollMs?: number;
@@ -651,8 +700,20 @@ async function runResume(
   const probeErrors: string[] = [];
   const probe = async (model: string): Promise<boolean> => {
     let out = probes.get(model);
+    if (!out && manual && options.okModels?.includes(model)) {
+      // API vừa gọi thử model này thành công lúc bấm nút ⇒ không gọi lại (503 chập chờn có thể làm hỏng lần thử thứ hai).
+      out = { ok: true };
+      probes.set(model, out);
+      result.probedOk.push(model);
+    }
     if (!out) {
-      out = await probeLlm(deps.llm, model, options.probeTimeoutMs);
+      out = await probeLlm(
+        deps.llm,
+        model,
+        options.probeTimeoutMs,
+        manual ? AI_MANUAL_PROBE_ATTEMPTS : 1,
+        options.probeGapMs,
+      );
       probes.set(model, out);
       if (out.ok) result.probedOk.push(model);
       else {

@@ -13,7 +13,7 @@ import {
   withHandoffAcknowledged,
   withHandoffResolved,
 } from '@/lib/inbox-ai';
-import { AI_OUTAGE_REFETCH_MS, aiOutageResumedText } from '@/lib/ai-outage';
+import { AI_OUTAGE_REFETCH_MS, aiOutageResumedText, aiOutageStillDownText } from '@/lib/ai-outage';
 import { aiOutageApi, inboxApi, looksLikeConversation } from '@/lib/inbox-api';
 import { aiOutageKey, chatbotOptionsKey, inboxKeys } from '@/lib/inbox-keys';
 import { errorText } from '@/lib/inbox-queries';
@@ -140,7 +140,13 @@ export function useResumeAiOutage() {
   return useMutation({
     mutationFn: () => aiOutageApi.resume(),
     onSuccess: (data) => {
-      toast({ title: aiOutageResumedText(data), variant: 'success', duration: 7000 });
+      const stillDown = aiOutageStillDownText(data);
+      toast({
+        title: aiOutageResumedText(data),
+        ...(stillDown ? { description: stillDown } : {}),
+        variant: 'success',
+        duration: stillDown ? 15000 : 7000,
+      });
       void qc.invalidateQueries({ queryKey: settingsKeys.ai });
     },
     onSettled: () => {

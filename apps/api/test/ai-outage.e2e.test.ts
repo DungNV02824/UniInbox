@@ -210,7 +210,7 @@ describe('POST /ai/outage/resume', () => {
     const res = await postResume(agentToken);
     expect(res.statusCode).toBe(409);
     expect(res.json<{ message: string }>().message).toBe(
-      'AI vẫn chưa hoạt động lại: hết hạn mức / chưa nạp tiền Gemini',
+      'AI vẫn chưa hoạt động lại: hết hạn mức / chưa nạp tiền Gemini (gemini-2.5-flash)',
     );
     expect(await aiReply.getJob(AI_MANUAL_RESUME_JOB_ID)).toBeUndefined();
   });
@@ -231,7 +231,8 @@ describe('POST /ai/outage/resume', () => {
     expect(llmCalls.map((c) => c.model).sort()).toEqual(['gemini-2.5-flash', 'gemini-2.5-pro']);
     const job = await aiReply.getJob(AI_MANUAL_RESUME_JOB_ID);
     expect(job?.name).toBe(AI_AUTO_RESUME_JOB_NAME);
-    expect(job?.data).toEqual({ manual: true, actorUserId: seed.agentId });
+    expect(job?.data).toMatchObject({ manual: true, actorUserId: seed.agentId });
+    expect([...(job?.data.okModels ?? [])].sort()).toEqual(['gemini-2.5-flash', 'gemini-2.5-pro']);
     expect(job?.opts).toMatchObject({ removeOnComplete: true, removeOnFail: true });
 
     expect((await postResume(agentToken)).statusCode).toBe(200);
@@ -283,6 +284,40 @@ describe('POST /ai/outage/resume', () => {
     expect((await aiReply.getJob(AI_MANUAL_RESUME_JOB_ID))?.data).toEqual({
       manual: true,
       actorUserId: seed.adminId,
+      okModels: ['gemini-2.5-flash'],
+    });
+  });
+
+  it('một model vẫn lỗi (503), model khác chạy ⇒ 200, chỉ model chạy được vào okModels, model lỗi trong stillDown', async () => {
+    const bot = await createBot();
+    const other = await createBot({ model: 'gemini-2.5-pro' });
+    await outageConversation(bot.id);
+    await outageConversation(other.id);
+    llmImpl = async (req) => {
+      if (req.model === 'gemini-2.5-flash') {
+        throw new LlmError('Gemini HTTP 503: This model is currently experiencing high demand', true, 503);
+      }
+      return okResponse(req);
+    };
+    const res = await postResume(agentToken);
+    expect(res.statusCode).toBe(200);
+    expect(res.json<AiOutageResumeResponse>()).toEqual({
+      enabledNow: false,
+      waiting: 2,
+      missed: 0,
+      queued: true,
+      stillDown: [
+        {
+          model: 'gemini-2.5-flash',
+          reason: 'Google đang quá tải model này (lỗi 503) — thử lại sau ít phút hoặc đổi Model của bot',
+          conversations: 1,
+        },
+      ],
+    });
+    // Model lỗi được gọi thử 3 lần, model chạy được 1 lần.
+    expect(llmCalls.filter((c) => c.model === 'gemini-2.5-flash')).toHaveLength(3);
+    expect((await aiReply.getJob(AI_MANUAL_RESUME_JOB_ID))?.data).toMatchObject({
+      okModels: ['gemini-2.5-pro'],
     });
   });
 });

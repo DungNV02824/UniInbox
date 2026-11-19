@@ -573,9 +573,7 @@ export interface LarkGroupDto {
 
 export const LARK_GROUP_LIMITS = { nameMax: 100, maxGroups: 50, maxChatbotsPerGroup: 100 } as const;
 
-const larkWebhookSchema = z
-  .url({ protocol: /^https$/, error: 'Webhook phải là URL https' })
-  .max(500);
+const larkWebhookSchema = z.url({ protocol: /^https$/, error: 'Webhook phải là URL https' }).max(500);
 
 /** POST /settings/lark/groups (admin). `secret` rỗng/null/bỏ qua = không ký. */
 export const createLarkGroupSchema = z.object({
@@ -918,8 +916,9 @@ export const DEFAULT_CAPTURE_CONFIG: CaptureConfig = {
  * Bot trả lời lại các tin khách bị bỏ lỡ (giãn cách, cửa sổ nhắn tin còn mở).
  * GET  /ai/outage         ⇒ AiOutageStatus (mọi nhân viên).
  * POST /ai/outage/resume  ⇒ AiOutageResumeResponse. Thứ tự: thiếu GEMINI_API_KEY ⇒ 503; không có gì để làm (công tắc
- * đang bật, waiting = missed = 0) ⇒ 409; công tắc tắt mà không phải admin ⇒ 403; gọi thử AI hỏng ⇒ 409 kèm lỗi (KHÔNG
- * bật công tắc); được ⇒ bật công tắc (nếu tắt, audit như PUT settings) rồi đẩy job cho worker.
+ * đang bật, waiting = missed = 0) ⇒ 409; công tắc tắt mà không phải admin ⇒ 403; gọi thử từng model (tối đa 3 lần):
+ * MỌI model đều hỏng ⇒ 409 kèm lỗi (KHÔNG bật công tắc); có model chạy được ⇒ bật công tắc (nếu tắt, audit như PUT
+ * settings) rồi đẩy job cho worker — chỉ hội thoại của model chạy được được xử lý; model còn lỗi trả trong stillDown.
  */
 export const AI_MISSED_REPLY_MAX_AGE_HOURS = 24;
 export const AI_MISSED_REPLY_MIN_AGE_MIN = 5;
@@ -940,4 +939,9 @@ export interface AiOutageResumeResponse {
   waiting: number;
   missed: number;
   queued: true;
+  /**
+   * Model gọi thử vẫn lỗi (đã thử AI_MANUAL_PROBE_ATTEMPTS lần): hội thoại của các model này CHƯA được trả lại (job
+   * định kỳ thử tiếp). Model khác chạy được vẫn được xử lý. Rỗng/thiếu ⇒ mọi model đều chạy được.
+   */
+  stillDown?: { model: string; reason: string; conversations: number }[];
 }

@@ -216,8 +216,15 @@ export function createAiReplyProcessor(handlers: AiReplyHandlers, logger: Logger
           }
           return null;
         }
+        const okModels = Array.isArray(data.okModels)
+          ? data.okModels.filter((m): m is string => typeof m === 'string' && m !== '')
+          : [];
         const result = manual
-          ? await handlers.autoResume({ manual: true, actorUserId })
+          ? await handlers.autoResume({
+              manual: true,
+              actorUserId,
+              ...(okModels.length > 0 ? { okModels } : {}),
+            })
           : await handlers.autoResume();
         // Lượt định kỳ chỉ log khi có việc (mỗi 3 phút một lượt — không làm ồn log); lượt bấm tay luôn log.
         if (manual) {

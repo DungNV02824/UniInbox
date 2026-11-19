@@ -32,7 +32,11 @@ describe('describeAiProbeError', () => {
       'Gemini HTTP 400: API key not valid. Please pass a valid API key.',
       'khóa API Gemini không hợp lệ hoặc không đủ quyền',
     ],
-    ['Gemini HTTP 503: The model is overloaded.', 'máy chủ Gemini đang lỗi'],
+    [
+      'Gemini HTTP 503: The model is overloaded.',
+      'Google đang quá tải model này (lỗi 503) — thử lại sau ít phút hoặc đổi Model của bot',
+    ],
+    ['Gemini HTTP 500: Internal error.', 'máy chủ Gemini đang lỗi'],
     ['Lỗi gọi Gemini: fetch failed', 'không kết nối được tới Gemini'],
     ['Gemini HTTP 404: models/abc is not found', 'không tìm thấy model Gemini đang cấu hình'],
   ])('%s', (error, expected) => {

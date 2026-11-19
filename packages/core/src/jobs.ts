@@ -114,6 +114,8 @@ export interface AiAutoResumeJobData {
   manual?: true;
   /** Nhân viên bấm nút (audit). */
   actorUserId?: string;
+  /** Model API vừa gọi thử thành công lúc bấm (worker không gọi thử lại). */
+  okModels?: string[];
 }
 export const AI_AUTO_RESUME_JOB_NAME = 'ai-auto-resume';
 export const AI_AUTO_RESUME_SCHEDULER_ID = 'ai-reply:auto-resume';

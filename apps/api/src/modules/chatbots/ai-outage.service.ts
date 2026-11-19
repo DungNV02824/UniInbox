@@ -1,12 +1,13 @@
 import {
   AI_AUTO_RESUME_JOB_NAME,
+  AI_MANUAL_PROBE_ATTEMPTS,
   AI_MANUAL_RESUME_JOB_ID,
   type AiAutoResumeJobData,
   countAiOutageWaiting,
+  countAiOutageWaitingByModel,
   getAiSettings,
   type InboxContext,
   listAiMissedReplies,
-  listAiOutageWaitingModels,
   type LlmClient,
   probeLlm,
   putAiSettings,
@@ -55,6 +56,9 @@ export function describeAiProbeError(error: string): string {
     return 'khóa API Gemini không hợp lệ hoặc không đủ quyền';
   }
   if (status === 404) return 'không tìm thấy model Gemini đang cấu hình';
+  if (status === 503 || /high demand|overloaded|UNAVAILABLE/i.test(error)) {
+    return 'Google đang quá tải model này (lỗi 503) — thử lại sau ít phút hoặc đổi Model của bot';
+  }
   if (status >= 500) return 'máy chủ Gemini đang lỗi';
   if (/fetch failed|network|socket|ECONN|ETIMEDOUT|ENOTFOUND|EAI_AGAIN/i.test(error)) {
     return 'không kết nối được tới Gemini';
@@ -103,10 +107,10 @@ export class AiOutageService {
     const llm = this.llm;
     if (!llm) throw new ServiceUnavailableException(AI_OUTAGE_NOT_CONFIGURED_MESSAGE);
     const now = this.ctx.now();
-    const [settings, waiting, waitingModels, missed] = await Promise.all([
+    const [settings, waiting, waitingByModel, missed] = await Promise.all([
       getAiSettings(this.db),
       countAiOutageWaiting(this.db, now),
-      listAiOutageWaitingModels(this.db, now),
+      countAiOutageWaitingByModel(this.db, now),
       listAiMissedReplies(this.db, this.ctx, now),
     ]);
     const missedCount = missed.items.length;
@@ -118,22 +122,47 @@ export class AiOutageService {
     }
 
     const defaultModel = this.config.GEMINI_MODEL;
-    const models = [
-      ...new Set([...waitingModels, ...missed.items.map((m) => m.model)].map((m) => m ?? defaultModel)),
-    ];
+    // Số hội thoại (chờ vì lỗi AI + bị bỏ sót) theo model thật sự dùng.
+    const convsByModel = new Map<string, number>();
+    const addConvs = (model: string | null, n: number) => {
+      const m = model ?? defaultModel;
+      convsByModel.set(m, (convsByModel.get(m) ?? 0) + n);
+    };
+    for (const w of waitingByModel) addConvs(w.model, w.conversations);
+    for (const m of missed.items) addConvs(m.model, 1);
+    const models = [...convsByModel.keys()];
     if (models.length === 0) models.push(defaultModel);
+    // Gọi thử từng model tối đa AI_MANUAL_PROBE_ATTEMPTS lần (503 quá tải thường chập chờn).
     const probes = await Promise.all(
-      models.map(async (model) => ({ model, probe: await probeLlm(llm, model) })),
+      models.map(async (model) => ({
+        model,
+        probe: await probeLlm(llm, model, undefined, AI_MANUAL_PROBE_ATTEMPTS),
+      })),
     );
-    const failed = probes.find((p) => !p.probe.ok);
-    if (failed && !failed.probe.ok) {
+    const okModels = probes.filter((p) => p.probe.ok).map((p) => p.model);
+    const stillDown = probes.flatMap((p) =>
+      p.probe.ok
+        ? []
+        : [
+            {
+              model: p.model,
+              reason: describeAiProbeError(p.probe.error),
+              conversations: convsByModel.get(p.model) ?? 0,
+            },
+          ],
+    );
+    if (okModels.length === 0) {
+      const first = probes.find((p) => !p.probe.ok);
       this.logger.warn(
-        { model: failed.model, err: failed.probe.error, userId: user.id },
+        { models, err: first && !first.probe.ok ? first.probe.error : undefined, userId: user.id },
         'Bật lại AI: gọi thử AI vẫn lỗi',
       );
       throw new ConflictException(
-        `${AI_OUTAGE_STILL_DOWN_PREFIX}${describeAiProbeError(failed.probe.error)}`,
+        `${AI_OUTAGE_STILL_DOWN_PREFIX}${stillDown[0]?.reason ?? 'lỗi không rõ'} (${models.join(', ')})`,
       );
+    }
+    if (stillDown.length > 0) {
+      this.logger.warn({ stillDown, okModels, userId: user.id }, 'Bật lại AI: một số model vẫn lỗi');
     }
 
     let enabledNow = false;
@@ -146,7 +175,7 @@ export class AiOutageService {
       await withTimeout(
         this.aiReply.add(
           AI_AUTO_RESUME_JOB_NAME,
-          { manual: true, actorUserId: user.id },
+          { manual: true, actorUserId: user.id, okModels },
           {
             jobId: AI_MANUAL_RESUME_JOB_ID,
             attempts: 1,
@@ -162,6 +191,12 @@ export class AiOutageService {
       throw new ServiceUnavailableException(AI_OUTAGE_ENQUEUE_FAILED_MESSAGE);
     }
     this.logger.log({ userId: user.id, enabledNow, waiting, missed: missedCount }, 'Bật lại AI: đã đẩy job');
-    return { enabledNow, waiting, missed: missedCount, queued: true };
+    return {
+      enabledNow,
+      waiting,
+      missed: missedCount,
+      queued: true,
+      ...(stillDown.length > 0 ? { stillDown } : {}),
+    };
   }
 }

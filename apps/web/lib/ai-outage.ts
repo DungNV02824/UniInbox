@@ -85,11 +85,32 @@ export function aiOutageConfirmText(s: AiOutageView): string {
 
 /** Toast khi máy chủ đã nhận lệnh (số lấy từ phản hồi — đúng lúc bấm). */
 export function aiOutageResumedText(
-  r: Partial<Pick<AiOutageResumeResponse, 'enabledNow' | 'waiting' | 'missed'>> | null | undefined,
+  r:
+    | Partial<Pick<AiOutageResumeResponse, 'enabledNow' | 'waiting' | 'missed' | 'stillDown'>>
+    | null
+    | undefined,
 ): string {
   const head = r?.enabledNow ? 'Đã bật lại AI toàn hệ thống' : 'Đã bật lại AI';
-  const total = count(r?.waiting) + count(r?.missed);
+  const down = r?.stillDown ?? [];
+  const blocked = down.reduce((n, d) => n + count(d.conversations), 0);
+  const total = Math.max(0, count(r?.waiting) + count(r?.missed) - blocked);
   return total > 0 ? `${head} — bot sẽ trả lời ${total} hội thoại trong ít phút` : head;
+}
+
+/**
+ * Model gọi thử vẫn lỗi khi bấm (phản hồi stillDown): "gemini-x (12 hội thoại): máy chủ Gemini đang lỗi" — hội thoại
+ * của các model đó chưa được trả lại, hệ thống tự thử lại mỗi 3 phút. null ⇒ mọi model đều chạy được.
+ */
+export function aiOutageStillDownText(
+  r: Partial<Pick<AiOutageResumeResponse, 'stillDown'>> | null | undefined,
+): string | null {
+  const down = r?.stillDown ?? [];
+  if (down.length === 0) return null;
+  const parts = down.map(
+    (d) =>
+      `${d.model}${count(d.conversations) > 0 ? ` (${count(d.conversations)} hội thoại)` : ''}: ${d.reason}`,
+  );
+  return `Model vẫn lỗi — ${parts.join('; ')}. Hệ thống tự thử lại mỗi 3 phút, hoặc đổi Model của bot sang model khác.`;
 }
 
 /** Lỗi hiện trong hộp thoại: lời máy chủ (vd. "AI vẫn chưa hoạt động lại: …") hoặc câu chung. */

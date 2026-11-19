@@ -7,6 +7,7 @@ import {
   aiOutageErrorText,
   aiOutageMayChange,
   aiOutageResumedText,
+  aiOutageStillDownText,
   aiOutageStripText,
   aiOutageView,
 } from './ai-outage';
@@ -107,5 +108,24 @@ describe('Bật lại AI toàn hệ thống', () => {
     expect(aiOutageMayChange({ handoff: null }, { ...ON, missed: 3 })).toBe(false);
     expect(aiOutageMayChange({ handoff: null }, undefined)).toBe(false);
     expect(aiOutageMayChange({ handoff: { ...HANDOFF, autoResume: false } }, ON)).toBe(false);
+  });
+});
+
+describe('aiOutageStillDownText / stillDown', () => {
+  it('model vẫn lỗi: bớt số hội thoại khỏi toast và nêu tên model', () => {
+    const r = {
+      enabledNow: false,
+      waiting: 23,
+      missed: 0,
+      stillDown: [{ model: 'gemini-3.6-flash', reason: 'máy chủ Gemini đang lỗi', conversations: 21 }],
+    };
+    expect(aiOutageResumedText(r)).toBe('Đã bật lại AI — bot sẽ trả lời 2 hội thoại trong ít phút');
+    expect(aiOutageStillDownText(r)).toBe(
+      'Model vẫn lỗi — gemini-3.6-flash (21 hội thoại): máy chủ Gemini đang lỗi. Hệ thống tự thử lại mỗi 3 phút, hoặc đổi Model của bot sang model khác.',
+    );
+  });
+  it('mọi model chạy được ⇒ null', () => {
+    expect(aiOutageStillDownText({})).toBeNull();
+    expect(aiOutageStillDownText({ stillDown: [] })).toBeNull();
   });
 });
